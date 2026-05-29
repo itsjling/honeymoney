@@ -12,6 +12,7 @@
   "pdf": {
     "parser": "pdfplumber",
     "has_header": true,
+    "amount_default_sign": "expense",
     "split_multiline_rows": true,
     "split_multiline_row_count_columns": [
       "Post date",

@@ -2475,6 +2475,52 @@ class CliBootstrapTest(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("Unsupported needs_review in correction", result.stderr)
 
+    def test_invalid_correction_confidence_fails_startup(self) -> None:
+        for confidence in ["NaN", "1.5", "-0.1", "not-a-number"]:
+            with self.subTest(confidence=confidence):
+                with tempfile.TemporaryDirectory() as tmp:
+                    root = Path(tmp)
+                    input_dir = root / "input"
+                    input_dir.mkdir()
+                    corrections_path = root / "corrections.csv"
+                    corrections_path.write_text(
+                        "\n".join(
+                            [
+                                "transaction_id,category,confidence",
+                                f"txn_example,Other,{confidence}",
+                            ]
+                        ),
+                        encoding="utf-8",
+                    )
+                    config_path = root / "config.json"
+                    config_path.write_text(
+                        json.dumps({"corrections": str(corrections_path)}),
+                        encoding="utf-8",
+                    )
+
+                    result = subprocess.run(
+                        [
+                            sys.executable,
+                            "-m",
+                            "honeymoney.cli",
+                            "--input",
+                            str(input_dir),
+                            "--output",
+                            str(root / "output" / "categorized.csv"),
+                            "--config",
+                            str(config_path),
+                            "--no-interactive",
+                        ],
+                        cwd=Path(__file__).resolve().parents[1],
+                        text=True,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        check=False,
+                    )
+
+                    self.assertEqual(result.returncode, 2)
+                    self.assertIn("Unsupported confidence in correction", result.stderr)
+
     def test_duplicate_suspicions_keep_rule_matched_rows_under_review(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -3540,6 +3586,7 @@ def open(path):
                         "date_formats": ["%d%b"],
                         "statement_year": 2026,
                         "pdf": {
+                            "amount_default_sign": "expense",
                             "split_multiline_rows": True,
                             "split_multiline_row_count_columns": [
                                 "Post date",
@@ -3599,7 +3646,7 @@ def open(path):
 
             self.assertEqual([row["merchant"] for row in rows], ["Coffee Shop", "Taxi"])
             self.assertEqual([row["transaction_date"] for row in rows], ["2026-05-01", "2026-05-02"])
-            self.assertEqual([row["amount_hkd"] for row in rows], ["88.00", "45.00"])
+            self.assertEqual([row["amount_hkd"] for row in rows], ["-88.00", "45.00"])
 
     def test_headerless_pdf_table_can_use_column_indexes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -3918,7 +3965,7 @@ def open(path):
                     {
                         "merchant": "Coffee Shop",
                         "transaction_date": "2026-05-01",
-                        "amount_hkd": "88.00",
+                        "amount_hkd": "-88.00",
                         "original_currency": "HKD",
                         "source_page": "1",
                         "source_row": "2.1",

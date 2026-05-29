@@ -210,7 +210,7 @@ def _validate_correction(
                 f"Unsupported confidence in correction {transaction_id}: "
                 f"{correction['confidence']}"
             )
-        if confidence < Decimal("0") or confidence > Decimal("1"):
+        if not confidence.is_finite() or confidence < Decimal("0") or confidence > Decimal("1"):
             raise ValueError(
                 f"Unsupported confidence in correction {transaction_id}: "
                 f"{correction['confidence']}"
@@ -482,6 +482,7 @@ def _import_csv(
     columns = dict(csv_settings.get("columns", {}))
     columns["debit_values"] = csv_settings.get("debit_values", [])
     columns["credit_values"] = csv_settings.get("credit_values", [])
+    columns["amount_default_sign"] = csv_settings.get("amount_default_sign", "")
     rows: list[dict[str, str]] = []
 
     with csv_path.open(newline="", encoding="utf-8") as fh:
@@ -514,6 +515,7 @@ def _import_pdf(
     columns = dict(pdf_settings.get("columns", {}))
     columns["debit_values"] = pdf_settings.get("debit_values", [])
     columns["credit_values"] = pdf_settings.get("credit_values", [])
+    columns["amount_default_sign"] = pdf_settings.get("amount_default_sign", "")
     has_header = pdf_settings.get("has_header", True)
     required_columns = set(pdf_settings.get("required_columns", []))
     rows: list[dict[str, str]] = []
@@ -869,7 +871,8 @@ def _normalize_date(value: str, profile: dict[str, Any]) -> str:
 def _signed_amount(row: dict[str, str], columns: dict[str, str]) -> Decimal:
     amount_column = columns.get("amount")
     if amount_column:
-        amount = _parse_decimal(_value(row, amount_column))
+        raw_amount = _value(row, amount_column)
+        amount = _parse_decimal(raw_amount)
         indicator = _normalize_identity_part(_value(row, columns.get("credit_debit")))
         debit_values = {
             _normalize_identity_part(value)
@@ -882,6 +885,12 @@ def _signed_amount(row: dict[str, str], columns: dict[str, str]) -> Decimal:
         if indicator and indicator in debit_values:
             return -abs(amount)
         if indicator and indicator in credit_values:
+            return abs(amount)
+        if _amount_has_sign_suffix(raw_amount):
+            return amount
+        if columns.get("amount_default_sign") == "expense":
+            return -abs(amount)
+        if columns.get("amount_default_sign") == "income":
             return abs(amount)
         return amount
 
@@ -930,6 +939,11 @@ def _parse_decimal(value: str) -> Decimal:
         return Decimal(cleaned)
     except InvalidOperation:
         return Decimal("0")
+
+
+def _amount_has_sign_suffix(value: str) -> bool:
+    upper_value = value.replace(",", "").strip().upper()
+    return upper_value.endswith("CR") or upper_value.endswith("DR")
 
 
 def _format_decimal(value: Decimal) -> str:

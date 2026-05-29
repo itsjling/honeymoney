@@ -155,6 +155,8 @@ Some PDFs collapse multiple visible transaction rows into one extracted table ro
 
 For statement tables where each transaction is extracted as a single text cell, `row_regex` can extract named groups such as `transaction_date`, `posting_date`, `description`, and `amount`. Rows that do not match the regex are skipped.
 
+For amount-only credit-card statement tables where ordinary charges are printed as unsigned positive numbers, set `amount_default_sign` to `expense`. Explicit `CR`/`DR` suffixes or configured credit/debit indicators still take precedence.
+
 ## Rules
 
 Rules are applied by priority, with file order as the tie-breaker.
