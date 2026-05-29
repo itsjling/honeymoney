@@ -71,7 +71,7 @@ def validate_rules(rules: list[dict[str, Any]], config: dict[str, Any] | None = 
                 raise ValueError(
                     f"Unsupported confidence in rule {rule_id}: {rule['confidence']}"
                 ) from error
-            if confidence < Decimal("0") or confidence > Decimal("1"):
+            if not confidence.is_finite() or confidence < Decimal("0") or confidence > Decimal("1"):
                 raise ValueError(
                     f"Unsupported confidence in rule {rule_id}: {rule['confidence']}"
                 )

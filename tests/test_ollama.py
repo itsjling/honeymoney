@@ -202,7 +202,20 @@ class OllamaTest(unittest.TestCase):
             self.assertIn("ollama_invalid_response", transaction["flags"])
 
     def test_invalid_ollama_json_shape_is_reported_not_raised(self) -> None:
-        for response in [{"id": "txn_1"}, [None], ["not a categorization"]]:
+        for response in [
+            {"id": "txn_1"},
+            [None],
+            ["not a categorization"],
+            [
+                {
+                    "id": "txn_1",
+                    "category": "Dining",
+                    "owner": "Household",
+                    "confidence": "NaN",
+                    "reason": "Not finite",
+                }
+            ],
+        ]:
             with self.subTest(response=response):
                 class Handler(BaseHTTPRequestHandler):
                     def do_POST(self) -> None:

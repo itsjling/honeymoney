@@ -923,9 +923,9 @@ def _parse_decimal(value: str) -> Decimal:
     cleaned = value.replace(",", "").strip()
     upper_cleaned = cleaned.upper()
     if upper_cleaned.endswith("CR"):
-        return -abs(_parse_decimal(cleaned[:-2]))
-    if upper_cleaned.endswith("DR"):
         return abs(_parse_decimal(cleaned[:-2]))
+    if upper_cleaned.endswith("DR"):
+        return -abs(_parse_decimal(cleaned[:-2]))
     try:
         return Decimal(cleaned)
     except InvalidOperation:

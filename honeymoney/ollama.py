@@ -165,6 +165,7 @@ def _apply_ollama_response(
             or category not in categories
             or owner not in owners
             or not reason
+            or not confidence.is_finite()
             or confidence < Decimal("0")
             or confidence > Decimal("1")
         ):

@@ -96,7 +96,7 @@ class RulesTest(unittest.TestCase):
         )
 
     def test_active_rule_with_invalid_confidence_fails_validation(self) -> None:
-        for confidence in ["not-a-number", 1.5, -0.1]:
+        for confidence in ["not-a-number", "NaN", 1.5, -0.1]:
             with self.subTest(confidence=confidence):
                 with self.assertRaisesRegex(ValueError, "Unsupported confidence"):
                     validate_rules(

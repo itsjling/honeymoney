@@ -3599,7 +3599,7 @@ def open(path):
 
             self.assertEqual([row["merchant"] for row in rows], ["Coffee Shop", "Taxi"])
             self.assertEqual([row["transaction_date"] for row in rows], ["2026-05-01", "2026-05-02"])
-            self.assertEqual([row["amount_hkd"] for row in rows], ["88.00", "-45.00"])
+            self.assertEqual([row["amount_hkd"] for row in rows], ["88.00", "45.00"])
 
     def test_headerless_pdf_table_can_use_column_indexes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -3926,7 +3926,7 @@ def open(path):
                     {
                         "merchant": "Taxi",
                         "transaction_date": "2026-05-02",
-                        "amount_hkd": "-45.00",
+                        "amount_hkd": "45.00",
                         "original_currency": "HKD",
                         "source_page": "1",
                         "source_row": "2.2",
