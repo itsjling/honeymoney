@@ -843,6 +843,102 @@ class CliBootstrapTest(unittest.TestCase):
             self.assertEqual(row["reason"], "Missing exchange rate for JPY")
             self.assertEqual(row["needs_review"], "true")
 
+    def test_csv_file_input_flags_invalid_amount_for_review(self) -> None:
+        for invalid_amount in ["not-a-number", "NaN", "Infinity", "BADCR"]:
+            with self.subTest(invalid_amount=invalid_amount):
+                with tempfile.TemporaryDirectory() as tmp:
+                    root = Path(tmp)
+                    output_dir = root / "output"
+                    csv_path = root / "single.csv"
+                    csv_path.write_text(
+                        "\n".join(
+                            [
+                                "Date,Description,Amount,Currency",
+                                f"2026-05-04,BROKEN AMOUNT,{invalid_amount},HKD",
+                            ]
+                        ),
+                        encoding="utf-8",
+                    )
+
+                    profile_path = root / "profile.json"
+                    profile_path.write_text(
+                        json.dumps(
+                            {
+                                "account_id": "mox_bank_main",
+                                "account": "Mox Main",
+                                "institution": "Mox",
+                                "country": "HK",
+                                "account_currency": "HKD",
+                                "owner": "Household",
+                                "payment_method": "Bank Account",
+                                "csv": {
+                                    "columns": {
+                                        "transaction_date": "Date",
+                                        "description": "Description",
+                                        "amount": "Amount",
+                                        "original_currency": "Currency",
+                                    }
+                                },
+                            }
+                        ),
+                        encoding="utf-8",
+                    )
+
+                    config_path = root / "config.json"
+                    config_path.write_text(
+                        json.dumps(
+                            {
+                                "base_currency": "HKD",
+                                "exchange_rates": {"HKD": 1.0},
+                                "profiles": [str(profile_path)],
+                            }
+                        ),
+                        encoding="utf-8",
+                    )
+
+                    result = subprocess.run(
+                        [
+                            sys.executable,
+                            "-m",
+                            "honeymoney.cli",
+                            "--input",
+                            str(csv_path),
+                            "--output",
+                            str(output_dir / "categorized.csv"),
+                            "--config",
+                            str(config_path),
+                            "--no-interactive",
+                        ],
+                        cwd=Path(__file__).resolve().parents[1],
+                        text=True,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        check=False,
+                    )
+
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    with (output_dir / "categorized.csv").open(
+                        newline="", encoding="utf-8"
+                    ) as fh:
+                        [row] = list(csv.DictReader(fh))
+                    report = json.loads((output_dir / "import_report.json").read_text())
+
+                    self.assertEqual(row["original_amount"], "0.00")
+                    self.assertEqual(row["amount_hkd"], "0.00")
+                    self.assertIn("invalid_amount", row["flags"])
+                    self.assertEqual(row["reason"], "Invalid amount in Amount")
+                    self.assertEqual(row["needs_review"], "true")
+                    self.assertIn(
+                        "invalid_amount",
+                        report["transaction_flags"][row["transaction_id"]],
+                    )
+                    self.assertEqual(
+                        report["transaction_diagnostics"][row["transaction_id"]][
+                            "reason"
+                        ],
+                        "Invalid amount in Amount",
+                    )
+
     def test_csv_profile_can_use_merchant_and_credit_debit_indicator(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -1007,6 +1103,87 @@ class CliBootstrapTest(unittest.TestCase):
             self.assertEqual(row["original_currency"], "USD")
             self.assertEqual(row["posted_amount"], "-78.50")
             self.assertEqual(row["posted_currency"], "HKD")
+            self.assertEqual(row["amount_hkd"], "-78.50")
+
+    def test_posted_amount_uses_credit_debit_indicator_for_sign(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            csv_path = root / "card.csv"
+            csv_path.write_text(
+                "\n".join(
+                    [
+                        "Date,Description,Original Amount,Original Currency,Posted Amount,Posted Currency,Credit / Debit",
+                        "2026-05-01,US MERCHANT,10.00,USD,78.50,HKD,Debit",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            profile_path = root / "profile.json"
+            profile_path.write_text(
+                json.dumps(
+                    {
+                        "account_id": "mox_credit_card",
+                        "account": "Mox Credit Card",
+                        "institution": "Mox",
+                        "country": "HK",
+                        "account_currency": "HKD",
+                        "owner": "Household",
+                        "payment_method": "Credit Card",
+                        "csv": {
+                            "columns": {
+                                "transaction_date": "Date",
+                                "description": "Description",
+                                "amount": "Original Amount",
+                                "original_currency": "Original Currency",
+                                "posted_amount": "Posted Amount",
+                                "posted_currency": "Posted Currency",
+                                "credit_debit": "Credit / Debit",
+                            },
+                            "debit_values": ["Debit"],
+                            "credit_values": ["Credit"],
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            config_path = root / "config.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "profiles": [str(profile_path)],
+                        "exchange_rates": {"HKD": 1.0, "USD": 7.8},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            output_dir = root / "output"
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "honeymoney.cli",
+                    "--input",
+                    str(csv_path),
+                    "--output",
+                    str(output_dir / "categorized.csv"),
+                    "--config",
+                    str(config_path),
+                    "--no-interactive",
+                ],
+                cwd=Path(__file__).resolve().parents[1],
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            with (output_dir / "categorized.csv").open(newline="", encoding="utf-8") as fh:
+                [row] = list(csv.DictReader(fh))
+
+            self.assertEqual(row["original_amount"], "-10.00")
+            self.assertEqual(row["posted_amount"], "-78.50")
             self.assertEqual(row["amount_hkd"], "-78.50")
 
     def test_profile_date_formats_normalize_dates_to_iso(self) -> None:
@@ -3913,28 +4090,15 @@ def open(path):
 
     def test_committed_synthetic_pdf_table_fixtures_cover_bank_and_card_shapes(self) -> None:
         fixtures_dir = Path(__file__).resolve().parent / "fixtures" / "pdf_tables"
+        profiles_dir = Path(__file__).resolve().parents[1] / "examples" / "profiles"
         cases = [
             (
                 "hsbc_hk_bank_pdf.json",
-                {
-                    "id": "hsbc_hk_bank_pdf",
-                    "account_id": "hsbc_hk_checking",
-                    "account": "HSBC HK Checking",
-                    "institution": "HSBC HK",
-                    "country": "HK",
-                    "account_currency": "HKD",
-                    "owner": "Household",
-                    "payment_method": "Bank Account",
-                    "pdf": {
-                        "columns": {
-                            "transaction_date": "Date",
-                            "description": "Description",
-                            "debit": "Debit",
-                            "credit": "Credit",
-                            "original_currency": "Currency",
-                        }
-                    },
-                },
+                json.loads(
+                    (profiles_dir / "hsbc_hk_bank_pdf.json").read_text(
+                        encoding="utf-8"
+                    )
+                ),
                 [
                     {
                         "merchant": "PARKNSHOP",
@@ -3957,7 +4121,7 @@ def open(path):
             (
                 "hsbc_hk_credit_card_pdf.json",
                 json.loads(
-                    (Path(__file__).resolve().parents[1] / "examples" / "profiles" / "hsbc_hk_credit_card_pdf.json").read_text(
+                    (profiles_dir / "hsbc_hk_credit_card_pdf.json").read_text(
                         encoding="utf-8"
                     )
                 ),
@@ -3983,9 +4147,7 @@ def open(path):
             (
                 "mox_bank_pdf.json",
                 json.loads(
-                    (Path(__file__).resolve().parents[1] / "examples" / "profiles" / "mox_bank_pdf.json").read_text(
-                        encoding="utf-8"
-                    )
+                    (profiles_dir / "mox_bank_pdf.json").read_text(encoding="utf-8")
                 ),
                 [
                     {
@@ -4008,31 +4170,11 @@ def open(path):
             ),
             (
                 "mox_credit_card_pdf.json",
-                {
-                    "id": "mox_credit_card_pdf",
-                    "account_id": "mox_credit_card",
-                    "account": "Mox Credit Card",
-                    "institution": "Mox",
-                    "country": "HK",
-                    "account_currency": "HKD",
-                    "owner": "Household",
-                    "payment_method": "Credit Card",
-                    "pdf": {
-                        "columns": {
-                            "transaction_date": "Transaction date",
-                            "posting_date": "Post date",
-                            "description": "Description",
-                            "merchant": "Merchant name",
-                            "amount": "Billing amount",
-                            "original_currency": "Billing currency",
-                            "posted_amount": "Posted amount",
-                            "posted_currency": "Posted currency",
-                            "credit_debit": "Credit / Debit",
-                        },
-                        "debit_values": ["Debit"],
-                        "credit_values": ["Credit"],
-                    },
-                },
+                json.loads(
+                    (profiles_dir / "mox_credit_card_pdf.json").read_text(
+                        encoding="utf-8"
+                    )
+                ),
                 [
                     {
                         "merchant": "DINING PLACE",
@@ -4160,6 +4302,27 @@ def open(path):
                         for field, value in expected.items():
                             self.assertEqual(row[field], value)
                     self.assertTrue(all(row["notes"] == "Imported from PDF" for row in rows))
+
+    def test_example_config_includes_all_requested_pdf_profiles(self) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+        config = json.loads(
+            (repo_root / "examples" / "config.json").read_text(encoding="utf-8")
+        )
+        profile_ids = {
+            json.loads((repo_root / profile_path).read_text(encoding="utf-8"))["id"]
+            for profile_path in config["profiles"]
+            if profile_path.endswith("_pdf.json")
+        }
+
+        self.assertEqual(
+            profile_ids,
+            {
+                "hsbc_hk_bank_pdf",
+                "hsbc_hk_credit_card_pdf",
+                "mox_bank_pdf",
+                "mox_credit_card_pdf",
+            },
+        )
 
     def test_pdf_import_reads_all_tables_on_a_page(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -697,13 +697,16 @@ def _normalized_row(
         _value(source_row, columns.get("original_currency"))
         or profile.get("account_currency", "")
     ).upper()
-    original_amount = _signed_amount(source_row, columns)
+    invalid_amount_columns: list[str] = []
+    original_amount = _signed_amount(source_row, columns, invalid_amount_columns)
     posted_currency = (
         _value(source_row, columns.get("posted_currency"))
         or original_currency
         or profile.get("account_currency", "")
     ).upper()
-    posted_amount = _posted_amount(source_row, columns, original_amount)
+    posted_amount = _posted_amount(
+        source_row, columns, original_amount, invalid_amount_columns
+    )
     amount_hkd, amount_flags, amount_reason = _amount_hkd(
         posted_amount, posted_currency, config
     )
@@ -711,6 +714,12 @@ def _normalized_row(
     flags = ["uncategorized"]
     if amount_flags:
         flags.extend(amount_flags)
+    if invalid_amount_columns:
+        flags.append("invalid_amount")
+        amount_reason = _append_reason(
+            amount_reason,
+            f"Invalid amount in {', '.join(_unique(invalid_amount_columns))}",
+        )
 
     return {
         "transaction_id": "",
@@ -868,34 +877,19 @@ def _normalize_date(value: str, profile: dict[str, Any]) -> str:
     return value
 
 
-def _signed_amount(row: dict[str, str], columns: dict[str, str]) -> Decimal:
+def _signed_amount(
+    row: dict[str, str], columns: dict[str, str], invalid_columns: list[str]
+) -> Decimal:
     amount_column = columns.get("amount")
     if amount_column:
         raw_amount = _value(row, amount_column)
-        amount = _parse_decimal(raw_amount)
-        indicator = _normalize_identity_part(_value(row, columns.get("credit_debit")))
-        debit_values = {
-            _normalize_identity_part(value)
-            for value in columns.get("debit_values", [])
-        }
-        credit_values = {
-            _normalize_identity_part(value)
-            for value in columns.get("credit_values", [])
-        }
-        if indicator and indicator in debit_values:
-            return -abs(amount)
-        if indicator and indicator in credit_values:
-            return abs(amount)
-        if _amount_has_sign_suffix(raw_amount):
-            return amount
-        if columns.get("amount_default_sign") == "expense":
-            return -abs(amount)
-        if columns.get("amount_default_sign") == "income":
-            return abs(amount)
-        return amount
+        amount = _parse_decimal(raw_amount, invalid_columns, amount_column)
+        return _apply_amount_sign(raw_amount, amount, row, columns)
 
-    debit = _parse_decimal(_value(row, columns.get("debit")))
-    credit = _parse_decimal(_value(row, columns.get("credit")))
+    debit_column = columns.get("debit")
+    credit_column = columns.get("credit")
+    debit = _parse_decimal(_value(row, debit_column), invalid_columns, debit_column)
+    credit = _parse_decimal(_value(row, credit_column), invalid_columns, credit_column)
     if debit != Decimal("0"):
         return -abs(debit)
     if credit != Decimal("0"):
@@ -904,12 +898,40 @@ def _signed_amount(row: dict[str, str], columns: dict[str, str]) -> Decimal:
 
 
 def _posted_amount(
-    row: dict[str, str], columns: dict[str, str], fallback: Decimal
+    row: dict[str, str],
+    columns: dict[str, str],
+    fallback: Decimal,
+    invalid_columns: list[str],
 ) -> Decimal:
     posted_column = columns.get("posted_amount")
     if posted_column:
-        return _parse_decimal(_value(row, posted_column))
+        raw_amount = _value(row, posted_column)
+        amount = _parse_decimal(raw_amount, invalid_columns, posted_column)
+        return _apply_amount_sign(raw_amount, amount, row, columns)
     return fallback
+
+
+def _apply_amount_sign(
+    raw_amount: str, amount: Decimal, row: dict[str, str], columns: dict[str, str]
+) -> Decimal:
+    indicator = _normalize_identity_part(_value(row, columns.get("credit_debit")))
+    debit_values = {
+        _normalize_identity_part(value) for value in columns.get("debit_values", [])
+    }
+    credit_values = {
+        _normalize_identity_part(value) for value in columns.get("credit_values", [])
+    }
+    if indicator and indicator in debit_values:
+        return -abs(amount)
+    if indicator and indicator in credit_values:
+        return abs(amount)
+    if _amount_has_sign_suffix(raw_amount):
+        return amount
+    if columns.get("amount_default_sign") == "expense":
+        return -abs(amount)
+    if columns.get("amount_default_sign") == "income":
+        return abs(amount)
+    return amount
 
 
 def _amount_hkd(
@@ -926,19 +948,28 @@ def _amount_hkd(
     return amount * Decimal(str(rate)), [], ""
 
 
-def _parse_decimal(value: str) -> Decimal:
+def _parse_decimal(
+    value: str, invalid_columns: list[str] | None = None, column: str | None = None
+) -> Decimal:
     if not value:
         return Decimal("0")
     cleaned = value.replace(",", "").strip()
     upper_cleaned = cleaned.upper()
     if upper_cleaned.endswith("CR"):
-        return abs(_parse_decimal(cleaned[:-2]))
+        return abs(_parse_decimal(cleaned[:-2], invalid_columns, column))
     if upper_cleaned.endswith("DR"):
-        return -abs(_parse_decimal(cleaned[:-2]))
+        return -abs(_parse_decimal(cleaned[:-2], invalid_columns, column))
     try:
-        return Decimal(cleaned)
+        parsed = Decimal(cleaned)
     except InvalidOperation:
+        if invalid_columns is not None and column:
+            invalid_columns.append(str(column))
         return Decimal("0")
+    if not parsed.is_finite():
+        if invalid_columns is not None and column:
+            invalid_columns.append(str(column))
+        return Decimal("0")
+    return parsed
 
 
 def _amount_has_sign_suffix(value: str) -> bool:
@@ -1059,6 +1090,16 @@ def _append_reason(existing: str, reason: str) -> str:
     if reason in existing:
         return existing
     return f"{existing}; {reason}"
+
+
+def _unique(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    unique_values = []
+    for value in values:
+        if value not in seen:
+            seen.add(value)
+            unique_values.append(value)
+    return unique_values
 
 
 def _remove_flag(existing: str, flag: str) -> str:

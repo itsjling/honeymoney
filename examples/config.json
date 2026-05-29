@@ -43,8 +43,10 @@
   "profiles": [
     "./examples/profiles/hsbc_hk_bank.json",
     "./examples/profiles/mox_credit_card.json",
+    "./examples/profiles/hsbc_hk_bank_pdf.json",
     "./examples/profiles/hsbc_hk_credit_card_pdf.json",
-    "./examples/profiles/mox_bank_pdf.json"
+    "./examples/profiles/mox_bank_pdf.json",
+    "./examples/profiles/mox_credit_card_pdf.json"
   ],
   "profile_mappings": "./profile_mappings.json",
   "rules": "./examples/rules.json",
