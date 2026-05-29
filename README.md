@@ -6,7 +6,7 @@ Local-first household transaction categorization for exported CSV and statement 
 
 Honeymoney is designed to run locally. Transaction processing uses local files and local configuration. Ollama support, when enabled, calls a local Ollama endpoint; cloud AI APIs are not used.
 
-Keep real bank statements and private samples out of git. This repo's `.gitignore` excludes `samples/`.
+Keep real bank statements and private samples out of git. This repo's `.gitignore` excludes `samples/` and `private_samples/`.
 
 ## Current CLI
 
