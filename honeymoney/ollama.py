@@ -6,7 +6,7 @@ import urllib.request
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
-from honeymoney.schema import ALLOWED_CATEGORIES, ALLOWED_OWNERS
+from honeymoney.schema import allowed_categories, allowed_owners
 
 
 def apply_ollama_fallback(
@@ -136,12 +136,20 @@ def _apply_ollama_response(
 
     by_id = {transaction["transaction_id"]: transaction for transaction in unresolved}
     threshold = Decimal(str(config.get("review_confidence_threshold", 0.8)))
+    categories = allowed_categories(config)
+    owners = allowed_owners(config)
     applied = 0
     invalid = 0
+    handled_ids: set[str] = set()
+    seen_known_ids: set[str] = set()
     for categorization in categorizations:
-        transaction = by_id.get(str(categorization.get("id", "")))
+        transaction_id = str(categorization.get("id", ""))
+        transaction = by_id.get(transaction_id)
+        if transaction is not None:
+            seen_known_ids.add(transaction_id)
         category = str(categorization.get("category", ""))
         owner = str(categorization.get("owner", ""))
+        reason = str(categorization.get("reason", ""))
         try:
             confidence = Decimal(str(categorization.get("confidence", "")))
         except InvalidOperation:
@@ -149,18 +157,21 @@ def _apply_ollama_response(
 
         if (
             transaction is None
-            or category not in ALLOWED_CATEGORIES
-            or owner not in ALLOWED_OWNERS
+            or transaction_id in handled_ids
+            or category not in categories
+            or owner not in owners
+            or not reason
             or confidence < Decimal("0")
             or confidence > Decimal("1")
         ):
             invalid += 1
             continue
 
+        handled_ids.add(transaction_id)
         transaction["category"] = category
         transaction["owner"] = owner
         transaction["confidence"] = _format_decimal(confidence)
-        transaction["reason"] = str(categorization.get("reason", "Ollama categorization"))
+        transaction["reason"] = reason
         transaction["flags"] = _remove_flag(transaction["flags"], "uncategorized")
         transaction["flags"] = _append_flag(transaction["flags"], "ollama_categorized")
         transaction["needs_review"] = (
@@ -170,6 +181,7 @@ def _apply_ollama_response(
         )
         applied += 1
 
+    invalid += len(set(by_id) - handled_ids - seen_known_ids)
     return applied, invalid
 
 

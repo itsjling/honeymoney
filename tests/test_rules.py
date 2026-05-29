@@ -79,6 +79,22 @@ class RulesTest(unittest.TestCase):
                 ]
             )
 
+    def test_config_can_extend_category_and_owner_vocabulary(self) -> None:
+        validate_rules(
+            [
+                {
+                    "id": "pet-supplies",
+                    "enabled": True,
+                    "match_type": "keyword",
+                    "patterns": ["PET"],
+                    "fields": ["merchant"],
+                    "category": "Pet Care",
+                    "owner": "Family",
+                }
+            ],
+            {"categories": ["Unknown", "Pet Care"], "owners": ["Household", "Family"]},
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -102,3 +102,21 @@ ALLOWED_PAYMENT_METHODS = {
     "Brokerage",
     "Unknown",
 }
+
+
+def allowed_categories(config: dict | None = None) -> set[str]:
+    if config and config.get("categories"):
+        return {str(category) for category in config["categories"]}
+    return set(ALLOWED_CATEGORIES)
+
+
+def allowed_owners(config: dict | None = None) -> set[str]:
+    if config and config.get("owners"):
+        return {str(owner) for owner in config["owners"]}
+    return set(ALLOWED_OWNERS)
+
+
+def allowed_payment_methods(config: dict | None = None) -> set[str]:
+    if config and config.get("payment_methods"):
+        return {str(method) for method in config["payment_methods"]}
+    return set(ALLOWED_PAYMENT_METHODS)

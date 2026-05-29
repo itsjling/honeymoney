@@ -1923,6 +1923,104 @@ class CliBootstrapTest(unittest.TestCase):
                 result.stderr,
             )
 
+    def test_configured_taxonomy_allows_custom_profile_owner_and_rule_category(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            input_dir = root / "input"
+            output_dir = root / "output"
+            input_dir.mkdir()
+            (input_dir / "transactions.csv").write_text(
+                "\n".join(
+                    [
+                        "Date,Description,Amount,Currency",
+                        "2026-05-01,PET SHOP,-88.00,HKD",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            profile_path = root / "profile.json"
+            profile_path.write_text(
+                json.dumps(
+                    {
+                        "account_id": "family_card",
+                        "account": "Family Card",
+                        "institution": "Test Bank",
+                        "country": "HK",
+                        "account_currency": "HKD",
+                        "owner": "Family",
+                        "payment_method": "Credit Card",
+                        "csv": {
+                            "columns": {
+                                "transaction_date": "Date",
+                                "description": "Description",
+                                "amount": "Amount",
+                                "original_currency": "Currency",
+                            }
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            rules_path = root / "rules.json"
+            rules_path.write_text(
+                json.dumps(
+                    {
+                        "rules": [
+                            {
+                                "id": "pet-care",
+                                "enabled": True,
+                                "match_type": "keyword",
+                                "patterns": ["PET"],
+                                "fields": ["merchant"],
+                                "category": "Pet Care",
+                                "confidence": 0.96,
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            config_path = root / "config.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "categories": ["Unknown", "Other", "Pet Care"],
+                        "owners": ["Household", "Family"],
+                        "profiles": [str(profile_path)],
+                        "rules": str(rules_path),
+                        "exchange_rates": {"HKD": 1.0},
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "honeymoney.cli",
+                    "--input",
+                    str(input_dir),
+                    "--output",
+                    str(output_dir / "categorized.csv"),
+                    "--config",
+                    str(config_path),
+                    "--no-interactive",
+                ],
+                cwd=Path(__file__).resolve().parents[1],
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            with (output_dir / "categorized.csv").open(newline="", encoding="utf-8") as fh:
+                [row] = list(csv.DictReader(fh))
+
+            self.assertEqual(row["category"], "Pet Care")
+            self.assertEqual(row["owner"], "Family")
+
     def test_disabled_invalid_rule_does_not_fail_startup(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -2586,6 +2684,108 @@ class CliBootstrapTest(unittest.TestCase):
                 self.assertIn("duplicate_suspected", row["flags"])
                 self.assertEqual(row["needs_review"], "true")
 
+    def test_duplicate_detection_flags_cross_account_matches(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            input_dir = root / "input"
+            profiles_dir = root / "profiles"
+            input_dir.mkdir()
+            profiles_dir.mkdir()
+            for filename in ["bank.csv", "card.csv"]:
+                (input_dir / filename).write_text(
+                    "\n".join(
+                        [
+                            "Date,Description,Amount,Currency",
+                            "2026-05-01,PARKNSHOP,-120.50,HKD",
+                        ]
+                    ),
+                    encoding="utf-8",
+                )
+            profile_paths = []
+            for profile_id, account in [
+                ("hsbc_hk_checking", "HSBC HK Checking"),
+                ("hsbc_hk_card", "HSBC HK Credit Card"),
+            ]:
+                profile_path = profiles_dir / f"{profile_id}.json"
+                profile_path.write_text(
+                    json.dumps(
+                        {
+                            "id": profile_id,
+                            "account_id": profile_id,
+                            "account": account,
+                            "institution": "HSBC HK",
+                            "country": "HK",
+                            "account_currency": "HKD",
+                            "owner": "Household",
+                            "payment_method": "Bank Account",
+                            "csv": {
+                                "columns": {
+                                    "transaction_date": "Date",
+                                    "description": "Description",
+                                    "amount": "Amount",
+                                    "original_currency": "Currency",
+                                }
+                            },
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                profile_paths.append(str(profile_path))
+            mapping_path = root / "profile_mappings.json"
+            mapping_path.write_text(
+                json.dumps(
+                    {
+                        "filename_patterns": [
+                            {"pattern": "bank.csv", "profile": "hsbc_hk_checking"},
+                            {"pattern": "card.csv", "profile": "hsbc_hk_card"},
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            config_path = root / "config.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "profiles": profile_paths,
+                        "profile_mappings": str(mapping_path),
+                        "exchange_rates": {"HKD": 1.0},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            output_dir = root / "output"
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "honeymoney.cli",
+                    "--input",
+                    str(input_dir),
+                    "--output",
+                    str(output_dir / "categorized.csv"),
+                    "--config",
+                    str(config_path),
+                    "--no-interactive",
+                ],
+                cwd=Path(__file__).resolve().parents[1],
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            with (output_dir / "categorized.csv").open(newline="", encoding="utf-8") as fh:
+                rows = list(csv.DictReader(fh))
+
+            self.assertEqual({row["account_id"] for row in rows}, {"hsbc_hk_checking", "hsbc_hk_card"})
+            self.assertNotEqual(rows[0]["transaction_id"], rows[1]["transaction_id"])
+            for row in rows:
+                self.assertIn("duplicate_suspected", row["flags"])
+                self.assertNotIn("duplicate_identity_collision", row["flags"])
+
     def test_unavailable_ollama_does_not_fail_run(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -3019,7 +3219,10 @@ class Pdf:
 
     def __enter__(self):
         data = json.loads(builtins.open(self.path, encoding="utf-8").read())
-        self.pages = [Page(table) for table in data["pages"]]
+        self.pages = [
+            Page(page.get("table") if isinstance(page, dict) else page)
+            for page in data["pages"]
+        ]
         return self
 
     def __exit__(self, exc_type, exc, tb):
@@ -3117,6 +3320,7 @@ def open(path):
             self.assertEqual(row["source_file"], "statement.pdf")
             self.assertEqual(row["source_page"], "1")
             self.assertEqual(row["source_row"], "2")
+            self.assertEqual(row["notes"], "Imported from PDF")
             self.assertEqual(report["files"][0]["status"], "processed")
             self.assertEqual(report["files"][0]["parser"], "pdfplumber")
 
@@ -3146,7 +3350,10 @@ class Pdf:
 
     def __enter__(self):
         data = json.loads(builtins.open(self.path, encoding="utf-8").read())
-        self.pages = [Page(table) for table in data["pages"]]
+        self.pages = [
+            Page(page.get("table") if isinstance(page, dict) else page)
+            for page in data["pages"]
+        ]
         return self
 
     def __exit__(self, exc_type, exc, tb):
@@ -3284,7 +3491,10 @@ class Pdf:
 
     def __enter__(self):
         data = json.loads(builtins.open(self.path, encoding="utf-8").read())
-        self.pages = [Page(table) for table in data["pages"]]
+        self.pages = [
+            Page(page.get("table") if isinstance(page, dict) else page)
+            for page in data["pages"]
+        ]
         return self
 
     def __exit__(self, exc_type, exc, tb):
@@ -3417,7 +3627,10 @@ class Pdf:
 
     def __enter__(self):
         data = json.loads(builtins.open(self.path, encoding="utf-8").read())
-        self.pages = [Page(table) for table in data["pages"]]
+        self.pages = [
+            Page(page.get("table") if isinstance(page, dict) else page)
+            for page in data["pages"]
+        ]
         return self
 
     def __exit__(self, exc_type, exc, tb):
@@ -3543,7 +3756,10 @@ class Pdf:
 
     def __enter__(self):
         data = json.loads(builtins.open(self.path, encoding="utf-8").read())
-        self.pages = [Page(table) for table in data["pages"]]
+        self.pages = [
+            Page(page.get("table") if isinstance(page, dict) else page)
+            for page in data["pages"]
+        ]
         return self
 
     def __exit__(self, exc_type, exc, tb):
@@ -3647,6 +3863,190 @@ def open(path):
             self.assertEqual([row["merchant"] for row in rows], ["Coffee Shop", "Refund"])
             self.assertEqual([row["transaction_date"] for row in rows], ["2026-04-01", "2026-04-02"])
             self.assertEqual([row["amount_hkd"] for row in rows], ["88.00", "-12.00"])
+
+    def test_committed_synthetic_pdf_table_fixtures_cover_bank_and_card_shapes(self) -> None:
+        fixtures_dir = Path(__file__).resolve().parent / "fixtures" / "pdf_tables"
+        cases = [
+            (
+                "hsbc_hk_bank_pdf.json",
+                {
+                    "id": "hsbc_hk_bank_pdf",
+                    "account_id": "hsbc_hk_checking",
+                    "account": "HSBC HK Checking",
+                    "institution": "HSBC HK",
+                    "country": "HK",
+                    "account_currency": "HKD",
+                    "owner": "Household",
+                    "payment_method": "Bank Account",
+                    "pdf": {
+                        "columns": {
+                            "transaction_date": "Date",
+                            "description": "Description",
+                            "debit": "Debit",
+                            "credit": "Credit",
+                            "original_currency": "Currency",
+                        }
+                    },
+                },
+                2,
+                ["PARKNSHOP", "SALARY"],
+            ),
+            (
+                "hsbc_hk_credit_card_pdf.json",
+                json.loads(
+                    (Path(__file__).resolve().parents[1] / "examples" / "profiles" / "hsbc_hk_credit_card_pdf.json").read_text(
+                        encoding="utf-8"
+                    )
+                ),
+                2,
+                ["Coffee Shop", "Taxi"],
+            ),
+            (
+                "mox_bank_pdf.json",
+                json.loads(
+                    (Path(__file__).resolve().parents[1] / "examples" / "profiles" / "mox_bank_pdf.json").read_text(
+                        encoding="utf-8"
+                    )
+                ),
+                2,
+                ["Coffee Shop", "Refund"],
+            ),
+            (
+                "mox_credit_card_pdf.json",
+                {
+                    "id": "mox_credit_card_pdf",
+                    "account_id": "mox_credit_card",
+                    "account": "Mox Credit Card",
+                    "institution": "Mox",
+                    "country": "HK",
+                    "account_currency": "HKD",
+                    "owner": "Household",
+                    "payment_method": "Credit Card",
+                    "pdf": {
+                        "columns": {
+                            "transaction_date": "Transaction date",
+                            "posting_date": "Post date",
+                            "description": "Description",
+                            "merchant": "Merchant name",
+                            "amount": "Billing amount",
+                            "original_currency": "Billing currency",
+                            "credit_debit": "Credit / Debit",
+                        },
+                        "debit_values": ["Debit"],
+                        "credit_values": ["Credit"],
+                    },
+                },
+                2,
+                ["DINING PLACE", "SHOP REFUND"],
+            ),
+        ]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            fake_modules = root / "fake_modules"
+            fake_modules.mkdir()
+            (fake_modules / "pdfplumber.py").write_text(
+                """
+import builtins
+import json
+
+
+def is_table(value):
+    return bool(value and isinstance(value[0], list) and (not value[0] or not isinstance(value[0][0], list)))
+
+
+class Page:
+    def __init__(self, payload):
+        self._payload = payload
+
+    def extract_table(self):
+        tables = self.extract_tables()
+        return tables[0] if tables else None
+
+    def extract_tables(self):
+        if not self._payload:
+            return []
+        return [self._payload] if is_table(self._payload) else self._payload
+
+
+class Pdf:
+    def __init__(self, path):
+        self.path = path
+        self.pages = []
+
+    def __enter__(self):
+        data = json.loads(builtins.open(self.path, encoding="utf-8").read())
+        self.pages = [Page(page) for page in data["pages"]]
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+
+def open(path):
+    return Pdf(path)
+""",
+                encoding="utf-8",
+            )
+            env = dict(**os.environ)
+            env["PYTHONPATH"] = f"{fake_modules}:{Path(__file__).resolve().parents[1]}"
+
+            for fixture_name, profile, expected_count, expected_merchants in cases:
+                with self.subTest(fixture=fixture_name):
+                    run_dir = root / fixture_name.replace(".json", "")
+                    run_dir.mkdir()
+                    pdf_path = run_dir / "statement.pdf"
+                    pdf_path.write_text(
+                        (fixtures_dir / fixture_name).read_text(encoding="utf-8"),
+                        encoding="utf-8",
+                    )
+                    profile_path = run_dir / "profile.json"
+                    profile_path.write_text(json.dumps(profile), encoding="utf-8")
+                    config_path = run_dir / "config.json"
+                    config_path.write_text(
+                        json.dumps(
+                            {
+                                "profiles": [str(profile_path)],
+                                "exchange_rates": {"HKD": 1.0},
+                                "pdf": {"enabled": True, "parser": "pdfplumber"},
+                            }
+                        ),
+                        encoding="utf-8",
+                    )
+                    output_dir = run_dir / "output"
+
+                    result = subprocess.run(
+                        [
+                            sys.executable,
+                            "-m",
+                            "honeymoney.cli",
+                            "--input",
+                            str(pdf_path),
+                            "--output",
+                            str(output_dir / "categorized.csv"),
+                            "--config",
+                            str(config_path),
+                            "--no-interactive",
+                        ],
+                        cwd=Path(__file__).resolve().parents[1],
+                        env=env,
+                        text=True,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        check=False,
+                    )
+
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    with (output_dir / "categorized.csv").open(
+                        newline="", encoding="utf-8"
+                    ) as fh:
+                        rows = list(csv.DictReader(fh))
+
+                    self.assertEqual(len(rows), expected_count)
+                    self.assertEqual(
+                        [row["merchant"] for row in rows], expected_merchants
+                    )
+                    self.assertTrue(all(row["notes"] == "Imported from PDF" for row in rows))
 
     def test_pdf_import_reads_all_tables_on_a_page(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -3933,7 +4333,10 @@ class Pdf:
 
     def __enter__(self):
         data = json.loads(builtins.open(self.path, encoding="utf-8").read())
-        self.pages = [Page(table) for table in data["pages"]]
+        self.pages = [
+            Page(page.get("table") if isinstance(page, dict) else page)
+            for page in data["pages"]
+        ]
         return self
 
     def __exit__(self, exc_type, exc, tb):
@@ -3945,8 +4348,47 @@ def open(path):
 """,
                 encoding="utf-8",
             )
+            (fake_modules / "fitz.py").write_text(
+                """
+import builtins
+import json
+
+
+class Page:
+    def __init__(self, text):
+        self._text = text
+
+    def get_text(self):
+        return self._text
+
+
+class Pdf:
+    def __init__(self, path):
+        self.path = path
+        self.pages = []
+
+    def __enter__(self):
+        data = json.loads(builtins.open(self.path, encoding="utf-8").read())
+        self.pages = [Page(page.get("text", "")) for page in data["pages"]]
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+    def __getitem__(self, index):
+        return self.pages[index]
+
+
+def open(path):
+    return Pdf(path)
+""",
+                encoding="utf-8",
+            )
             pdf_path = root / "statement.pdf"
-            pdf_path.write_text(json.dumps({"pages": [None]}), encoding="utf-8")
+            pdf_path.write_text(
+                json.dumps({"pages": [{"table": None, "text": "debug text"}]}),
+                encoding="utf-8",
+            )
             profile_path = root / "profile.json"
             profile_path.write_text(
                 json.dumps(
@@ -4013,6 +4455,10 @@ def open(path):
             self.assertEqual(report["files"][0]["status"], "processed")
             self.assertEqual(report["files"][0]["transaction_count"], "0")
             self.assertIn("No table found on statement.pdf page 1", report["warnings"])
+            self.assertIn(
+                "PyMuPDF text fallback found 10 characters on statement.pdf page 1",
+                report["warnings"],
+            )
 
     def test_strict_mode_returns_nonzero_when_import_has_warnings(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -4042,6 +4488,313 @@ def open(path):
 
             self.assertEqual(result.returncode, 1)
             self.assertTrue((output_dir / "import_report.json").exists())
+
+    def test_mixed_v1_acceptance_path_uses_csv_pdf_rules_corrections_duplicates_and_ollama(self) -> None:
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self) -> None:
+                length = int(self.headers["Content-Length"])
+                request_body = json.loads(self.rfile.read(length))
+                prompt = json.loads(request_body["prompt"])
+                body = {
+                    "response": json.dumps(
+                        [
+                            {
+                                "id": transaction["id"],
+                                "category": "Dining",
+                                "owner": "Household",
+                                "confidence": 0.91,
+                                "reason": "Local model matched dining-like transaction",
+                            }
+                            for transaction in prompt["transactions"]
+                        ]
+                    )
+                }
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(json.dumps(body).encode("utf-8"))
+
+            def log_message(self, format: str, *args: object) -> None:
+                return
+
+        server = HTTPServer(("127.0.0.1", 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        self.addCleanup(server.shutdown)
+        self.addCleanup(server.server_close)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo_root = Path(__file__).resolve().parents[1]
+            fixture_path = repo_root / "tests" / "fixtures" / "pdf_tables" / "hsbc_hk_bank_pdf.json"
+            fake_modules = root / "fake_modules"
+            input_dir = root / "input"
+            profiles_dir = root / "profiles"
+            fake_modules.mkdir()
+            input_dir.mkdir()
+            profiles_dir.mkdir()
+            (fake_modules / "pdfplumber.py").write_text(
+                """
+import builtins
+import json
+
+
+def is_table(value):
+    return bool(value and isinstance(value[0], list) and (not value[0] or not isinstance(value[0][0], list)))
+
+
+class Page:
+    def __init__(self, payload):
+        self._payload = payload
+
+    def extract_table(self):
+        tables = self.extract_tables()
+        return tables[0] if tables else None
+
+    def extract_tables(self):
+        if not self._payload:
+            return []
+        return [self._payload] if is_table(self._payload) else self._payload
+
+
+class Pdf:
+    def __init__(self, path):
+        self.path = path
+        self.pages = []
+
+    def __enter__(self):
+        data = json.loads(builtins.open(self.path, encoding="utf-8").read())
+        self.pages = [Page(page) for page in data["pages"]]
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+
+def open(path):
+    return Pdf(path)
+""",
+                encoding="utf-8",
+            )
+            (input_dir / "transactions.csv").write_text(
+                "\n".join(
+                    [
+                        "Date,Description,Amount,Currency",
+                        "2026-05-01,PARKNSHOP,-120.50,HKD",
+                        "2026-05-03,MYSTERY OLLAMA,-88.00,HKD",
+                        "2026-05-04,MANUAL SHOP,-55.00,HKD",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            (input_dir / "statement.pdf").write_text(
+                fixture_path.read_text(encoding="utf-8"),
+                encoding="utf-8",
+            )
+            csv_profile = profiles_dir / "hsbc_hk_bank.json"
+            pdf_profile = profiles_dir / "hsbc_hk_bank_pdf.json"
+            csv_profile.write_text(
+                json.dumps(
+                    {
+                        "id": "hsbc_hk_bank",
+                        "account_id": "hsbc_hk_checking",
+                        "account": "HSBC HK Checking",
+                        "institution": "HSBC HK",
+                        "country": "HK",
+                        "account_currency": "HKD",
+                        "owner": "Household",
+                        "payment_method": "Bank Account",
+                        "csv": {
+                            "columns": {
+                                "transaction_date": "Date",
+                                "description": "Description",
+                                "amount": "Amount",
+                                "original_currency": "Currency",
+                            }
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            pdf_profile.write_text(
+                json.dumps(
+                    {
+                        "id": "hsbc_hk_bank_pdf",
+                        "account_id": "hsbc_hk_checking",
+                        "account": "HSBC HK Checking",
+                        "institution": "HSBC HK",
+                        "country": "HK",
+                        "account_currency": "HKD",
+                        "owner": "Household",
+                        "payment_method": "Bank Account",
+                        "pdf": {
+                            "columns": {
+                                "transaction_date": "Date",
+                                "description": "Description",
+                                "debit": "Debit",
+                                "credit": "Credit",
+                                "original_currency": "Currency",
+                            }
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            rules_path = root / "rules.json"
+            rules_path.write_text(
+                json.dumps(
+                    {
+                        "rules": [
+                            {
+                                "id": "parksnshop-groceries",
+                                "enabled": True,
+                                "match_type": "keyword",
+                                "patterns": ["PARKNSHOP"],
+                                "fields": ["merchant"],
+                                "category": "Groceries",
+                                "confidence": 0.98,
+                            },
+                            {
+                                "id": "salary-income",
+                                "enabled": True,
+                                "match_type": "keyword",
+                                "patterns": ["SALARY"],
+                                "fields": ["merchant"],
+                                "category": "Income",
+                                "confidence": 0.99,
+                            },
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            mapping_path = root / "profile_mappings.json"
+            mapping_path.write_text(
+                json.dumps(
+                    {
+                        "filename_patterns": [
+                            {"pattern": "transactions.csv", "profile": "hsbc_hk_bank"},
+                            {"pattern": "statement.pdf", "profile": "hsbc_hk_bank_pdf"},
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            config = {
+                "profiles": [str(csv_profile), str(pdf_profile)],
+                "profile_mappings": str(mapping_path),
+                "rules": str(rules_path),
+                "exchange_rates": {"HKD": 1.0},
+                "pdf": {"enabled": True, "parser": "pdfplumber"},
+                "ollama": {
+                    "enabled": False,
+                    "url": f"http://127.0.0.1:{server.server_port}/api/generate",
+                    "batch_size": 2,
+                },
+            }
+            config_path = root / "config.json"
+            config_path.write_text(json.dumps(config), encoding="utf-8")
+            env = dict(**os.environ)
+            env["PYTHONPATH"] = f"{fake_modules}:{repo_root}"
+
+            first_output_dir = root / "first-output"
+            first_result = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "honeymoney.cli",
+                    "--input",
+                    str(input_dir),
+                    "--output",
+                    str(first_output_dir / "categorized.csv"),
+                    "--config",
+                    str(config_path),
+                    "--no-interactive",
+                ],
+                cwd=repo_root,
+                env=env,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+            self.assertEqual(first_result.returncode, 0, first_result.stderr)
+            with (first_output_dir / "categorized.csv").open(
+                newline="", encoding="utf-8"
+            ) as fh:
+                first_rows = list(csv.DictReader(fh))
+            manual_id = next(
+                row["transaction_id"]
+                for row in first_rows
+                if row["merchant"] == "MANUAL SHOP"
+            )
+
+            corrections_path = root / "corrections.csv"
+            corrections_path.write_text(
+                "\n".join(
+                    [
+                        "transaction_id,category,owner,payment_method,confidence,reason,notes",
+                        f"{manual_id},Shopping,Justin,Bank Account,1.0,Reviewed manually,Reusable correction",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            config["corrections"] = str(corrections_path)
+            config["ollama"]["enabled"] = True
+            config_path.write_text(json.dumps(config), encoding="utf-8")
+            final_output_dir = root / "final-output"
+            final_result = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "honeymoney.cli",
+                    "--input",
+                    str(input_dir),
+                    "--output",
+                    str(final_output_dir / "categorized.csv"),
+                    "--config",
+                    str(config_path),
+                    "--no-interactive",
+                ],
+                cwd=repo_root,
+                env=env,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+
+            self.assertEqual(final_result.returncode, 0, final_result.stderr)
+            with (final_output_dir / "categorized.csv").open(
+                newline="", encoding="utf-8"
+            ) as fh:
+                rows = list(csv.DictReader(fh))
+            with (final_output_dir / "review_needed.csv").open(
+                newline="", encoding="utf-8"
+            ) as fh:
+                review_rows = list(csv.DictReader(fh))
+            report = json.loads((final_output_dir / "import_report.json").read_text())
+
+            self.assertEqual(len(rows), 5)
+            self.assertTrue(review_rows)
+            self.assertEqual(report["transaction_count"], 5)
+            self.assertEqual(report["ollama"]["status"], "success")
+            self.assertEqual({file["source_file"] for file in report["files"]}, {"transactions.csv", "statement.pdf"})
+            parksnshop_rows = [row for row in rows if row["merchant"] == "PARKNSHOP"]
+            self.assertEqual(len(parksnshop_rows), 2)
+            for row in parksnshop_rows:
+                self.assertEqual(row["category"], "Groceries")
+                self.assertIn("duplicate_suspected", row["flags"])
+            mystery = next(row for row in rows if row["merchant"] == "MYSTERY OLLAMA")
+            self.assertEqual(mystery["category"], "Dining")
+            self.assertIn("ollama_categorized", mystery["flags"])
+            manual = next(row for row in rows if row["merchant"] == "MANUAL SHOP")
+            self.assertEqual(manual["transaction_id"], manual_id)
+            self.assertEqual(manual["category"], "Shopping")
+            self.assertEqual(manual["owner"], "Justin")
+            self.assertEqual(manual["needs_review"], "false")
+            pdf_row = next(row for row in rows if row["source_file"] == "statement.pdf")
+            self.assertEqual(pdf_row["notes"], "Imported from PDF")
 
     def _run_single_csv_and_get_transaction_id(
         self, root: Path, filename: str, config_path: Path

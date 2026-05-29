@@ -38,6 +38,8 @@ The CLI writes:
 - `review_needed.csv`: rows requiring manual review, with context and editable correction columns.
 - `import_report.json`: run diagnostics, processed files, warnings, duplicate counts, review counts, and Ollama status.
 
+See `examples/expected-output/` for output artifacts generated from `examples/config.json`.
+
 Spending summaries should use `amount_hkd` and exclude `Credit Card Payment` and `Internal Transfer` unless intentionally analyzing cash movement.
 
 ## Config Shape
@@ -52,6 +54,9 @@ Minimal example:
     "USD": 7.8
   },
   "review_confidence_threshold": 0.8,
+  "categories": ["Income", "Groceries", "Dining", "Other", "Unknown"],
+  "owners": ["Household", "Justin", "Franchesca", "Unknown"],
+  "payment_methods": ["Bank Account", "Credit Card", "Cash", "Unknown"],
   "profiles": ["./profiles/hsbc_hk_bank.json"],
   "profile_mappings": "./profile_mappings.json",
   "rules": "./rules.json",
@@ -142,7 +147,7 @@ PDF profiles use the same logical column names. For statement tables without a u
 }
 ```
 
-For statement PDFs that contain several non-transaction tables, `required_columns` can skip tables whose header row is not a transaction table.
+For statement PDFs that contain several non-transaction tables, `required_columns` can skip tables whose header row is not a transaction table. When no table is found and PyMuPDF is installed, the importer records a text-length diagnostic without writing raw statement text to outputs.
 
 Some PDFs collapse multiple visible transaction rows into one extracted table row. Set `split_multiline_rows` to `true` to expand newline-separated cells; use `split_multiline_row_count_columns` to name the date/amount columns that determine the transaction count when descriptions wrap.
 

@@ -14,11 +14,11 @@ from pathlib import Path
 from typing import Any
 
 from honeymoney.schema import (
-    ALLOWED_CATEGORIES,
-    ALLOWED_OWNERS,
-    ALLOWED_PAYMENT_METHODS,
     CATEGORIZED_COLUMNS,
     REVIEW_NEEDED_COLUMNS,
+    allowed_categories,
+    allowed_owners,
+    allowed_payment_methods,
 )
 from honeymoney.rules import apply_rules, load_rules
 from honeymoney.ollama import apply_ollama_fallback
@@ -118,22 +118,24 @@ def _load_profiles(config: dict[str, Any]) -> list[dict[str, Any]]:
     for profile_path in config.get("profiles", []):
         with Path(profile_path).open(encoding="utf-8") as fh:
             profile = json.load(fh)
-            _validate_profile(profile, Path(profile_path))
+            _validate_profile(profile, Path(profile_path), config)
             profiles.append(profile)
     return profiles
 
 
-def _validate_profile(profile: dict[str, Any], profile_path: Path) -> None:
+def _validate_profile(
+    profile: dict[str, Any], profile_path: Path, config: dict[str, Any]
+) -> None:
     profile_id = profile.get("id") or profile.get("account_id") or profile_path.name
     if not str(profile.get("account_id", "")).strip():
         raise ValueError(
             f"Missing required profile fields in profile {profile_id}: account_id"
         )
-    if profile.get("owner") and profile["owner"] not in ALLOWED_OWNERS:
+    if profile.get("owner") and profile["owner"] not in allowed_owners(config):
         raise ValueError(f"Unsupported owner in profile {profile_id}: {profile['owner']}")
     if (
         profile.get("payment_method")
-        and profile["payment_method"] not in ALLOWED_PAYMENT_METHODS
+        and profile["payment_method"] not in allowed_payment_methods(config)
     ):
         raise ValueError(
             f"Unsupported payment_method in profile {profile_id}: "
@@ -176,23 +178,25 @@ def _load_corrections(config: dict[str, Any]) -> dict[str, dict[str, str]]:
                 if (row.get(field) or "").strip()
             }
             if meaningful:
-                _validate_correction(transaction_id, meaningful)
+                _validate_correction(transaction_id, meaningful, config)
                 corrections[transaction_id] = meaningful
     return corrections
 
 
-def _validate_correction(transaction_id: str, correction: dict[str, str]) -> None:
-    if correction.get("category") and correction["category"] not in ALLOWED_CATEGORIES:
+def _validate_correction(
+    transaction_id: str, correction: dict[str, str], config: dict[str, Any]
+) -> None:
+    if correction.get("category") and correction["category"] not in allowed_categories(config):
         raise ValueError(
             f"Unsupported category in correction {transaction_id}: {correction['category']}"
         )
-    if correction.get("owner") and correction["owner"] not in ALLOWED_OWNERS:
+    if correction.get("owner") and correction["owner"] not in allowed_owners(config):
         raise ValueError(
             f"Unsupported owner in correction {transaction_id}: {correction['owner']}"
         )
     if (
         correction.get("payment_method")
-        and correction["payment_method"] not in ALLOWED_PAYMENT_METHODS
+        and correction["payment_method"] not in allowed_payment_methods(config)
     ):
         raise ValueError(
             "Unsupported payment_method in correction "
@@ -519,6 +523,12 @@ def _import_pdf(
             tables = _pdf_tables(page)
             if not tables:
                 warnings.append(f"No table found on {pdf_path.name} page {page_number}")
+                text_length = _pymupdf_page_text_length(pdf_path, page_number)
+                if text_length is not None:
+                    warnings.append(
+                        "PyMuPDF text fallback found "
+                        f"{text_length} characters on {pdf_path.name} page {page_number}"
+                    )
                 continue
             for table in tables:
                 header = [str(cell or "").strip() for cell in table[0]] if has_header else []
@@ -557,6 +567,20 @@ def _import_pdf(
                             )
                         )
     return rows, warnings
+
+
+def _pymupdf_page_text_length(pdf_path: Path, page_number: int) -> int | None:
+    try:
+        import fitz
+    except ImportError:
+        return None
+
+    try:
+        with fitz.open(str(pdf_path)) as document:
+            page = document[page_number - 1]
+            return len(_clean_text(page.get_text()))
+    except Exception:
+        return None
 
 
 def _apply_pdf_row_regex(
@@ -709,7 +733,7 @@ def _normalized_row(
         "needs_review": "true",
         "reason": amount_reason or "No categorization rules have been applied",
         "flags": ";".join(flags),
-        "notes": "",
+        "notes": "Imported from PDF" if source_page else "",
         "source_file": _relative_source(input_path, input_root),
         "source_page": source_page,
         "source_row": str(row_number),
@@ -979,7 +1003,6 @@ def _annotate_duplicate_suspicions(transactions: list[dict[str, str]]) -> None:
 
 def _duplicate_key(transaction: dict[str, str]) -> str:
     fields = [
-        "account_id",
         "date",
         "amount_hkd",
         "original_amount",
@@ -992,7 +1015,6 @@ def _duplicate_key(transaction: dict[str, str]) -> str:
 
 def _duplicate_key_without_date(transaction: dict[str, str]) -> str:
     fields = [
-        "account_id",
         "amount_hkd",
         "original_amount",
         "original_currency",

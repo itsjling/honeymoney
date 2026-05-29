@@ -7,9 +7,9 @@ from pathlib import Path
 from typing import Any
 
 from honeymoney.schema import (
-    ALLOWED_CATEGORIES,
-    ALLOWED_OWNERS,
-    ALLOWED_PAYMENT_METHODS,
+    allowed_categories,
+    allowed_owners,
+    allowed_payment_methods,
 )
 
 
@@ -20,12 +20,15 @@ def load_rules(config: dict[str, Any]) -> list[dict[str, Any]]:
     with Path(rules_path).open(encoding="utf-8") as fh:
         data = json.load(fh)
     rules = data.get("rules", [])
-    validate_rules(rules)
+    validate_rules(rules, config)
     return rules
 
 
-def validate_rules(rules: list[dict[str, Any]]) -> None:
+def validate_rules(rules: list[dict[str, Any]], config: dict[str, Any] | None = None) -> None:
     seen_ids: set[str] = set()
+    categories = allowed_categories(config)
+    owners = allowed_owners(config)
+    payment_methods = allowed_payment_methods(config)
     allowed_fields = {
         "merchant",
         "description",
@@ -50,13 +53,13 @@ def validate_rules(rules: list[dict[str, Any]]) -> None:
         if not rule.get("enabled", True):
             continue
 
-        if rule.get("category") and rule["category"] not in ALLOWED_CATEGORIES:
+        if rule.get("category") and rule["category"] not in categories:
             raise ValueError(f"Unsupported category in rule {rule_id}: {rule['category']}")
-        if rule.get("owner") and rule["owner"] not in ALLOWED_OWNERS:
+        if rule.get("owner") and rule["owner"] not in owners:
             raise ValueError(f"Unsupported owner in rule {rule_id}: {rule['owner']}")
         if (
             rule.get("payment_method")
-            and rule["payment_method"] not in ALLOWED_PAYMENT_METHODS
+            and rule["payment_method"] not in payment_methods
         ):
             raise ValueError(
                 f"Unsupported payment_method in rule {rule_id}: {rule['payment_method']}"

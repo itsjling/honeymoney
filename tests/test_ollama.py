@@ -147,6 +147,60 @@ class OllamaTest(unittest.TestCase):
         self.assertEqual([len(batch) for batch in captured_batches], [1, 1])
         self.assertEqual([row["category"] for row in transactions], ["Dining", "Dining"])
 
+    def test_missing_ollama_ids_and_reasons_are_invalid_responses(self) -> None:
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self) -> None:
+                length = int(self.headers["Content-Length"])
+                self.rfile.read(length)
+                body = {
+                    "response": json.dumps(
+                        [
+                            {
+                                "id": "txn_1",
+                                "category": "Dining",
+                                "owner": "Household",
+                                "confidence": 0.91,
+                            }
+                        ]
+                    )
+                }
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(json.dumps(body).encode("utf-8"))
+
+            def log_message(self, format: str, *args: object) -> None:
+                return
+
+        server = HTTPServer(("127.0.0.1", 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        self.addCleanup(server.shutdown)
+        self.addCleanup(server.server_close)
+
+        first = unresolved_transaction()
+        second = unresolved_transaction()
+        second["transaction_id"] = "txn_2"
+        transactions = [first, second]
+
+        report, warnings = apply_ollama_fallback(
+            transactions,
+            {
+                "ollama": {
+                    "enabled": True,
+                    "url": f"http://127.0.0.1:{server.server_port}/api/generate",
+                }
+            },
+        )
+
+        self.assertEqual(report["status"], "invalid_response")
+        self.assertEqual(report["applied_count"], 0)
+        self.assertEqual(report["invalid_count"], 2)
+        self.assertEqual(warnings, ["Ollama returned invalid categorizations"])
+        self.assertEqual([row["category"] for row in transactions], ["Unknown", "Unknown"])
+        for transaction in transactions:
+            self.assertIn("ollama_invalid_response", transaction["flags"])
+
 
 if __name__ == "__main__":
     unittest.main()

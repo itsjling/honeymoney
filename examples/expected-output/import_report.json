@@ -1,0 +1,58 @@
+{
+  "duplicate_count": 0,
+  "errors": [],
+  "files": [
+    {
+      "profile_id": "hsbc_hk_bank",
+      "source_file": "transactions.csv",
+      "status": "processed",
+      "transaction_count": "3"
+    }
+  ],
+  "input_count": 1,
+  "interactive": false,
+  "ollama": {
+    "status": "disabled"
+  },
+  "output": {
+    "categorized_csv": "examples/expected-output/categorized.csv",
+    "import_report_json": "examples/expected-output/import_report.json",
+    "review_needed_csv": "examples/expected-output/review_needed.csv"
+  },
+  "review_count": 1,
+  "status": "success",
+  "strict": false,
+  "transaction_count": 3,
+  "transaction_diagnostics": {
+    "txn_b952289a4400f635": {
+      "category": "Income",
+      "needs_review": false,
+      "owner": "Household",
+      "reason": "Matched rule salary-income"
+    },
+    "txn_d54555cb783a4134": {
+      "category": "Unknown",
+      "needs_review": true,
+      "owner": "Household",
+      "reason": "No categorization rules have been applied"
+    },
+    "txn_ff8b51d4202807e1": {
+      "category": "Groceries",
+      "needs_review": false,
+      "owner": "Household",
+      "reason": "Matched rule parksnshop-groceries"
+    }
+  },
+  "transaction_flags": {
+    "txn_b952289a4400f635": [
+      "matched_rule:salary-income"
+    ],
+    "txn_d54555cb783a4134": [
+      "uncategorized"
+    ],
+    "txn_ff8b51d4202807e1": [
+      "matched_rule:parksnshop-groceries"
+    ]
+  },
+  "warnings": []
+}
