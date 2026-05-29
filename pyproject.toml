@@ -1,0 +1,24 @@
+[project]
+name = "honeymoney"
+version = "0.1.0"
+description = "Local private spending categorization for household transaction exports"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.optional-dependencies]
+pdf = [
+  "pdfplumber",
+  "PyMuPDF",
+]
+dev = []
+
+[project.scripts]
+honeymoney = "honeymoney.cli:run"
+
+[tool.setuptools.packages.find]
+include = ["honeymoney*"]
+exclude = ["samples*", "tests*", "examples*"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"

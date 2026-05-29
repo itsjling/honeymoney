@@ -1,0 +1,84 @@
+import unittest
+
+from honeymoney.rules import apply_rules, validate_rules
+
+
+class RulesTest(unittest.TestCase):
+    def test_priority_and_file_order_choose_one_winning_rule(self) -> None:
+        transactions = [
+            {
+                "merchant": "APPLE",
+                "original_description": "APPLE",
+                "category": "Unknown",
+                "owner": "Household",
+                "payment_method": "Credit Card",
+                "confidence": "0.00",
+                "needs_review": "true",
+                "reason": "",
+                "flags": "uncategorized",
+                "notes": "",
+            }
+        ]
+        rules = [
+            {
+                "id": "apple-shopping",
+                "enabled": True,
+                "priority": 1,
+                "match_type": "keyword",
+                "patterns": ["APP"],
+                "fields": ["merchant"],
+                "category": "Shopping",
+                "confidence": 0.95,
+            },
+            {
+                "id": "apple-subscriptions",
+                "enabled": True,
+                "priority": 10,
+                "match_type": "exact",
+                "patterns": ["apple"],
+                "fields": ["merchant"],
+                "category": "Subscriptions",
+                "confidence": 0.91,
+            },
+        ]
+
+        apply_rules(transactions, rules, {"review_confidence_threshold": 0.8})
+
+        self.assertEqual(transactions[0]["category"], "Subscriptions")
+        self.assertEqual(transactions[0]["confidence"], "0.91")
+        self.assertEqual(transactions[0]["needs_review"], "false")
+        self.assertEqual(
+            transactions[0]["flags"], "matched_rule:apple-subscriptions"
+        )
+
+    def test_disabled_invalid_rule_is_allowed_but_active_invalid_rule_fails(self) -> None:
+        validate_rules(
+            [
+                {
+                    "id": "draft-invalid",
+                    "enabled": False,
+                    "match_type": "regex",
+                    "patterns": ["["],
+                    "fields": ["merchant"],
+                    "category": "Review Needed",
+                }
+            ]
+        )
+
+        with self.assertRaisesRegex(ValueError, "Unsupported category"):
+            validate_rules(
+                [
+                    {
+                        "id": "active-invalid",
+                        "enabled": True,
+                        "match_type": "keyword",
+                        "patterns": ["X"],
+                        "fields": ["merchant"],
+                        "category": "Review Needed",
+                    }
+                ]
+            )
+
+
+if __name__ == "__main__":
+    unittest.main()

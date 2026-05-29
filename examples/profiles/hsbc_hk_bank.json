@@ -1,0 +1,20 @@
+{
+  "id": "hsbc_hk_bank",
+  "account_id": "hsbc_hk_checking",
+  "account": "HSBC HK Checking",
+  "institution": "HSBC HK",
+  "country": "HK",
+  "account_currency": "HKD",
+  "owner": "Household",
+  "payment_method": "Bank Account",
+  "csv": {
+    "detect_headers": ["Date", "Description", "Debit", "Credit", "Currency"],
+    "columns": {
+      "transaction_date": "Date",
+      "description": "Description",
+      "debit": "Debit",
+      "credit": "Credit",
+      "original_currency": "Currency"
+    }
+  }
+}

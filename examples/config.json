@@ -1,0 +1,30 @@
+{
+  "base_currency": "HKD",
+  "exchange_rates": {
+    "HKD": 1.0,
+    "USD": 7.8
+  },
+  "review_confidence_threshold": 0.8,
+  "profiles": [
+    "./examples/profiles/hsbc_hk_bank.json",
+    "./examples/profiles/mox_credit_card.json",
+    "./examples/profiles/hsbc_hk_credit_card_pdf.json",
+    "./examples/profiles/mox_bank_pdf.json"
+  ],
+  "profile_mappings": "./profile_mappings.json",
+  "rules": "./examples/rules.json",
+  "pdf": {
+    "enabled": true,
+    "parser": "pdfplumber"
+  },
+  "ollama": {
+    "enabled": false,
+    "url": "http://localhost:11434/api/generate",
+    "model": "qwen2.5:7b-instruct",
+    "batch_size": 20
+  },
+  "paths": {
+    "input": "./examples/input",
+    "output": "./output/categorized.csv"
+  }
+}
