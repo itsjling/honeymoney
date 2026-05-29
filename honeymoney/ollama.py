@@ -133,6 +133,8 @@ def _apply_ollama_response(
         categorizations = json.loads(raw_response)
     except (TypeError, json.JSONDecodeError):
         return 0, len(unresolved)
+    if not isinstance(categorizations, list):
+        return 0, len(unresolved)
 
     by_id = {transaction["transaction_id"]: transaction for transaction in unresolved}
     threshold = Decimal(str(config.get("review_confidence_threshold", 0.8)))
@@ -143,6 +145,8 @@ def _apply_ollama_response(
     handled_ids: set[str] = set()
     seen_known_ids: set[str] = set()
     for categorization in categorizations:
+        if not isinstance(categorization, dict):
+            continue
         transaction_id = str(categorization.get("id", ""))
         transaction = by_id.get(transaction_id)
         if transaction is not None:

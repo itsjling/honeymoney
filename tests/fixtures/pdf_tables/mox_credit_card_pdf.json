@@ -2,9 +2,14 @@
   "pages": [
     [
       [
-        ["Transaction date", "Post date", "Description", "Billing amount", "Billing currency", "Merchant name", "Credit / Debit"],
-        ["2026-05-01", "2026-05-02", "DINNER", "188.00", "HKD", "DINING PLACE", "Debit"],
-        ["2026-05-03", "2026-05-04", "REFUND", "22.00", "HKD", "SHOP REFUND", "Credit"]
+        ["Transaction date", "Post date", "Description", "Billing amount", "Billing currency", "Posted amount", "Posted currency", "Merchant name", "Credit / Debit"],
+        ["2026-05-01", "2026-05-02", "DINNER", "188.00", "HKD", "-188.00", "HKD", "DINING PLACE", "Debit"]
+      ]
+    ],
+    [
+      [
+        ["Transaction date", "Post date", "Description", "Billing amount", "Billing currency", "Posted amount", "Posted currency", "Merchant name", "Credit / Debit"],
+        ["2026-05-03", "2026-05-04", "US PURCHASE", "10.00", "USD", "-78.00", "HKD", "US SHOP", "Debit"]
       ]
     ]
   ]

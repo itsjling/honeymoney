@@ -201,6 +201,45 @@ class OllamaTest(unittest.TestCase):
         for transaction in transactions:
             self.assertIn("ollama_invalid_response", transaction["flags"])
 
+    def test_invalid_ollama_json_shape_is_reported_not_raised(self) -> None:
+        for response in [{"id": "txn_1"}, [None], ["not a categorization"]]:
+            with self.subTest(response=response):
+                class Handler(BaseHTTPRequestHandler):
+                    def do_POST(self) -> None:
+                        length = int(self.headers["Content-Length"])
+                        self.rfile.read(length)
+                        body = {"response": json.dumps(response)}
+                        self.send_response(200)
+                        self.send_header("Content-Type", "application/json")
+                        self.end_headers()
+                        self.wfile.write(json.dumps(body).encode("utf-8"))
+
+                    def log_message(self, format: str, *args: object) -> None:
+                        return
+
+                server = HTTPServer(("127.0.0.1", 0), Handler)
+                thread = threading.Thread(target=server.serve_forever, daemon=True)
+                thread.start()
+                self.addCleanup(server.shutdown)
+                self.addCleanup(server.server_close)
+
+                transaction = unresolved_transaction()
+                report, warnings = apply_ollama_fallback(
+                    [transaction],
+                    {
+                        "ollama": {
+                            "enabled": True,
+                            "url": f"http://127.0.0.1:{server.server_port}/api/generate",
+                        }
+                    },
+                )
+
+                self.assertEqual(report["status"], "invalid_response")
+                self.assertEqual(report["applied_count"], 0)
+                self.assertEqual(report["invalid_count"], 1)
+                self.assertEqual(warnings, ["Ollama returned invalid categorizations"])
+                self.assertIn("ollama_invalid_response", transaction["flags"])
+
 
 if __name__ == "__main__":
     unittest.main()

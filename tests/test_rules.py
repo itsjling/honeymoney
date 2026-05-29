@@ -95,6 +95,61 @@ class RulesTest(unittest.TestCase):
             {"categories": ["Unknown", "Pet Care"], "owners": ["Household", "Family"]},
         )
 
+    def test_active_rule_with_invalid_confidence_fails_validation(self) -> None:
+        for confidence in ["not-a-number", 1.5, -0.1]:
+            with self.subTest(confidence=confidence):
+                with self.assertRaisesRegex(ValueError, "Unsupported confidence"):
+                    validate_rules(
+                        [
+                            {
+                                "id": "bad-confidence",
+                                "enabled": True,
+                                "match_type": "keyword",
+                                "patterns": ["APPLE"],
+                                "fields": ["merchant"],
+                                "category": "Shopping",
+                                "confidence": confidence,
+                            }
+                        ]
+                    )
+
+    def test_rule_notes_append_without_erasing_existing_pdf_note(self) -> None:
+        transactions = [
+            {
+                "merchant": "PARKNSHOP",
+                "original_description": "PARKNSHOP",
+                "category": "Unknown",
+                "owner": "Household",
+                "payment_method": "Bank Account",
+                "confidence": "0.00",
+                "needs_review": "true",
+                "reason": "",
+                "flags": "uncategorized",
+                "notes": "Imported from PDF",
+            }
+        ]
+
+        apply_rules(
+            transactions,
+            [
+                {
+                    "id": "parksnshop",
+                    "enabled": True,
+                    "match_type": "keyword",
+                    "patterns": ["PARKNSHOP"],
+                    "fields": ["merchant"],
+                    "category": "Groceries",
+                    "confidence": 0.95,
+                    "notes": "Hong Kong supermarket",
+                }
+            ],
+            {"review_confidence_threshold": 0.8},
+        )
+
+        self.assertEqual(
+            transactions[0]["notes"], "Imported from PDF; Hong Kong supermarket"
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

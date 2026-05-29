@@ -42,6 +42,8 @@ See `examples/expected-output/` for output artifacts generated from `examples/co
 
 Spending summaries should use `amount_hkd` and exclude `Credit Card Payment` and `Internal Transfer` unless intentionally analyzing cash movement.
 
+Cashflow signs use the household perspective: money leaving the household is negative, and money entering the household is positive. Bank debits and credit-card purchases are therefore negative; salary, refunds, and credits are positive unless a profile supplies an already signed posted amount.
+
 ## Config Shape
 
 Minimal example:

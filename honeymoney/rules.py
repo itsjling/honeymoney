@@ -64,6 +64,17 @@ def validate_rules(rules: list[dict[str, Any]], config: dict[str, Any] | None = 
             raise ValueError(
                 f"Unsupported payment_method in rule {rule_id}: {rule['payment_method']}"
             )
+        if "confidence" in rule:
+            try:
+                confidence = Decimal(str(rule["confidence"]))
+            except Exception as error:
+                raise ValueError(
+                    f"Unsupported confidence in rule {rule_id}: {rule['confidence']}"
+                ) from error
+            if confidence < Decimal("0") or confidence > Decimal("1"):
+                raise ValueError(
+                    f"Unsupported confidence in rule {rule_id}: {rule['confidence']}"
+                )
         if rule.get("match_type", "keyword") not in {"exact", "keyword", "regex"}:
             raise ValueError(f"Unsupported match_type in rule {rule_id}")
         if rule.get("field_logic", "any") not in {"any", "all"}:
@@ -115,7 +126,9 @@ def apply_rules(
                 transaction["flags"], f"matched_rule:{rule.get('id', '')}"
             )
             if rule.get("notes"):
-                transaction["notes"] = str(rule["notes"])
+                transaction["notes"] = _append_note(
+                    transaction.get("notes", ""), str(rule["notes"])
+                )
             break
 
 
@@ -162,6 +175,14 @@ def _append_flag(existing: str, flag: str) -> str:
 
 def _remove_flag(existing: str, flag: str) -> str:
     return ";".join(item for item in existing.split(";") if item and item != flag)
+
+
+def _append_note(existing: str, note: str) -> str:
+    if not existing:
+        return note
+    if note in existing:
+        return existing
+    return f"{existing}; {note}"
 
 
 def _format_decimal(value: Decimal) -> str:

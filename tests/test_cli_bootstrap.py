@@ -3888,8 +3888,24 @@ def open(path):
                         }
                     },
                 },
-                2,
-                ["PARKNSHOP", "SALARY"],
+                [
+                    {
+                        "merchant": "PARKNSHOP",
+                        "transaction_date": "2026-05-01",
+                        "amount_hkd": "-120.50",
+                        "original_currency": "HKD",
+                        "source_page": "1",
+                        "source_row": "2",
+                    },
+                    {
+                        "merchant": "SALARY",
+                        "transaction_date": "2026-05-02",
+                        "amount_hkd": "20000.00",
+                        "original_currency": "HKD",
+                        "source_page": "1",
+                        "source_row": "3",
+                    },
+                ],
             ),
             (
                 "hsbc_hk_credit_card_pdf.json",
@@ -3898,8 +3914,24 @@ def open(path):
                         encoding="utf-8"
                     )
                 ),
-                2,
-                ["Coffee Shop", "Taxi"],
+                [
+                    {
+                        "merchant": "Coffee Shop",
+                        "transaction_date": "2026-05-01",
+                        "amount_hkd": "88.00",
+                        "original_currency": "HKD",
+                        "source_page": "1",
+                        "source_row": "2.1",
+                    },
+                    {
+                        "merchant": "Taxi",
+                        "transaction_date": "2026-05-02",
+                        "amount_hkd": "-45.00",
+                        "original_currency": "HKD",
+                        "source_page": "1",
+                        "source_row": "2.2",
+                    },
+                ],
             ),
             (
                 "mox_bank_pdf.json",
@@ -3908,8 +3940,24 @@ def open(path):
                         encoding="utf-8"
                     )
                 ),
-                2,
-                ["Coffee Shop", "Refund"],
+                [
+                    {
+                        "merchant": "Coffee Shop",
+                        "transaction_date": "2026-04-01",
+                        "amount_hkd": "88.00",
+                        "original_currency": "HKD",
+                        "source_page": "1",
+                        "source_row": "2",
+                    },
+                    {
+                        "merchant": "Refund",
+                        "transaction_date": "2026-04-02",
+                        "amount_hkd": "-12.00",
+                        "original_currency": "HKD",
+                        "source_page": "1",
+                        "source_row": "4",
+                    },
+                ],
             ),
             (
                 "mox_credit_card_pdf.json",
@@ -3930,14 +3978,32 @@ def open(path):
                             "merchant": "Merchant name",
                             "amount": "Billing amount",
                             "original_currency": "Billing currency",
+                            "posted_amount": "Posted amount",
+                            "posted_currency": "Posted currency",
                             "credit_debit": "Credit / Debit",
                         },
                         "debit_values": ["Debit"],
                         "credit_values": ["Credit"],
                     },
                 },
-                2,
-                ["DINING PLACE", "SHOP REFUND"],
+                [
+                    {
+                        "merchant": "DINING PLACE",
+                        "transaction_date": "2026-05-01",
+                        "amount_hkd": "-188.00",
+                        "original_currency": "HKD",
+                        "source_page": "1",
+                        "source_row": "2",
+                    },
+                    {
+                        "merchant": "US SHOP",
+                        "transaction_date": "2026-05-03",
+                        "amount_hkd": "-78.00",
+                        "original_currency": "USD",
+                        "source_page": "2",
+                        "source_row": "2",
+                    },
+                ],
             ),
         ]
 
@@ -3991,7 +4057,7 @@ def open(path):
             env = dict(**os.environ)
             env["PYTHONPATH"] = f"{fake_modules}:{Path(__file__).resolve().parents[1]}"
 
-            for fixture_name, profile, expected_count, expected_merchants in cases:
+            for fixture_name, profile, expected_rows in cases:
                 with self.subTest(fixture=fixture_name):
                     run_dir = root / fixture_name.replace(".json", "")
                     run_dir.mkdir()
@@ -4007,7 +4073,7 @@ def open(path):
                         json.dumps(
                             {
                                 "profiles": [str(profile_path)],
-                                "exchange_rates": {"HKD": 1.0},
+                                "exchange_rates": {"HKD": 1.0, "USD": 7.8},
                                 "pdf": {"enabled": True, "parser": "pdfplumber"},
                             }
                         ),
@@ -4042,10 +4108,10 @@ def open(path):
                     ) as fh:
                         rows = list(csv.DictReader(fh))
 
-                    self.assertEqual(len(rows), expected_count)
-                    self.assertEqual(
-                        [row["merchant"] for row in rows], expected_merchants
-                    )
+                    self.assertEqual(len(rows), len(expected_rows))
+                    for row, expected in zip(rows, expected_rows):
+                        for field, value in expected.items():
+                            self.assertEqual(row[field], value)
                     self.assertTrue(all(row["notes"] == "Imported from PDF" for row in rows))
 
     def test_pdf_import_reads_all_tables_on_a_page(self) -> None:
