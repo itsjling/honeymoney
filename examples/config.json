@@ -58,7 +58,8 @@
     "enabled": false,
     "url": "http://localhost:11434/api/generate",
     "model": "qwen2.5:7b-instruct",
-    "batch_size": 20
+    "batch_size": 5,
+    "timeout_seconds": 120
   },
   "paths": {
     "input": "./examples/input",

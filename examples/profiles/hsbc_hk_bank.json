@@ -8,7 +8,13 @@
   "owner": "Household",
   "payment_method": "Bank Account",
   "csv": {
-    "detect_headers": ["Date", "Description", "Debit", "Credit", "Currency"],
+    "detect_headers": [
+      "Date",
+      "Description",
+      "Debit",
+      "Credit",
+      "Currency"
+    ],
     "columns": {
       "transaction_date": "Date",
       "description": "Description",
@@ -16,5 +22,14 @@
       "credit": "Credit",
       "original_currency": "Currency"
     }
-  }
+  },
+  "skip_descriptions": [
+    "PREVIOUS BALANCE",
+    "BALANCE B/F",
+    "BALANCE C/F",
+    "B/F BALANCE",
+    "C/F BALANCE",
+    "BALANCE BROUGHT FORWARD",
+    "BALANCE CARRIED FORWARD"
+  ]
 }
