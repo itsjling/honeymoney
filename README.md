@@ -69,11 +69,13 @@ Creates a starter local workspace with:
 - `rules.json`
 - `corrections.csv`
 - `profile_mappings.json`
-- `profiles/starter_csv.json`
+- `profiles/` with `starter_csv.json` plus the bundled HSBC HK and Mox bank/card profiles (CSV and PDF), all linked in `config.json`
 - `input/`
 - `output/`
 
 Use `--root DIR` to skip the prompt.
+
+When a statement matches more than one profile (or none, as with PDFs), the import prompts you to pick the profile and offers to remember the choice in `profile_mappings.json` so future imports of similarly named files select it automatically.
 
 ```bash
 honeymoney run
@@ -86,6 +88,24 @@ honeymoney import [PATH]
 ```
 
 Processes one pasted file or folder path. If `PATH` is omitted, the command prompts you to paste it.
+
+After each import, any records that could not be auto-categorized are offered for interactive categorization: pick a category number, press Enter to skip one, or enter `q` to skip the rest. Your picks are saved to `corrections.csv` so they stick on future runs. Pass `--no-interactive` to skip the prompts.
+
+```bash
+honeymoney status
+honeymoney status june
+honeymoney status --month 2026-05
+honeymoney status --start 2026-05-01 --end 2026-06-15
+```
+
+Shows how many statements and records have been processed for the period (default: the current calendar month), plus how many records are categorized, uncategorized, and needing review. Accepts a month name (`june`), `YYYY-MM`, or explicit `--start`/`--end` dates.
+
+```bash
+honeymoney report
+honeymoney report june --no-open
+```
+
+Writes a self-contained `output/report.html` with all recorded transactions and a pie chart of the category distribution with per-category sums, then opens it in your browser. Accepts the same period arguments as `status` (default: all recorded transactions); `--no-open` writes the file without opening it. The page loads nothing from the network.
 
 Useful run options:
 
@@ -100,9 +120,9 @@ honeymoney run --input ./samples --output ./output/categorized.csv
 
 Each run writes three files next to the configured categorized CSV:
 
-- `categorized.csv`: normalized transactions with categories, owners, payment methods, confidence, flags, and source traceability.
-- `review_needed.csv`: only rows that need review, with editable correction columns.
-- `import_report.json`: processed files, selected profiles, warnings, duplicate counts, review counts, and Ollama status.
+- `categorized.csv`: normalized transactions with categories, owners, payment methods, confidence, flags, and source traceability. This file is a cumulative ledger: each import merges into it by `transaction_id`, so `status` and `report` see everything imported so far.
+- `review_needed.csv`: only ledger rows that need review, with editable correction columns.
+- `import_report.json`: processed files, selected profiles, warnings, duplicate counts, review counts, ledger totals, and Ollama status.
 
 Spending summaries should use `amount_hkd` and usually exclude `Credit Card Payment` and `Internal Transfer`.
 
@@ -122,6 +142,17 @@ Common edits:
 - Feed reviewed rows back through `corrections.csv`.
 - Set `ollama.enabled` to `true` only when you want local Ollama fallback.
 - Add filename mappings in `profile_mappings.json` when automatic detection is ambiguous.
+
+### Ollama fallback
+
+Set `ollama.enabled` to `true` to categorize remaining unknown transactions with a local Ollama model. Options in the `ollama` config section:
+
+- `model`: must be a model you have pulled locally (check with `ollama list`).
+- `timeout_seconds`: request timeout per batch (default 120).
+- `batch_size`: transactions per request (default 5). Local inference is generation-bound, so total time is roughly constant regardless of batch size (~1-2s per transaction); a smaller batch just means the status line updates more often and any one request has less to lose if it fails.
+- `think`: allow thinking models to reason before answering (default `false`; slower and unnecessary since responses are schema-constrained).
+
+Requests constrain the response to the allowed categories and owners. The status line shows which batch is in flight (`batch 2/20 (transactions 6-10 of 98, 4s)`) and ticks up every second while waiting, so a slow local model doesn't look stuck. If Ollama is unreachable, the model is missing, or a categorization is rejected, the import prints a warning explaining why and the affected rows stay uncategorized for interactive or manual review.
 
 The repo also includes fuller examples:
 
