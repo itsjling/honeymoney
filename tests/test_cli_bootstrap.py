@@ -41,6 +41,88 @@ EXPECTED_CATEGORIZED_COLUMNS = [
 
 
 class CliBootstrapTest(unittest.TestCase):
+    def test_help_command_prints_simple_commands(self) -> None:
+        result = subprocess.run(
+            [sys.executable, "-m", "honeymoney.cli", "help"],
+            cwd=Path(__file__).resolve().parents[1],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("honeymoney setup", result.stdout)
+        self.assertIn("honeymoney run", result.stdout)
+        self.assertIn("honeymoney help", result.stdout)
+
+    def test_setup_command_creates_starter_workspace(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "money"
+            resolved_root = root.resolve()
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "honeymoney.cli",
+                    "setup",
+                    "--root",
+                    str(root),
+                ],
+                cwd=Path(__file__).resolve().parents[1],
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("Created Honeymoney workspace", result.stdout)
+            self.assertTrue((root / "input").is_dir())
+            self.assertTrue((root / "output").is_dir())
+            self.assertTrue((root / "profiles" / "starter_csv.json").exists())
+            self.assertTrue((root / "rules.json").exists())
+            self.assertTrue((root / "corrections.csv").exists())
+            self.assertTrue((root / "profile_mappings.json").exists())
+
+            config = json.loads((root / "config.json").read_text(encoding="utf-8"))
+            self.assertEqual(config["paths"]["input"], str(resolved_root / "input"))
+            self.assertEqual(
+                config["paths"]["output"],
+                str(resolved_root / "output" / "categorized.csv"),
+            )
+            self.assertEqual(
+                config["profiles"],
+                [str(resolved_root / "profiles" / "starter_csv.json")],
+            )
+            self.assertEqual(config["rules"], str(resolved_root / "rules.json"))
+            self.assertEqual(
+                config["corrections"], str(resolved_root / "corrections.csv")
+            )
+
+            run_result = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "honeymoney.cli",
+                    "run",
+                    "--config",
+                    str(root / "config.json"),
+                    "--no-interactive",
+                ],
+                cwd=Path(__file__).resolve().parents[1],
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+
+            self.assertEqual(run_result.returncode, 0, run_result.stderr)
+            self.assertTrue((root / "output" / "categorized.csv").exists())
+            self.assertTrue((root / "output" / "review_needed.csv").exists())
+            self.assertTrue((root / "output" / "import_report.json").exists())
+
     def test_empty_input_run_writes_output_contract(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

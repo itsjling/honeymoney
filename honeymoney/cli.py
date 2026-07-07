@@ -25,6 +25,18 @@ from honeymoney.ollama import apply_ollama_fallback
 
 
 def main(argv: list[str] | None = None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if argv and argv[0] in {"help", "--help", "-h"}:
+        print(_help_text())
+        return 0
+    if argv and argv[0] == "setup":
+        return _setup_command(argv[1:])
+    if argv and argv[0] == "run":
+        argv = argv[1:]
+    return _run_pipeline(argv)
+
+
+def _run_pipeline(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
         prog="honeymoney",
         description="Categorize local household transaction exports.",
@@ -98,6 +110,124 @@ def main(argv: list[str] | None = None) -> int:
     if args.strict and import_warnings:
         return 1
     return 0
+
+
+def _help_text() -> str:
+    return """Honeymoney
+
+Commands:
+  honeymoney setup [--root DIR]    Create a local starter workspace
+  honeymoney run --config FILE     Process CSV/PDF exports
+  honeymoney help                  Show this help
+
+Common run options:
+  --input DIR_OR_FILE
+  --output output/categorized.csv
+  --strict
+  --no-interactive
+"""
+
+
+def _setup_command(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(
+        prog="honeymoney setup",
+        description="Create a starter Honeymoney workspace.",
+    )
+    parser.add_argument("--root", default=".")
+    parser.add_argument("--force", action="store_true")
+    args = parser.parse_args(argv)
+
+    root = Path(args.root).expanduser().resolve()
+    _write_starter_workspace(root, force=args.force)
+    print(f"Created Honeymoney workspace at {root}")
+    print("")
+    print("Next:")
+    print(f"  1. Put exported CSV/PDF files in {root / 'input'}")
+    print(f"  2. Edit {root / 'config.json'} and {root / 'rules.json'} as needed")
+    print(f"  3. Run honeymoney run --config {root / 'config.json'}")
+    return 0
+
+
+def _write_starter_workspace(root: Path, force: bool) -> None:
+    input_dir = root / "input"
+    output_dir = root / "output"
+    profiles_dir = root / "profiles"
+    input_dir.mkdir(parents=True, exist_ok=True)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    profiles_dir.mkdir(parents=True, exist_ok=True)
+
+    profile_path = profiles_dir / "starter_csv.json"
+    rules_path = root / "rules.json"
+    corrections_path = root / "corrections.csv"
+    profile_mappings_path = root / "profile_mappings.json"
+    config_path = root / "config.json"
+
+    _write_json_file(
+        profile_path,
+        {
+            "id": "starter_csv",
+            "account_id": "starter_csv",
+            "account": "Starter CSV",
+            "institution": "Local",
+            "country": "HK",
+            "account_currency": "HKD",
+            "owner": "Household",
+            "payment_method": "Bank Account",
+            "csv": {
+                "detect_headers": ["Date", "Description", "Amount", "Currency"],
+                "columns": {
+                    "transaction_date": "Date",
+                    "description": "Description",
+                    "amount": "Amount",
+                    "original_currency": "Currency",
+                },
+            },
+        },
+        force,
+    )
+    _write_json_file(profile_mappings_path, {"filename_patterns": []}, force)
+    _write_json_file(rules_path, {"version": 1, "rules": []}, force)
+    _write_text_file(
+        corrections_path,
+        "transaction_id,category,owner,payment_method,confidence,reason,notes\n",
+        force,
+    )
+    _write_json_file(
+        config_path,
+        {
+            "base_currency": "HKD",
+            "exchange_rates": {"HKD": 1.0, "USD": 7.8},
+            "review_confidence_threshold": 0.8,
+            "profiles": [str(profile_path)],
+            "profile_mappings": str(profile_mappings_path),
+            "rules": str(rules_path),
+            "corrections": str(corrections_path),
+            "pdf": {"enabled": True, "parser": "pdfplumber"},
+            "ollama": {
+                "enabled": False,
+                "url": "http://localhost:11434/api/generate",
+                "model": "qwen2.5:7b-instruct",
+                "batch_size": 20,
+            },
+            "paths": {
+                "input": str(input_dir),
+                "output": str(output_dir / "categorized.csv"),
+            },
+        },
+        force,
+    )
+
+
+def _write_json_file(path: Path, data: dict[str, Any], force: bool) -> None:
+    if path.exists() and not force:
+        raise ValueError(f"Refusing to overwrite {path}; pass --force to replace it")
+    path.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
+
+
+def _write_text_file(path: Path, content: str, force: bool) -> None:
+    if path.exists() and not force:
+        raise ValueError(f"Refusing to overwrite {path}; pass --force to replace it")
+    path.write_text(content, encoding="utf-8")
 
 
 def _load_config(config_path: str | None) -> dict[str, Any]:
