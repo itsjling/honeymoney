@@ -19,6 +19,9 @@ honeymoney = "honeymoney.cli:run"
 include = ["honeymoney*"]
 exclude = ["samples*", "tests*", "examples*"]
 
+[tool.setuptools.package-data]
+honeymoney = ["data/profiles/*.json"]
+
 [build-system]
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
