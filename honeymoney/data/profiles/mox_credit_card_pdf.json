@@ -1,0 +1,30 @@
+{
+  "id": "mox_credit_card_pdf",
+  "account_id": "mox_credit_card",
+  "account": "Mox Credit Card",
+  "institution": "Mox",
+  "country": "HK",
+  "account_currency": "HKD",
+  "owner": "Household",
+  "payment_method": "Credit Card",
+  "date_formats": ["%Y-%m-%d", "%d %b"],
+  "statement_year": 2026,
+  "pdf": {
+    "parser": "pdfplumber",
+    "has_header": false,
+    "row_regex": "^(?:(?P<description_prefix>.*?)\\s+)?(?P<transaction_date>\\d{4}-\\d{2}-\\d{2}|\\d{1,2} [A-Za-z]{3})\\s+(?P<posting_date>\\d{4}-\\d{2}-\\d{2}|\\d{1,2} [A-Za-z]{3})\\s+(?P<description>.*?)(?P<amount>-?\\d[\\d,]*\\.\\d{2})(?!%)(?P<description_suffix>(?:(?!-?\\d[\\d,]*\\.\\d{2}(?!%)).)*)$",
+    "join_fields": {
+      "description": [
+        "description_prefix",
+        "description",
+        "description_suffix"
+      ]
+    },
+    "columns": {
+      "transaction_date": "transaction_date",
+      "posting_date": "posting_date",
+      "description": "description",
+      "amount": "amount"
+    }
+  }
+}

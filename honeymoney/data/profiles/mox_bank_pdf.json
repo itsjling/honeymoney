@@ -1,0 +1,23 @@
+{
+  "id": "mox_bank_pdf",
+  "account_id": "mox_bank_main",
+  "account": "Mox Main",
+  "institution": "Mox",
+  "country": "HK",
+  "account_currency": "HKD",
+  "owner": "Household",
+  "payment_method": "Bank Account",
+  "date_formats": ["%d %b"],
+  "statement_year": 2026,
+  "pdf": {
+    "parser": "pdfplumber",
+    "has_header": false,
+    "row_regex": "^(?P<transaction_date>\\d{1,2} [A-Za-z]{3})\\s+(?P<posting_date>\\d{1,2} [A-Za-z]{3})\\s+(?P<description>.*?)\\s+(?P<amount>-?\\d[\\d,]*\\.\\d{2})$",
+    "columns": {
+      "transaction_date": "transaction_date",
+      "posting_date": "posting_date",
+      "description": "description",
+      "amount": "amount"
+    }
+  }
+}

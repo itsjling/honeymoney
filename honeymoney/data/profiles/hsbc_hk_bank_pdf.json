@@ -1,0 +1,36 @@
+{
+  "id": "hsbc_hk_bank_pdf",
+  "account_id": "hsbc_hk_checking",
+  "account": "HSBC HK Checking",
+  "institution": "HSBC HK",
+  "country": "HK",
+  "account_currency": "HKD",
+  "owner": "Household",
+  "payment_method": "Bank Account",
+  "pdf": {
+    "parser": "pdfplumber",
+    "has_header": true,
+    "required_columns": [
+      "Date",
+      "Description",
+      "Debit",
+      "Credit"
+    ],
+    "columns": {
+      "transaction_date": "Date",
+      "description": "Description",
+      "debit": "Debit",
+      "credit": "Credit",
+      "original_currency": "Currency"
+    }
+  },
+  "skip_descriptions": [
+    "PREVIOUS BALANCE",
+    "BALANCE B/F",
+    "BALANCE C/F",
+    "B/F BALANCE",
+    "C/F BALANCE",
+    "BALANCE BROUGHT FORWARD",
+    "BALANCE CARRIED FORWARD"
+  ]
+}
