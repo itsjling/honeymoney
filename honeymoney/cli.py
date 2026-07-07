@@ -40,7 +40,7 @@ def main(argv: list[str] | None = None) -> int:
     return _run_pipeline(argv)
 
 
-def _run_pipeline(argv: list[str]) -> int:
+def _run_pipeline(argv: list[str], print_import_summary: bool = False) -> int:
     parser = argparse.ArgumentParser(
         prog="honeymoney",
         description="Categorize local household transaction exports.",
@@ -87,29 +87,32 @@ def _run_pipeline(argv: list[str]) -> int:
         REVIEW_NEEDED_COLUMNS,
         [_to_review_row(row) for row in review_rows],
     )
-    _write_report(
-        import_report_path,
-        {
-            "status": "partial_success" if import_warnings else "success",
-            "input_count": len(input_files),
-            "transaction_count": len(transactions),
-            "review_count": len(review_rows),
-            "duplicate_count": _count_flag(transactions, "duplicate_suspected"),
-            "strict": args.strict,
-            "interactive": not args.no_interactive,
-            "output": {
-                "categorized_csv": str(categorized_path),
-                "review_needed_csv": str(review_needed_path),
-                "import_report_json": str(import_report_path),
-            },
-            "files": file_reports,
-            "transaction_flags": _transaction_flags(transactions),
-            "transaction_diagnostics": _transaction_diagnostics(transactions),
-            "warnings": import_warnings + ollama_warnings,
-            "errors": [],
-            "ollama": ollama_report,
+    report = {
+        "status": "partial_success" if import_warnings else "success",
+        "input_count": len(input_files),
+        "transaction_count": len(transactions),
+        "successful_record_count": len(transactions),
+        "unsuccessful_record_count": _unsuccessful_record_count(file_reports),
+        "review_count": len(review_rows),
+        "duplicate_count": _count_flag(transactions, "duplicate_suspected"),
+        "strict": args.strict,
+        "interactive": not args.no_interactive,
+        "output": {
+            "categorized_csv": str(categorized_path),
+            "review_needed_csv": str(review_needed_path),
+            "import_report_json": str(import_report_path),
         },
-    )
+        "files": file_reports,
+        "transaction_flags": _transaction_flags(transactions),
+        "transaction_diagnostics": _transaction_diagnostics(transactions),
+        "warnings": import_warnings + ollama_warnings,
+        "errors": [],
+        "ollama": ollama_report,
+    }
+    _write_report(import_report_path, report)
+
+    if print_import_summary:
+        _print_import_summary(report)
 
     if args.strict and import_warnings:
         return 1
@@ -192,7 +195,23 @@ def _import_command(argv: list[str]) -> int:
         run_args.append("--strict")
     if args.no_interactive:
         run_args.append("--no-interactive")
-    return _run_pipeline(run_args)
+    return _run_pipeline(run_args, print_import_summary=True)
+
+
+def _print_import_summary(report: dict[str, Any]) -> None:
+    print(
+        "Import complete: "
+        f"{report['successful_record_count']} successful records, "
+        f"{report['unsuccessful_record_count']} unsuccessful records"
+    )
+
+
+def _unsuccessful_record_count(file_reports: list[dict[str, str]]) -> int:
+    return sum(
+        1
+        for file_report in file_reports
+        if file_report.get("status") in {"failed", "skipped"}
+    )
 
 
 def _clean_pasted_path(value: str) -> str:

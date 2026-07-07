@@ -245,11 +245,73 @@ class CliBootstrapTest(unittest.TestCase):
 
             self.assertEqual(import_result.returncode, 0, import_result.stderr)
             self.assertIn("Paste a CSV/PDF file or folder path", import_result.stdout)
+            self.assertIn(
+                "Import complete: 1 successful records, 0 unsuccessful records",
+                import_result.stdout,
+            )
             with (root / "output" / "categorized.csv").open(
                 newline="", encoding="utf-8"
             ) as fh:
                 [row] = list(csv.DictReader(fh))
             self.assertEqual(row["merchant"], "PARKNSHOP")
+            report = json.loads((root / "output" / "import_report.json").read_text())
+            self.assertEqual(report["successful_record_count"], 1)
+            self.assertEqual(report["unsuccessful_record_count"], 0)
+
+    def test_import_command_summarizes_unsuccessful_records(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "money"
+            repo_root = Path(__file__).resolve().parents[1]
+            setup_result = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "honeymoney.cli",
+                    "setup",
+                    "--root",
+                    str(root),
+                ],
+                cwd=repo_root,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+            self.assertEqual(setup_result.returncode, 0, setup_result.stderr)
+            pdf_path = root / "statement.pdf"
+            pdf_path.write_bytes(b"%PDF-1.4\n% synthetic placeholder\n")
+            config_path = root / "config.json"
+            config = json.loads(config_path.read_text(encoding="utf-8"))
+            config["pdf"]["enabled"] = False
+            config_path.write_text(json.dumps(config), encoding="utf-8")
+
+            env = dict(os.environ)
+            env["PYTHONPATH"] = str(repo_root)
+            import_result = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "honeymoney.cli",
+                    "import",
+                    str(pdf_path),
+                    "--no-interactive",
+                ],
+                cwd=root,
+                env=env,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+
+            self.assertEqual(import_result.returncode, 0, import_result.stderr)
+            self.assertIn(
+                "Import complete: 0 successful records, 1 unsuccessful records",
+                import_result.stdout,
+            )
+            report = json.loads((root / "output" / "import_report.json").read_text())
+            self.assertEqual(report["successful_record_count"], 0)
+            self.assertEqual(report["unsuccessful_record_count"], 1)
 
     def test_empty_input_run_writes_output_contract(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
