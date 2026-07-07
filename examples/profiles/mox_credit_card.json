@@ -1,0 +1,31 @@
+{
+  "id": "mox_credit_card",
+  "account_id": "mox_credit_card",
+  "account": "Mox Credit Card",
+  "institution": "Mox",
+  "country": "HK",
+  "account_currency": "HKD",
+  "owner": "Household",
+  "payment_method": "Credit Card",
+  "csv": {
+    "detect_headers": [
+      "Transaction date",
+      "Post date",
+      "Billing amount",
+      "Billing currency",
+      "Merchant name",
+      "Credit / Debit"
+    ],
+    "columns": {
+      "transaction_date": "Transaction date",
+      "posting_date": "Post date",
+      "description": "Description",
+      "merchant": "Merchant name",
+      "amount": "Billing amount",
+      "original_currency": "Billing currency",
+      "credit_debit": "Credit / Debit"
+    },
+    "debit_values": ["Debit"],
+    "credit_values": ["Credit"]
+  }
+}

@@ -1,0 +1,11 @@
+{
+  "pages": [
+    [
+      [
+        ["Date", "Description", "Debit", "Credit", "Currency"],
+        ["2026-05-01", "PARKNSHOP", "120.50", "", "HKD"],
+        ["2026-05-02", "SALARY", "", "20000.00", "HKD"]
+      ]
+    ]
+  ]
+}

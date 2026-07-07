@@ -1,0 +1,30 @@
+{
+  "id": "hsbc_hk_credit_card_pdf",
+  "account_id": "hsbc_hk_credit_card",
+  "account": "HSBC HK Credit Card",
+  "institution": "HSBC HK",
+  "country": "HK",
+  "account_currency": "HKD",
+  "owner": "Household",
+  "payment_method": "Credit Card",
+  "date_formats": ["%d%b"],
+  "statement_year": 2026,
+  "pdf": {
+    "parser": "pdfplumber",
+    "has_header": true,
+    "amount_default_sign": "expense",
+    "split_multiline_rows": true,
+    "split_multiline_row_count_columns": [
+      "Post date",
+      "Trans date",
+      "Amount (HKD)"
+    ],
+    "required_columns": ["Post date", "Trans date", "Description of transaction", "Amount (HKD)"],
+    "columns": {
+      "transaction_date": "Trans date",
+      "posting_date": "Post date",
+      "description": "Description of transaction",
+      "amount": "Amount (HKD)"
+    }
+  }
+}

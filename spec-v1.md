@@ -104,27 +104,26 @@ Use exactly these categories unless changed in config:
 Income
 Rent/Mortgage
 Utilities
-Mobile/Internet
 Groceries
-Restaurants
+Dining
 Transport
 Octopus
+Cash
 Shopping
 Travel
-Medical/Health
+Health
 Subscriptions
 Entertainment
-Fitness
 Insurance
 Taxes
-Gifts/Donations
+Gifts
 Household
-Savings/Investments
-Fees
+Savings
+Investments
 Credit Card Payment
 Internal Transfer
 Other
-Review Needed
+Unknown
 ```
 
 ### 6. Owner Field
@@ -135,7 +134,7 @@ Each transaction should be assigned one of:
 Household
 Justin
 Franchesca
-Review Needed
+Unknown
 ```
 
 Default to `Household` unless rules specify otherwise or confidence is low.
@@ -233,7 +232,7 @@ Example `rules.json`:
       "patterns": ["APPLE.COM/BILL", "APPLE"],
       "fields": ["merchant", "description"],
       "category": "Subscriptions",
-      "owner": "Review Needed",
+      "owner": "Household",
       "confidence": 0.7,
       "notes": "Could be subscription, app, hardware, or family purchase"
     },
@@ -414,32 +413,31 @@ Example `config.json`:
     "HKD": 1.0
   },
   "review_confidence_threshold": 0.8,
-  "owners": ["Household", "Justin", "Franchesca", "Review Needed"],
+  "owners": ["Household", "Justin", "Franchesca", "Unknown"],
   "categories": [
     "Income",
     "Rent/Mortgage",
     "Utilities",
-    "Mobile/Internet",
     "Groceries",
-    "Restaurants",
+    "Dining",
     "Transport",
     "Octopus",
+    "Cash",
     "Shopping",
     "Travel",
-    "Medical/Health",
+    "Health",
     "Subscriptions",
     "Entertainment",
-    "Fitness",
     "Insurance",
     "Taxes",
-    "Gifts/Donations",
+    "Gifts",
     "Household",
-    "Savings/Investments",
-    "Fees",
+    "Savings",
+    "Investments",
     "Credit Card Payment",
     "Internal Transfer",
     "Other",
-    "Review Needed"
+    "Unknown"
   ],
   "ollama": {
     "enabled": true,

@@ -1,0 +1,42 @@
+{
+  "version": 1,
+  "rules": [
+    {
+      "id": "parksnshop-groceries",
+      "enabled": true,
+      "priority": 10,
+      "match_type": "keyword",
+      "patterns": ["PARKNSHOP"],
+      "fields": ["merchant", "original_description"],
+      "category": "Groceries",
+      "owner": "Household",
+      "payment_method": "Bank Account",
+      "confidence": 0.98,
+      "notes": "Hong Kong supermarket"
+    },
+    {
+      "id": "salary-income",
+      "enabled": true,
+      "priority": 10,
+      "match_type": "keyword",
+      "patterns": ["SALARY", "PAYROLL"],
+      "fields": ["merchant", "original_description"],
+      "category": "Income",
+      "owner": "Household",
+      "confidence": 0.98,
+      "notes": "Income-like deposit"
+    },
+    {
+      "id": "credit-card-payment",
+      "enabled": true,
+      "priority": 10,
+      "match_type": "regex",
+      "patterns": ["CREDIT\\s+CARD\\s+PAYMENT", "CARD\\s+PAYMENT", "PAYMENT\\s+THANK\\s+YOU"],
+      "fields": ["merchant", "original_description"],
+      "category": "Credit Card Payment",
+      "owner": "Household",
+      "confidence": 0.95,
+      "notes": "Do not count as spending"
+    }
+  ]
+}
