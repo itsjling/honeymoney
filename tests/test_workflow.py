@@ -8,11 +8,13 @@ import sys
 import tempfile
 import threading
 import unittest
+from contextlib import redirect_stdout
 from datetime import date
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
+from unittest.mock import patch
 
-from honeymoney.cli import _resolve_period, _StatusLine
+from honeymoney.cli import _report_command, _resolve_period, _StatusLine
 from honeymoney.schema import ALLOWED_CATEGORIES
 
 
@@ -92,7 +94,7 @@ class WorkflowTest(unittest.TestCase):
             self.assertEqual(correction["reason"], "Categorized interactively")
 
             rerun = self._run_cli(
-                ["import", str(statement), "--no-interactive"], cwd=root
+                ["import", str(statement), "--replace", "--no-interactive"], cwd=root
             )
             self.assertEqual(rerun.returncode, 0, rerun.stderr)
             with (root / "output" / "categorized.csv").open(
@@ -156,6 +158,139 @@ class WorkflowTest(unittest.TestCase):
             self.assertNotIn("have no category", result.stdout)
             self.assertIn("1 records are still uncategorized", result.stdout)
 
+    def test_import_rejects_previously_processed_file_without_replace_or_reset(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._setup_workspace(tmp)
+            statement = root / "may.csv"
+            self._write_statement(statement, ["2026-05-04,PARKNSHOP,-120.50,HKD"])
+            first = self._run_cli(
+                ["import", str(statement), "--no-interactive"], cwd=root
+            )
+            self.assertEqual(first.returncode, 0, first.stderr)
+
+            second = self._run_cli(
+                ["import", str(statement), "--no-interactive"], cwd=root
+            )
+
+            self.assertEqual(second.returncode, 2)
+            self.assertIn("Already imported source file(s): may.csv", second.stderr)
+            self.assertIn("--replace", second.stderr)
+            self.assertIn("--reset", second.stderr)
+
+    def test_import_replace_reprocesses_source_and_drops_stale_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._setup_workspace(tmp)
+            statement = root / "may.csv"
+            self._write_statement(
+                statement,
+                [
+                    "2026-05-04,PARKNSHOP,-120.50,HKD",
+                    "2026-05-05,WELLCOME,-60.00,HKD",
+                ],
+            )
+            first = self._run_cli(
+                ["import", str(statement), "--no-interactive"], cwd=root
+            )
+            self.assertEqual(first.returncode, 0, first.stderr)
+            self._write_statement(statement, ["2026-05-04,PARKNSHOP,-120.50,HKD"])
+
+            replacement = self._run_cli(
+                ["import", str(statement), "--replace", "--no-interactive"], cwd=root
+            )
+
+            self.assertEqual(replacement.returncode, 0, replacement.stderr)
+            with (root / "output" / "categorized.csv").open(
+                newline="", encoding="utf-8"
+            ) as fh:
+                rows = list(csv.DictReader(fh))
+            self.assertEqual([row["merchant"] for row in rows], ["PARKNSHOP"])
+
+    def test_import_reset_reprocesses_source_and_clears_old_corrections(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._setup_workspace(tmp)
+            statement = root / "may.csv"
+            self._write_statement(statement, ["2026-05-04,PARKNSHOP,-120.50,HKD"])
+            first = self._run_cli(
+                ["import", str(statement)],
+                cwd=root,
+                input_text=f"{_category_number('Groceries')}\n",
+            )
+            self.assertEqual(first.returncode, 0, first.stderr)
+
+            reset = self._run_cli(
+                ["import", str(statement), "--reset", "--replace", "--no-interactive"],
+                cwd=root,
+            )
+
+            self.assertEqual(reset.returncode, 0, reset.stderr)
+            with (root / "output" / "categorized.csv").open(
+                newline="", encoding="utf-8"
+            ) as fh:
+                [row] = list(csv.DictReader(fh))
+            self.assertEqual(row["category"], "Unknown")
+            self.assertEqual(row["needs_review"], "true")
+            corrections = (root / "corrections.csv").read_text(encoding="utf-8")
+            self.assertEqual(len(corrections.strip().splitlines()), 1)
+
+    def test_review_command_categorizes_transactions_needing_review(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._setup_workspace(tmp)
+            statement = root / "may.csv"
+            self._write_statement(statement, ["2026-05-04,PARKNSHOP,-120.50,HKD"])
+            import_result = self._run_cli(
+                ["import", str(statement), "--no-interactive"], cwd=root
+            )
+            self.assertEqual(import_result.returncode, 0, import_result.stderr)
+
+            review_result = self._run_cli(
+                ["review"],
+                cwd=root,
+                input_text=f"{_category_number('Groceries')}\n",
+            )
+
+            self.assertEqual(review_result.returncode, 0, review_result.stderr)
+            self.assertIn("1 records need review", review_result.stdout)
+            self.assertIn("Review complete: 1 updated, 0 still need review", review_result.stdout)
+            with (root / "output" / "categorized.csv").open(
+                newline="", encoding="utf-8"
+            ) as fh:
+                [row] = list(csv.DictReader(fh))
+            self.assertEqual(row["category"], "Groceries")
+            self.assertEqual(row["needs_review"], "false")
+            self.assertEqual(row["reason"], "Categorized interactively")
+            self.assertIn("manual_correction", row["flags"])
+
+            with (root / "output" / "review_needed.csv").open(
+                newline="", encoding="utf-8"
+            ) as fh:
+                review_rows = list(csv.DictReader(fh))
+            self.assertEqual(review_rows, [])
+
+            with (root / "corrections.csv").open(newline="", encoding="utf-8") as fh:
+                [correction] = list(csv.DictReader(fh))
+            self.assertEqual(correction["transaction_id"], row["transaction_id"])
+            self.assertEqual(correction["category"], "Groceries")
+
+    def test_review_command_reports_when_no_transactions_need_review(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._setup_workspace(tmp)
+            statement = root / "may.csv"
+            self._write_statement(statement, ["2026-05-04,PARKNSHOP,-120.50,HKD"])
+            import_result = self._run_cli(
+                ["import", str(statement)],
+                cwd=root,
+                input_text=f"{_category_number('Groceries')}\n",
+            )
+            self.assertEqual(import_result.returncode, 0, import_result.stderr)
+
+            review_result = self._run_cli(["review"], cwd=root)
+
+            self.assertEqual(review_result.returncode, 0, review_result.stderr)
+            self.assertIn("No transactions need review.", review_result.stdout)
+            self.assertIn("Review complete: 0 updated, 0 still need review", review_result.stdout)
+
     def test_hsbc_bank_profile_skips_previous_balance_line(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = self._setup_workspace(tmp)
@@ -186,6 +321,31 @@ class WorkflowTest(unittest.TestCase):
             self.assertEqual(merchants, {"PARKNSHOP", "SALARY"})
             self.assertEqual(len(rows), 2)
 
+    def test_import_skips_opening_closing_and_previous_balance_lines(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._setup_workspace(tmp)
+            statement = root / "may.csv"
+            self._write_statement(
+                statement,
+                [
+                    "2026-05-01,Opening Balance,9999.00,HKD",
+                    "2026-05-02,PREVIOUS BALANCE,9999.00,HKD",
+                    "2026-05-04,PARKNSHOP,-120.50,HKD",
+                    "2026-05-31,Closing Balance,9878.50,HKD",
+                ],
+            )
+
+            result = self._run_cli(
+                ["import", str(statement), "--no-interactive"], cwd=root
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            with (root / "output" / "categorized.csv").open(
+                newline="", encoding="utf-8"
+            ) as fh:
+                rows = list(csv.DictReader(fh))
+            self.assertEqual([row["merchant"] for row in rows], ["PARKNSHOP"])
+
     def test_sequential_imports_accumulate_into_ledger(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = self._setup_workspace(tmp)
@@ -194,11 +354,15 @@ class WorkflowTest(unittest.TestCase):
             self._write_statement(first, ["2026-05-04,PARKNSHOP,-120.50,HKD"])
             self._write_statement(second, ["2026-06-10,WELLCOME,-60.00,HKD"])
 
-            for statement in [first, second, second]:
+            for statement in [first, second]:
                 result = self._run_cli(
                     ["import", str(statement), "--no-interactive"], cwd=root
                 )
                 self.assertEqual(result.returncode, 0, result.stderr)
+            result = self._run_cli(
+                ["import", str(second), "--replace", "--no-interactive"], cwd=root
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
 
             self.assertIn("Ledger now has 2 records", result.stdout)
             with (root / "output" / "categorized.csv").open(
@@ -308,7 +472,9 @@ class WorkflowTest(unittest.TestCase):
             )
             self.assertEqual(import_result.returncode, 0, import_result.stderr)
 
-            result = self._run_cli(["report", "--no-open"], cwd=root)
+            result = self._run_cli(
+                ["report", "--month", "2026-05", "--no-open"], cwd=root
+            )
 
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn("Report written to", result.stdout)
@@ -316,10 +482,77 @@ class WorkflowTest(unittest.TestCase):
             self.assertTrue(report_path.exists())
             html = report_path.read_text(encoding="utf-8")
             self.assertIn("Honeymoney Report", html)
-            self.assertIn("All recorded transactions", html)
+            self.assertIn("2026-05-01 to 2026-05-31", html)
             self.assertIn("PARKNSHOP", html)
             for external_reference in ['src="http', "src='http", 'href="http', "url(http", "@import"]:
                 self.assertNotIn(external_reference, html)
+
+    def test_report_command_defaults_to_current_calendar_month(self) -> None:
+        class FixedDate(date):
+            @classmethod
+            def today(cls) -> date:
+                return cls(2026, 7, 7)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            output_dir = root / "output"
+            output_dir.mkdir()
+            ledger_path = output_dir / "categorized.csv"
+            with ledger_path.open("w", newline="", encoding="utf-8") as fh:
+                writer = csv.DictWriter(
+                    fh,
+                    fieldnames=[
+                        "date",
+                        "merchant",
+                        "original_description",
+                        "category",
+                        "amount_hkd",
+                        "account",
+                        "owner",
+                        "needs_review",
+                    ],
+                )
+                writer.writeheader()
+                writer.writerow(
+                    {
+                        "date": "2026-07-04",
+                        "merchant": "JULY SHOP",
+                        "original_description": "JULY SHOP",
+                        "category": "Groceries",
+                        "amount_hkd": "-10.00",
+                    }
+                )
+                writer.writerow(
+                    {
+                        "date": "2026-06-30",
+                        "merchant": "JUNE SHOP",
+                        "original_description": "JUNE SHOP",
+                        "category": "Groceries",
+                        "amount_hkd": "-20.00",
+                    }
+                )
+            config_path = root / "config.json"
+            config_path.write_text(
+                json.dumps({"paths": {"output": str(ledger_path)}}), encoding="utf-8"
+            )
+            report_path = output_dir / "report.html"
+
+            with patch("honeymoney.cli.date", FixedDate), redirect_stdout(io.StringIO()):
+                result = _report_command(
+                    [
+                        "--config",
+                        str(config_path),
+                        "--output",
+                        str(report_path),
+                        "--no-open",
+                    ]
+                )
+
+            self.assertEqual(result, 0)
+            html = report_path.read_text(encoding="utf-8")
+            self.assertIn("2026-07-01 to 2026-07-31", html)
+            self.assertIn("JULY SHOP", html)
+            self.assertNotIn("JUNE SHOP", html)
 
     def test_report_command_can_filter_by_month(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

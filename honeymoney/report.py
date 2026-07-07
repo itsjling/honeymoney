@@ -218,9 +218,9 @@ _PAGE_TEMPLATE = """<!doctype html>
   .switch input:focus-visible + .track { outline: 2px solid var(--focus); outline-offset: 2px; }
 
   .table-wrap { overflow-x: auto; }
-  table.txns { width: 100%; border-collapse: collapse; table-layout: fixed; min-width: 760px; }
-  table.txns col.c-date { width: 104px; }
-  table.txns col.c-merchant { width: 208px; }
+  table.txns { width: 100%; border-collapse: collapse; table-layout: fixed; min-width: 720px; }
+  table.txns col.c-date { width: 132px; }
+  table.txns col.c-merchant { width: 248px; }
   table.txns col.c-category { width: 158px; }
   table.txns col.c-amount { width: 134px; }
   table.txns col.c-account { width: 128px; }
@@ -243,7 +243,6 @@ _PAGE_TEMPLATE = """<!doctype html>
   table.txns tbody tr:hover { background: var(--surface-hover); }
   table.txns td.date { font-family: var(--mono); color: var(--ink-muted); font-size: 0.86rem; }
   table.txns td.merchant { font-weight: 520; }
-  table.txns td.desc { color: var(--ink-muted); }
   table.txns td.account, table.txns td.owner { color: var(--ink-faint); font-size: 0.86rem; }
   table.txns td.amt { font-family: var(--mono); font-variant-numeric: tabular-nums; }
   table.txns td.amt.pos { color: var(--pos); }
@@ -262,9 +261,9 @@ _PAGE_TEMPLATE = """<!doctype html>
   }
   @media (max-width: 720px) {
     .chart-row { grid-template-columns: 1fr; }
-    table.txns col.c-desc, table.txns col.c-account, table.txns col.c-owner { width: 0; }
-    table.txns .col-desc, table.txns .col-account, table.txns .col-owner { display: none; }
-    table.txns { min-width: 520px; }
+    table.txns col.c-account, table.txns col.c-owner { width: 0; }
+    table.txns .col-account, table.txns .col-owner { display: none; }
+    table.txns { min-width: 600px; }
   }
 
   .rise { opacity: 1; }
@@ -323,8 +322,8 @@ _PAGE_TEMPLATE = """<!doctype html>
       <div class="table-wrap">
         <table class="txns" id="transactions">
           <colgroup>
-            <col class="c-date"><col class="c-merchant"><col class="c-desc col-desc">
-            <col class="c-category"><col class="c-amount"><col class="c-account col-account"><col class="c-owner col-owner">
+            <col class="c-date"><col class="c-merchant"><col class="c-category">
+            <col class="c-amount"><col class="c-account col-account"><col class="c-owner col-owner">
           </colgroup>
         </table>
       </div>
@@ -513,7 +512,7 @@ _PAGE_TEMPLATE = """<!doctype html>
     var thead = table.createTHead();
     var headRow = thead.insertRow();
     [
-      ["Date", ""], ["Merchant", ""], ["Description", "col-desc"], ["Category", ""],
+      ["Date", ""], ["Merchant", ""], ["Category", ""],
       ["Amount (HKD)", "amt"], ["Account", "col-account"], ["Owner", "col-owner"]
     ].forEach(function (col) {
       var th = document.createElement("th");
@@ -525,7 +524,7 @@ _PAGE_TEMPLATE = """<!doctype html>
     if (!rows.length) {
       var er = tbody.insertRow();
       var ec = er.insertCell();
-      ec.colSpan = 7;
+      ec.colSpan = 6;
       ec.className = "empty";
       ec.textContent = "No transactions recorded in this view.";
       return;
@@ -536,7 +535,6 @@ _PAGE_TEMPLATE = """<!doctype html>
         var tr = tbody.insertRow();
         cell(tr, "date", row.date);
         cell(tr, "merchant", row.merchant, row.merchant);
-        cell(tr, "desc col-desc", row.description === row.merchant ? "" : row.description, row.description);
 
         var catCell = tr.insertCell();
         var wrap = document.createElement("div");
@@ -599,7 +597,6 @@ def _report_row(row: dict[str, str]) -> dict[str, object]:
     return {
         "date": row.get("date", ""),
         "merchant": row.get("merchant", ""),
-        "description": row.get("original_description", ""),
         "category": row.get("category", ""),
         "amount": _amount_value(row.get("amount_hkd", "")),
         "account": row.get("account", ""),

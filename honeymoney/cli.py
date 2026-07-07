@@ -88,6 +88,8 @@ def main(argv: list[str] | None = None) -> int:
         return _status_command(argv[1:])
     if argv and argv[0] == "report":
         return _report_command(argv[1:])
+    if argv and argv[0] == "review":
+        return _review_command(argv[1:])
     if argv and argv[0] == "run":
         argv = argv[1:]
     return _run_pipeline(argv)
@@ -103,6 +105,8 @@ def _run_pipeline(argv: list[str], print_import_summary: bool = False) -> int:
     parser.add_argument("--config", dest="config_path")
     parser.add_argument("--strict", action="store_true")
     parser.add_argument("--no-interactive", action="store_true")
+    parser.add_argument("--replace", action="store_true")
+    parser.add_argument("--reset", action="store_true")
     args = parser.parse_args(argv)
 
     config = _load_config(args.config_path)
@@ -115,6 +119,23 @@ def _run_pipeline(argv: list[str], print_import_summary: bool = False) -> int:
     output_dir.mkdir(parents=True, exist_ok=True)
 
     input_files = _discover_input_files(input_path)
+    source_files = {_relative_source(input_file, input_path) for input_file in input_files}
+    existing_ledger_rows = _read_ledger(categorized_path)
+    existing_source_files = _processed_source_files(existing_ledger_rows, source_files)
+    if existing_source_files and not (args.replace or args.reset):
+        source_list = ", ".join(sorted(existing_source_files))
+        raise ValueError(
+            f"Already imported source file(s): {source_list}. "
+            "Use --replace to re-import or --reset to re-import and clear corrections."
+        )
+    if args.reset:
+        reset_ids = {
+            row["transaction_id"]
+            for row in existing_ledger_rows
+            if row.get("source_file") in source_files and row.get("transaction_id")
+        }
+        _remove_corrections(config, reset_ids)
+
     profiles = _load_profiles(config)
     profile_mappings = _load_profile_mappings(config)
     transactions, import_warnings, file_reports = _import_transactions(
@@ -148,13 +169,9 @@ def _run_pipeline(argv: list[str], print_import_summary: bool = False) -> int:
     review_rows = [row for row in transactions if row["needs_review"] == "true"]
 
     _status.update("Writing output files...")
-    ledger_rows = _merge_into_ledger(categorized_path, transactions)
-    _write_csv(categorized_path, CATEGORIZED_COLUMNS, ledger_rows)
-    _write_csv(
-        review_needed_path,
-        REVIEW_NEEDED_COLUMNS,
-        [_to_review_row(row) for row in ledger_rows if row.get("needs_review") == "true"],
-    )
+    replace_sources = source_files if args.replace or args.reset else None
+    ledger_rows = _merge_into_ledger(categorized_path, transactions, replace_sources)
+    _write_ledger_outputs(categorized_path, ledger_rows)
     report = {
         "status": "partial_success" if import_warnings else "success",
         "input_count": len(input_files),
@@ -166,6 +183,8 @@ def _run_pipeline(argv: list[str], print_import_summary: bool = False) -> int:
         "duplicate_count": _count_flag(transactions, "duplicate_suspected"),
         "strict": args.strict,
         "interactive": not args.no_interactive,
+        "replace": args.replace or args.reset,
+        "reset": args.reset,
         "output": {
             "categorized_csv": str(categorized_path),
             "review_needed_csv": str(review_needed_path),
@@ -203,8 +222,9 @@ Commands:
   honeymoney setup                 Create a local starter workspace
   honeymoney run                   Process configured CSV/PDF exports
   honeymoney import [PATH]         Import a pasted CSV/PDF path
+  honeymoney review                Categorize transactions needing review
   honeymoney status [MONTH]        Show processed/categorized counts for a period
-  honeymoney report                Open a web report of recorded transactions
+  honeymoney report [MONTH]        Open a web report for a period
   honeymoney help                  Show this help
 
 Common run options:
@@ -213,6 +233,8 @@ Common run options:
   --output output/categorized.csv
   --strict
   --no-interactive                 Skip categorization and profile prompts
+  --replace                        Re-import a previously processed source file
+  --reset                          Re-import and clear old corrections for the source
 
 Common status/report options:
   --month june | --month 2026-06
@@ -261,6 +283,8 @@ def _import_command(argv: list[str]) -> int:
     parser.add_argument("--output", dest="output_path")
     parser.add_argument("--strict", action="store_true")
     parser.add_argument("--no-interactive", action="store_true")
+    parser.add_argument("--replace", action="store_true")
+    parser.add_argument("--reset", action="store_true")
     args = parser.parse_args(argv)
 
     input_path = args.path
@@ -279,6 +303,10 @@ def _import_command(argv: list[str]) -> int:
         run_args.append("--strict")
     if args.no_interactive:
         run_args.append("--no-interactive")
+    if args.reset:
+        run_args.append("--reset")
+    elif args.replace:
+        run_args.append("--replace")
     return _run_pipeline(run_args, print_import_summary=True)
 
 
@@ -292,7 +320,7 @@ def _print_import_summary(report: dict[str, Any]) -> None:
     if uncategorized:
         print(
             f"{uncategorized} records are still uncategorized; "
-            "run `honeymoney status` to see totals or re-run without --no-interactive"
+            "run `honeymoney status` to see totals or `honeymoney review` to categorize"
         )
     ledger = report.get("ledger", {})
     if ledger:
@@ -300,6 +328,33 @@ def _print_import_summary(report: dict[str, Any]) -> None:
             f"Ledger now has {ledger['transaction_count']} records "
             f"({ledger['uncategorized_count']} uncategorized)"
         )
+
+
+def _review_command(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(
+        prog="honeymoney review",
+        description="Interactively categorize transactions marked as needing review.",
+    )
+    parser.add_argument("--config", dest="config_path")
+    parser.add_argument("--output", dest="output_path")
+    args = parser.parse_args(argv)
+
+    config = _load_config(args.config_path)
+    categorized_path = Path(args.output_path or config["paths"]["output"])
+    ledger_rows = _read_ledger(categorized_path)
+    if not ledger_rows:
+        print(f"No processed records found at {categorized_path}")
+        print("Run `honeymoney import` or `honeymoney run` first.")
+        return 0
+
+    reviewed = _prompt_review_transactions(ledger_rows, config)
+    _save_interactive_corrections(reviewed, config)
+    if reviewed:
+        _write_ledger_outputs(categorized_path, ledger_rows)
+
+    remaining = sum(1 for row in ledger_rows if row.get("needs_review") == "true")
+    print(f"Review complete: {len(reviewed)} updated, {remaining} still need review")
+    return 0
 
 
 def _unsuccessful_record_count(file_reports: list[dict[str, str]]) -> int:
@@ -361,7 +416,7 @@ def _status_command(argv: list[str]) -> int:
 def _report_command(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
         prog="honeymoney report",
-        description="Write and open an HTML report of recorded transactions.",
+        description="Write and open an HTML report for a time period.",
     )
     parser.add_argument("period", nargs="?", help="Month name or YYYY-MM")
     parser.add_argument("--month")
@@ -376,14 +431,9 @@ def _report_command(argv: list[str]) -> int:
     categorized_path = Path(config["paths"]["output"])
     ledger_rows = _read_ledger(categorized_path)
 
-    month = args.month or args.period
-    if month or args.start or args.end:
-        start, end = _resolve_period(month, args.start, args.end)
-        rows = _rows_in_period(ledger_rows, start, end)
-        period_label = f"{start.isoformat()} to {end.isoformat()}"
-    else:
-        rows = ledger_rows
-        period_label = "All recorded transactions"
+    start, end = _resolve_period(args.month or args.period, args.start, args.end)
+    rows = _rows_in_period(ledger_rows, start, end)
+    period_label = f"{start.isoformat()} to {end.isoformat()}"
 
     report_path = Path(args.output_path or categorized_path.parent / "report.html")
     report_path.parent.mkdir(parents=True, exist_ok=True)
@@ -466,29 +516,81 @@ def _uncategorized_count(rows: list[dict[str, str]]) -> int:
     return sum(1 for row in rows if not _is_categorized(row))
 
 
+def _processed_source_files(
+    ledger_rows: list[dict[str, str]], source_files: set[str]
+) -> set[str]:
+    return {
+        row.get("source_file", "")
+        for row in ledger_rows
+        if row.get("source_file", "") in source_files
+    }
+
+
 def _merge_into_ledger(
-    categorized_path: Path, transactions: list[dict[str, str]]
+    categorized_path: Path,
+    transactions: list[dict[str, str]],
+    replace_sources: set[str] | None = None,
 ) -> list[dict[str, str]]:
     merged = {
         row["transaction_id"]: row
         for row in _read_ledger(categorized_path)
         if row.get("transaction_id")
+        and (replace_sources is None or row.get("source_file") not in replace_sources)
     }
     for transaction in transactions:
         merged[transaction["transaction_id"]] = transaction
     return list(merged.values())
 
 
+def _write_ledger_outputs(
+    categorized_path: Path, ledger_rows: list[dict[str, str]]
+) -> None:
+    review_needed_path = categorized_path.parent / "review_needed.csv"
+    _write_csv(categorized_path, CATEGORIZED_COLUMNS, ledger_rows)
+    _write_csv(
+        review_needed_path,
+        REVIEW_NEEDED_COLUMNS,
+        [_to_review_row(row) for row in ledger_rows if row.get("needs_review") == "true"],
+    )
+
+
 def _prompt_uncategorized(
     transactions: list[dict[str, str]], config: dict[str, Any]
 ) -> list[dict[str, str]]:
     pending = [row for row in transactions if not _is_categorized(row)]
+    return _prompt_category_assignments(
+        pending,
+        config,
+        f"\n{len(pending)} imported records have no category.",
+    )
+
+
+def _prompt_review_transactions(
+    transactions: list[dict[str, str]], config: dict[str, Any]
+) -> list[dict[str, str]]:
+    pending = [row for row in transactions if row.get("needs_review") == "true"]
+    return _prompt_category_assignments(
+        pending,
+        config,
+        f"\n{len(pending)} records need review.",
+        empty_message="No transactions need review.",
+    )
+
+
+def _prompt_category_assignments(
+    pending: list[dict[str, str]],
+    config: dict[str, Any],
+    heading: str,
+    empty_message: str | None = None,
+) -> list[dict[str, str]]:
     if not pending:
+        if empty_message:
+            print(empty_message)
         return []
     categories = sorted(
         category for category in allowed_categories(config) if category != "Unknown"
     )
-    print(f"\n{len(pending)} imported records have no category.")
+    print(heading)
     print("Pick a category number, press Enter to skip one, or enter q to skip the rest.")
     _print_category_menu(categories)
     categorized = []
@@ -586,6 +688,29 @@ def _save_interactive_corrections(
                     "reason": "Categorized interactively",
                 }
             )
+
+
+def _remove_corrections(config: dict[str, Any], transaction_ids: set[str]) -> None:
+    corrections_path = config.get("corrections")
+    if not corrections_path or not transaction_ids:
+        return
+    path = Path(corrections_path)
+    if not path.exists():
+        return
+
+    with path.open(newline="", encoding="utf-8") as fh:
+        reader = csv.DictReader(fh)
+        fieldnames = reader.fieldnames or ["transaction_id"]
+        rows = [
+            row
+            for row in reader
+            if (row.get("transaction_id") or "").strip() not in transaction_ids
+        ]
+
+    with path.open("w", newline="", encoding="utf-8") as fh:
+        writer = csv.DictWriter(fh, fieldnames=fieldnames, extrasaction="ignore")
+        writer.writeheader()
+        writer.writerows(rows)
 
 
 def _write_starter_workspace(root: Path, force: bool) -> None:
@@ -1070,7 +1195,25 @@ def _skip_descriptions(profile: dict[str, Any]) -> list[str]:
     return [str(pattern).casefold() for pattern in patterns if str(pattern).strip()]
 
 
+def _is_balance_transaction_row(row: dict[str, str]) -> bool:
+    haystacks = [
+        row.get("original_description", ""),
+        row.get("merchant", ""),
+    ]
+    return any(
+        re.search(
+            r"\b(?:opening|closing|previous)\s+balance\b",
+            haystack,
+            flags=re.IGNORECASE,
+        )
+        for haystack in haystacks
+        if haystack
+    )
+
+
 def _row_is_skipped(row: dict[str, str], skip_patterns: list[str]) -> bool:
+    if _is_balance_transaction_row(row):
+        return True
     if not skip_patterns:
         return False
     haystacks = [

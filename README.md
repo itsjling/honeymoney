@@ -91,6 +91,14 @@ Processes one pasted file or folder path. If `PATH` is omitted, the command prom
 
 After each import, any records that could not be auto-categorized are offered for interactive categorization: pick a category number, press Enter to skip one, or enter `q` to skip the rest. Your picks are saved to `corrections.csv` so they stick on future runs. Pass `--no-interactive` to skip the prompts.
 
+Import refuses to process a file whose `source_file` is already present in `categorized.csv`. Use `--replace` to re-import that source and replace its existing ledger rows. Use `--reset` to do the same replacement and also remove old `corrections.csv` entries for that source before categorization; `--reset` supersedes `--replace` if both are present.
+
+```bash
+honeymoney review
+```
+
+Interactively categorizes transactions already marked as needing review in `categorized.csv`. It uses the same category prompt as import, saves your choices to `corrections.csv`, updates `categorized.csv`, and rewrites `review_needed.csv`.
+
 ```bash
 honeymoney status
 honeymoney status june
@@ -105,7 +113,7 @@ honeymoney report
 honeymoney report june --no-open
 ```
 
-Writes a self-contained `output/report.html` with all recorded transactions and a pie chart of the category distribution with per-category sums, then opens it in your browser. Accepts the same period arguments as `status` (default: all recorded transactions); `--no-open` writes the file without opening it. The page loads nothing from the network.
+Writes a self-contained `output/report.html` with transactions for the selected period and a pie chart of the category distribution with per-category sums, then opens it in your browser. Accepts the same period arguments and default as `status` (default: the current calendar month); `--no-open` writes the file without opening it. The page loads nothing from the network.
 
 Useful run options:
 
@@ -174,10 +182,11 @@ Current example profiles cover HSBC Hong Kong and Mox bank/card statement shapes
 ## Review Loop
 
 1. Run Honeymoney.
-2. Open `review_needed.csv`.
-3. Fill correction fields such as `category`, `owner`, `payment_method`, `confidence`, `reason`, or `notes`.
-4. Save those rows as `corrections.csv` or point config at the edited file.
-5. Run Honeymoney again.
+2. Run `honeymoney review` to categorize transactions needing review interactively.
+3. For manual review, open `review_needed.csv`.
+4. Fill correction fields such as `category`, `owner`, `payment_method`, `confidence`, `reason`, or `notes`.
+5. Save those rows as `corrections.csv` or point config at the edited file.
+6. Run Honeymoney again.
 
 Corrections apply by exact `transaction_id` and clear review by default.
 
