@@ -31,6 +31,8 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if argv and argv[0] == "setup":
         return _setup_command(argv[1:])
+    if argv and argv[0] == "import":
+        return _import_command(argv[1:])
     if argv and argv[0] == "run":
         argv = argv[1:]
     return _run_pipeline(argv)
@@ -116,11 +118,13 @@ def _help_text() -> str:
     return """Honeymoney
 
 Commands:
-  honeymoney setup [--root DIR]    Create a local starter workspace
-  honeymoney run --config FILE     Process CSV/PDF exports
+  honeymoney setup                 Create a local starter workspace
+  honeymoney run                   Process configured CSV/PDF exports
+  honeymoney import [PATH]         Import a pasted CSV/PDF path
   honeymoney help                  Show this help
 
 Common run options:
+  --config config.json
   --input DIR_OR_FILE
   --output output/categorized.csv
   --strict
@@ -133,19 +137,67 @@ def _setup_command(argv: list[str]) -> int:
         prog="honeymoney setup",
         description="Create a starter Honeymoney workspace.",
     )
-    parser.add_argument("--root", default=".")
+    parser.add_argument("--root")
     parser.add_argument("--force", action="store_true")
     args = parser.parse_args(argv)
 
-    root = Path(args.root).expanduser().resolve()
+    root = _setup_root(args.root)
     _write_starter_workspace(root, force=args.force)
     print(f"Created Honeymoney workspace at {root}")
     print("")
     print("Next:")
     print(f"  1. Put exported CSV/PDF files in {root / 'input'}")
     print(f"  2. Edit {root / 'config.json'} and {root / 'rules.json'} as needed")
-    print(f"  3. Run honeymoney run --config {root / 'config.json'}")
+    print(f"  3. Run cd {root} && honeymoney run")
     return 0
+
+
+def _setup_root(root_arg: str | None) -> Path:
+    if root_arg:
+        return Path(root_arg).expanduser().resolve()
+    try:
+        value = input("Root folder [./money]: ").strip()
+    except EOFError:
+        value = ""
+    return Path(value or "./money").expanduser().resolve()
+
+
+def _import_command(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(
+        prog="honeymoney import",
+        description="Import one pasted CSV/PDF file or folder path.",
+    )
+    parser.add_argument("path", nargs="?")
+    parser.add_argument("--config", dest="config_path")
+    parser.add_argument("--output", dest="output_path")
+    parser.add_argument("--strict", action="store_true")
+    parser.add_argument("--no-interactive", action="store_true")
+    args = parser.parse_args(argv)
+
+    input_path = args.path
+    if not input_path:
+        input_path = input("Paste a CSV/PDF file or folder path: ")
+    input_path = _clean_pasted_path(input_path)
+    if not input_path:
+        raise ValueError("No import path provided")
+
+    run_args = ["--input", input_path]
+    if args.config_path:
+        run_args.extend(["--config", args.config_path])
+    if args.output_path:
+        run_args.extend(["--output", args.output_path])
+    if args.strict:
+        run_args.append("--strict")
+    if args.no_interactive:
+        run_args.append("--no-interactive")
+    return _run_pipeline(run_args)
+
+
+def _clean_pasted_path(value: str) -> str:
+    cleaned = value.strip()
+    if len(cleaned) >= 2 and cleaned[0] == cleaned[-1] and cleaned[0] in {"'", '"'}:
+        return cleaned[1:-1]
+    return cleaned
 
 
 def _write_starter_workspace(root: Path, force: bool) -> None:
@@ -232,7 +284,11 @@ def _write_text_file(path: Path, content: str, force: bool) -> None:
 
 def _load_config(config_path: str | None) -> dict[str, Any]:
     if config_path is None:
-        return {"paths": {"input": "./input", "output": "./output/categorized.csv"}}
+        default_config = Path("config.json")
+        if default_config.exists():
+            config_path = str(default_config)
+        else:
+            return {"paths": {"input": "./input", "output": "./output/categorized.csv"}}
 
     with Path(config_path).open(encoding="utf-8") as fh:
         config = json.load(fh)

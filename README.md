@@ -17,8 +17,10 @@ python3 -m pip install -e ".[pdf]"
 Create a starter workspace:
 
 ```bash
-honeymoney setup --root ./money
+honeymoney setup
 ```
+
+The command asks where to create the workspace. Press Enter to use `./money`.
 
 Put exported CSV or PDF files in:
 
@@ -29,8 +31,17 @@ Put exported CSV or PDF files in:
 Run the import:
 
 ```bash
-honeymoney run --config ./money/config.json
+cd ./money
+honeymoney run
 ```
+
+You can also import one file or folder directly:
+
+```bash
+honeymoney import
+```
+
+Paste the CSV/PDF path when prompted.
 
 Show the short command reference:
 
@@ -41,14 +52,15 @@ honeymoney help
 You can also run without installing:
 
 ```bash
-python3 -m honeymoney.cli setup --root ./money
-python3 -m honeymoney.cli run --config ./money/config.json
+python3 -m honeymoney.cli setup
+cd ./money
+python3 -m honeymoney.cli run
 ```
 
 ## Commands
 
 ```bash
-honeymoney setup [--root DIR]
+honeymoney setup
 ```
 
 Creates a starter local workspace with:
@@ -61,17 +73,27 @@ Creates a starter local workspace with:
 - `input/`
 - `output/`
 
+Use `--root DIR` to skip the prompt.
+
 ```bash
-honeymoney run --config ./money/config.json
+honeymoney run
 ```
 
-Processes the configured input files and writes output files.
+Processes the configured input files and writes output files. It reads `config.json` from the current directory unless you pass `--config`.
+
+```bash
+honeymoney import [PATH]
+```
+
+Processes one pasted file or folder path. If `PATH` is omitted, the command prompts you to paste it.
 
 Useful run options:
 
 ```bash
-honeymoney run --config ./money/config.json --strict --no-interactive
-honeymoney run --config ./money/config.json --input ./samples --output ./output/categorized.csv
+honeymoney run --strict --no-interactive
+honeymoney run --config ./money/config.json
+honeymoney import "/path/to/statement.pdf"
+honeymoney run --input ./samples --output ./output/categorized.csv
 ```
 
 ## Outputs

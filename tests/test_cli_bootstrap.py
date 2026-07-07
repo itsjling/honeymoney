@@ -54,6 +54,7 @@ class CliBootstrapTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("honeymoney setup", result.stdout)
         self.assertIn("honeymoney run", result.stdout)
+        self.assertIn("honeymoney import", result.stdout)
         self.assertIn("honeymoney help", result.stdout)
 
     def test_setup_command_creates_starter_workspace(self) -> None:
@@ -122,6 +123,133 @@ class CliBootstrapTest(unittest.TestCase):
             self.assertTrue((root / "output" / "categorized.csv").exists())
             self.assertTrue((root / "output" / "review_needed.csv").exists())
             self.assertTrue((root / "output" / "import_report.json").exists())
+
+    def test_setup_command_prompts_for_root_when_not_provided(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "prompted-money"
+
+            result = subprocess.run(
+                [sys.executable, "-m", "honeymoney.cli", "setup"],
+                cwd=Path(__file__).resolve().parents[1],
+                input=f"{root}\n",
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("Root folder", result.stdout)
+            self.assertTrue((root / "config.json").exists())
+            self.assertTrue((root / "input").is_dir())
+
+    def test_run_command_uses_config_in_current_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "money"
+            repo_root = Path(__file__).resolve().parents[1]
+            setup_result = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "honeymoney.cli",
+                    "setup",
+                    "--root",
+                    str(root),
+                ],
+                cwd=repo_root,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+            self.assertEqual(setup_result.returncode, 0, setup_result.stderr)
+            (root / "input" / "transactions.csv").write_text(
+                "\n".join(
+                    [
+                        "Date,Description,Amount,Currency",
+                        "2026-05-04,PARKNSHOP,-120.50,HKD",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            env = dict(os.environ)
+            env["PYTHONPATH"] = str(repo_root)
+            run_result = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "honeymoney.cli",
+                    "run",
+                    "--no-interactive",
+                ],
+                cwd=root,
+                env=env,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+
+            self.assertEqual(run_result.returncode, 0, run_result.stderr)
+            with (root / "output" / "categorized.csv").open(
+                newline="", encoding="utf-8"
+            ) as fh:
+                [row] = list(csv.DictReader(fh))
+            self.assertEqual(row["merchant"], "PARKNSHOP")
+            self.assertEqual(row["amount_hkd"], "-120.50")
+
+    def test_import_command_prompts_for_pasted_filepath(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "money"
+            repo_root = Path(__file__).resolve().parents[1]
+            setup_result = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "honeymoney.cli",
+                    "setup",
+                    "--root",
+                    str(root),
+                ],
+                cwd=repo_root,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+            self.assertEqual(setup_result.returncode, 0, setup_result.stderr)
+            csv_path = root / "pasted.csv"
+            csv_path.write_text(
+                "\n".join(
+                    [
+                        "Date,Description,Amount,Currency",
+                        "2026-05-04,PARKNSHOP,-120.50,HKD",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            env = dict(os.environ)
+            env["PYTHONPATH"] = str(repo_root)
+            import_result = subprocess.run(
+                [sys.executable, "-m", "honeymoney.cli", "import"],
+                cwd=root,
+                env=env,
+                input=f'"{csv_path}"\n',
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+
+            self.assertEqual(import_result.returncode, 0, import_result.stderr)
+            self.assertIn("Paste a CSV/PDF file or folder path", import_result.stdout)
+            with (root / "output" / "categorized.csv").open(
+                newline="", encoding="utf-8"
+            ) as fh:
+                [row] = list(csv.DictReader(fh))
+            self.assertEqual(row["merchant"], "PARKNSHOP")
 
     def test_empty_input_run_writes_output_contract(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -3418,9 +3546,17 @@ class CliBootstrapTest(unittest.TestCase):
     def test_pdf_without_parser_dependency_is_reported_without_fake_rows(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
+            fake_modules = root / "fake_modules"
+            fake_modules.mkdir()
+            (fake_modules / "pdfplumber.py").write_text(
+                "raise ImportError('pdfplumber intentionally unavailable')\n",
+                encoding="utf-8",
+            )
             pdf_path = root / "statement.pdf"
             pdf_path.write_bytes(b"%PDF-1.4\n% synthetic placeholder\n")
             output_dir = root / "output"
+            env = dict(os.environ)
+            env["PYTHONPATH"] = f"{fake_modules}:{Path(__file__).resolve().parents[1]}"
 
             result = subprocess.run(
                 [
@@ -3434,6 +3570,7 @@ class CliBootstrapTest(unittest.TestCase):
                     "--no-interactive",
                 ],
                 cwd=Path(__file__).resolve().parents[1],
+                env=env,
                 text=True,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
