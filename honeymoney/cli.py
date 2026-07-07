@@ -4,8 +4,10 @@ import argparse
 import csv
 import hashlib
 import json
+import logging
 import re
 import sys
+from contextlib import contextmanager
 from datetime import datetime
 from datetime import date
 from decimal import Decimal, InvalidOperation
@@ -706,55 +708,69 @@ def _import_pdf(
     required_columns = set(pdf_settings.get("required_columns", []))
     rows: list[dict[str, str]] = []
     warnings: list[str] = []
-    with pdfplumber.open(str(pdf_path)) as pdf:
-        for page_number, page in enumerate(pdf.pages, start=1):
-            tables = _pdf_tables(page)
-            if not tables:
-                warnings.append(f"No table found on {pdf_path.name} page {page_number}")
-                text_length = _pymupdf_page_text_length(pdf_path, page_number)
-                if text_length is not None:
-                    warnings.append(
-                        "PyMuPDF text fallback found "
-                        f"{text_length} characters on {pdf_path.name} page {page_number}"
-                    )
-                continue
-            for table in tables:
-                header = [str(cell or "").strip() for cell in table[0]] if has_header else []
-                if required_columns and not required_columns.issubset(set(header)):
-                    warnings.append(
-                        "Skipped table on "
-                        f"{pdf_path.name} page {page_number} because required columns were missing"
-                    )
+    with _quiet_pdfminer_font_warnings():
+        with pdfplumber.open(str(pdf_path)) as pdf:
+            for page_number, page in enumerate(pdf.pages, start=1):
+                tables = _pdf_tables(page)
+                if not tables:
+                    warnings.append(f"No table found on {pdf_path.name} page {page_number}")
+                    text_length = _pymupdf_page_text_length(pdf_path, page_number)
+                    if text_length is not None:
+                        warnings.append(
+                            "PyMuPDF text fallback found "
+                            f"{text_length} characters on {pdf_path.name} page {page_number}"
+                        )
                     continue
-                data_rows = table[1:] if has_header else table
-                start_row = 2 if has_header else 1
-                for table_row_number, cells in enumerate(data_rows, start=start_row):
-                    expanded_rows = _expand_pdf_cells(
-                        cells, header, has_header, pdf_settings
-                    )
-                    for expanded_index, expanded_cells in enumerate(expanded_rows, start=1):
-                        row_number = (
-                            f"{table_row_number}.{expanded_index}"
-                            if len(expanded_rows) > 1
-                            else table_row_number
+                for table in tables:
+                    header = [str(cell or "").strip() for cell in table[0]] if has_header else []
+                    if required_columns and not required_columns.issubset(set(header)):
+                        warnings.append(
+                            "Skipped table on "
+                            f"{pdf_path.name} page {page_number} because required columns were missing"
                         )
-                        source_row = _pdf_source_row(expanded_cells, header, has_header)
-                        source_row = _apply_pdf_row_regex(source_row, pdf_settings)
-                        if source_row is None:
-                            continue
-                        rows.append(
-                            _normalized_row(
-                                source_row=source_row,
-                                row_number=row_number,
-                                profile=profile,
-                                config=config,
-                                input_path=pdf_path,
-                                input_root=input_root,
-                                columns=columns,
-                                source_page=str(page_number),
+                        continue
+                    data_rows = table[1:] if has_header else table
+                    start_row = 2 if has_header else 1
+                    for table_row_number, cells in enumerate(data_rows, start=start_row):
+                        expanded_rows = _expand_pdf_cells(
+                            cells, header, has_header, pdf_settings
+                        )
+                        for expanded_index, expanded_cells in enumerate(
+                            expanded_rows, start=1
+                        ):
+                            row_number = (
+                                f"{table_row_number}.{expanded_index}"
+                                if len(expanded_rows) > 1
+                                else table_row_number
                             )
-                        )
+                            source_row = _pdf_source_row(expanded_cells, header, has_header)
+                            source_row = _apply_pdf_row_regex(source_row, pdf_settings)
+                            if source_row is None:
+                                continue
+                            rows.append(
+                                _normalized_row(
+                                    source_row=source_row,
+                                    row_number=row_number,
+                                    profile=profile,
+                                    config=config,
+                                    input_path=pdf_path,
+                                    input_root=input_root,
+                                    columns=columns,
+                                    source_page=str(page_number),
+                                )
+                            )
     return rows, warnings
+
+
+@contextmanager
+def _quiet_pdfminer_font_warnings() -> Any:
+    logger = logging.getLogger("pdfminer.pdffont")
+    previous_level = logger.level
+    logger.setLevel(logging.ERROR)
+    try:
+        yield
+    finally:
+        logger.setLevel(previous_level)
 
 
 def _pymupdf_page_text_length(pdf_path: Path, page_number: int) -> int | None:
@@ -779,10 +795,31 @@ def _apply_pdf_row_regex(
         return source_row
 
     row_text = " ".join(value for value in source_row.values() if value).strip()
-    match = re.search(str(row_regex), row_text)
+    match = re.search(str(row_regex), row_text, flags=re.DOTALL)
     if match is None:
         return None
-    return {key: _clean_text(value) for key, value in match.groupdict().items()}
+    row = {key: _clean_text(value) for key, value in match.groupdict().items()}
+    return _join_pdf_regex_fields(row, pdf_settings)
+
+
+def _join_pdf_regex_fields(
+    source_row: dict[str, str], pdf_settings: dict[str, Any]
+) -> dict[str, str]:
+    join_fields = pdf_settings.get("join_fields", {})
+    if not isinstance(join_fields, dict):
+        return source_row
+
+    for target, fields in join_fields.items():
+        if not isinstance(fields, list):
+            continue
+        joined = " ".join(
+            source_row.get(str(field), "").strip()
+            for field in fields
+            if source_row.get(str(field), "").strip()
+        )
+        if joined:
+            source_row[str(target)] = " ".join(_clean_text(joined).split())
+    return source_row
 
 
 def _expand_pdf_cells(

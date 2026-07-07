@@ -4307,6 +4307,154 @@ def open(path):
             self.assertEqual([row["transaction_date"] for row in rows], ["2026-04-01", "2026-04-02"])
             self.assertEqual([row["amount_hkd"] for row in rows], ["88.00", "-12.00"])
 
+    def test_pdf_row_regex_can_join_capture_groups_without_font_warning_noise(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            fake_modules = root / "fake_modules"
+            fake_modules.mkdir()
+            (fake_modules / "pdfplumber.py").write_text(
+                """
+import builtins
+import json
+import logging
+
+
+class Page:
+    def __init__(self, table):
+        self._table = table
+
+    def extract_tables(self):
+        return [self._table]
+
+
+class Pdf:
+    def __init__(self, path):
+        self.path = path
+        self.pages = []
+
+    def __enter__(self):
+        logging.getLogger("pdfminer.pdffont").warning(
+            "Could not get FontBBox from font descriptor because None cannot be parsed as 4 floats"
+        )
+        data = json.loads(builtins.open(self.path, encoding="utf-8").read())
+        self.pages = [Page(page) for page in data["pages"]]
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+
+def open(path):
+    return Pdf(path)
+""",
+                encoding="utf-8",
+            )
+            pdf_path = root / "statement.pdf"
+            pdf_path.write_text(
+                json.dumps(
+                    {
+                        "pages": [
+                            [
+                                [""],
+                                ["Activity date Settlement date Description Amount (HKD)"],
+                                [
+                                    "ShopBack IDFC Coffee Hong "
+                                    "22 May 22 May -99.90 Kong HKG"
+                                ],
+                            ]
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            profile_path = root / "profile.json"
+            profile_path.write_text(
+                json.dumps(
+                    {
+                        "id": "mox_credit_card_pdf",
+                        "account_id": "mox_credit_card",
+                        "account": "Mox Credit Card",
+                        "institution": "Mox",
+                        "country": "HK",
+                        "account_currency": "HKD",
+                        "owner": "Household",
+                        "payment_method": "Credit Card",
+                        "date_formats": ["%d %b"],
+                        "statement_year": 2026,
+                        "pdf": {
+                            "has_header": False,
+                            "row_regex": (
+                                r"^(?:(?P<description_prefix>.*?)\s+)?"
+                                r"(?P<transaction_date>\d{1,2} [A-Za-z]{3})\s+"
+                                r"(?P<posting_date>\d{1,2} [A-Za-z]{3})\s+"
+                                r"(?P<description>.*?)"
+                                r"(?P<amount>-?\d[\d,]*\.\d{2})(?!%)"
+                                r"(?P<description_suffix>"
+                                r"(?:(?!-?\d[\d,]*\.\d{2}(?!%)).)*)$"
+                            ),
+                            "join_fields": {
+                                "description": [
+                                    "description_prefix",
+                                    "description",
+                                    "description_suffix",
+                                ]
+                            },
+                            "columns": {
+                                "transaction_date": "transaction_date",
+                                "posting_date": "posting_date",
+                                "description": "description",
+                                "amount": "amount",
+                            },
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            config_path = root / "config.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "profiles": [str(profile_path)],
+                        "exchange_rates": {"HKD": 1.0},
+                        "pdf": {"enabled": True, "parser": "pdfplumber"},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            output_dir = root / "output"
+            env = dict(**os.environ)
+            env["PYTHONPATH"] = f"{fake_modules}:{Path(__file__).resolve().parents[1]}"
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "honeymoney.cli",
+                    "--input",
+                    str(pdf_path),
+                    "--output",
+                    str(output_dir / "categorized.csv"),
+                    "--config",
+                    str(config_path),
+                    "--no-interactive",
+                ],
+                cwd=Path(__file__).resolve().parents[1],
+                env=env,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertNotIn("Could not get FontBBox", result.stderr)
+            with (output_dir / "categorized.csv").open(newline="", encoding="utf-8") as fh:
+                [row] = list(csv.DictReader(fh))
+
+            self.assertEqual(row["merchant"], "ShopBack IDFC Coffee Hong Kong HKG")
+            self.assertEqual(row["transaction_date"], "2026-05-22")
+            self.assertEqual(row["amount_hkd"], "-99.90")
+
     def test_committed_synthetic_pdf_table_fixtures_cover_bank_and_card_shapes(self) -> None:
         fixtures_dir = Path(__file__).resolve().parent / "fixtures" / "pdf_tables"
         profiles_dir = Path(__file__).resolve().parents[1] / "examples" / "profiles"
@@ -4407,7 +4555,7 @@ def open(path):
                         "merchant": "US SHOP",
                         "transaction_date": "2026-05-03",
                         "amount_hkd": "-78.00",
-                        "original_currency": "USD",
+                        "original_currency": "HKD",
                         "source_page": "2",
                         "source_row": "2",
                     },

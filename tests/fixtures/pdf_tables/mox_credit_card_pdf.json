@@ -2,14 +2,14 @@
   "pages": [
     [
       [
-        ["Transaction date", "Post date", "Description", "Billing amount", "Billing currency", "Posted amount", "Posted currency", "Merchant name", "Credit / Debit"],
-        ["2026-05-01", "2026-05-02", "DINNER", "188.00", "HKD", "-188.00", "HKD", "DINING PLACE", "Debit"]
+        ["Activity date Settlement date Description Foreign currency amount Amount (HKD)"],
+        ["01 May 02 May DINING PLACE -188.00"]
       ]
     ],
     [
       [
-        ["Transaction date", "Post date", "Description", "Billing amount", "Billing currency", "Posted amount", "Posted currency", "Merchant name", "Credit / Debit"],
-        ["2026-05-03", "2026-05-04", "US PURCHASE", "10.00", "USD", "-78.00", "HKD", "US SHOP", "Debit"]
+        ["Activity date Settlement date Description Foreign currency amount Amount (HKD)"],
+        ["US SHOP 03 May 04 May -78.00"]
       ]
     ]
   ]

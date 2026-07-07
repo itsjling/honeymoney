@@ -7,29 +7,24 @@
   "account_currency": "HKD",
   "owner": "Household",
   "payment_method": "Credit Card",
+  "date_formats": ["%Y-%m-%d", "%d %b"],
+  "statement_year": 2026,
   "pdf": {
     "parser": "pdfplumber",
-    "has_header": true,
-    "required_columns": [
-      "Transaction date",
-      "Post date",
-      "Billing amount",
-      "Billing currency",
-      "Merchant name",
-      "Credit / Debit"
-    ],
-    "columns": {
-      "transaction_date": "Transaction date",
-      "posting_date": "Post date",
-      "description": "Description",
-      "merchant": "Merchant name",
-      "amount": "Billing amount",
-      "original_currency": "Billing currency",
-      "posted_amount": "Posted amount",
-      "posted_currency": "Posted currency",
-      "credit_debit": "Credit / Debit"
+    "has_header": false,
+    "row_regex": "^(?:(?P<description_prefix>.*?)\\s+)?(?P<transaction_date>\\d{4}-\\d{2}-\\d{2}|\\d{1,2} [A-Za-z]{3})\\s+(?P<posting_date>\\d{4}-\\d{2}-\\d{2}|\\d{1,2} [A-Za-z]{3})\\s+(?P<description>.*?)(?P<amount>-?\\d[\\d,]*\\.\\d{2})(?!%)(?P<description_suffix>(?:(?!-?\\d[\\d,]*\\.\\d{2}(?!%)).)*)$",
+    "join_fields": {
+      "description": [
+        "description_prefix",
+        "description",
+        "description_suffix"
+      ]
     },
-    "debit_values": ["Debit"],
-    "credit_values": ["Credit"]
+    "columns": {
+      "transaction_date": "transaction_date",
+      "posting_date": "posting_date",
+      "description": "description",
+      "amount": "amount"
+    }
   }
 }
