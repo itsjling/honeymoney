@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 import argparse
+import calendar
 import csv
 import hashlib
 import json
 import logging
 import re
+import shutil
 import sys
+import webbrowser
 from contextlib import contextmanager
+from importlib import resources
 from datetime import datetime
 from datetime import date
 from decimal import Decimal, InvalidOperation
@@ -22,8 +26,53 @@ from honeymoney.schema import (
     allowed_owners,
     allowed_payment_methods,
 )
+from honeymoney.report import build_report_html
 from honeymoney.rules import apply_rules, load_rules
-from honeymoney.ollama import apply_ollama_fallback
+from honeymoney.ollama import apply_ollama_fallback, OllamaProgress
+
+
+class _StatusLine:
+    """A single terminal line that updates in place; silent when not a TTY."""
+
+    def __init__(self, stream: Any = None, enabled: bool | None = None) -> None:
+        self._stream = stream if stream is not None else sys.stderr
+        self._enabled = self._stream.isatty() if enabled is None else enabled
+        self._last_length = 0
+
+    def update(self, text: str) -> None:
+        if not self._enabled:
+            return
+        width = shutil.get_terminal_size().columns
+        if width > 1 and len(text) >= width:
+            text = text[: width - 2] + "…"
+        padding = " " * max(0, self._last_length - len(text))
+        self._stream.write(f"\r{text}{padding}")
+        self._stream.flush()
+        self._last_length = len(text)
+
+    def clear(self) -> None:
+        if not self._enabled or not self._last_length:
+            return
+        self._stream.write("\r" + " " * self._last_length + "\r")
+        self._stream.flush()
+        self._last_length = 0
+
+
+_status = _StatusLine()
+
+
+def _ollama_progress(progress: OllamaProgress) -> None:
+    range_label = (
+        str(progress.start_index)
+        if progress.start_index == progress.end_index
+        else f"{progress.start_index}-{progress.end_index}"
+    )
+    elapsed = f", {progress.elapsed_seconds:.0f}s" if progress.elapsed_seconds else ""
+    _status.update(
+        "Categorizing via Ollama... "
+        f"batch {progress.batch_number}/{progress.batch_count} "
+        f"(transactions {range_label} of {progress.total}{elapsed})"
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -35,6 +84,10 @@ def main(argv: list[str] | None = None) -> int:
         return _setup_command(argv[1:])
     if argv and argv[0] == "import":
         return _import_command(argv[1:])
+    if argv and argv[0] == "status":
+        return _status_command(argv[1:])
+    if argv and argv[0] == "report":
+        return _report_command(argv[1:])
     if argv and argv[0] == "run":
         argv = argv[1:]
     return _run_pipeline(argv)
@@ -73,19 +126,34 @@ def _run_pipeline(argv: list[str], print_import_summary: bool = False) -> int:
         profile_mappings=profile_mappings,
         profile_mappings_path=config.get("profile_mappings"),
     )
+    _status.update("Applying categorization rules...")
     rules = load_rules(config)
     apply_rules(transactions, rules, config)
+    _status.update("Checking for duplicates...")
     _annotate_duplicate_suspicions(transactions)
-    ollama_report, ollama_warnings = apply_ollama_fallback(transactions, config)
+    ollama_report, ollama_warnings = apply_ollama_fallback(
+        transactions, config, progress=_ollama_progress
+    )
+    if ollama_warnings:
+        _status.clear()
+        for warning in ollama_warnings:
+            print(f"Warning: {warning}", file=sys.stderr)
+    _status.update("Applying corrections...")
     corrections = _load_corrections(config)
     _apply_corrections(transactions, corrections)
+    _status.clear()
+    if not args.no_interactive:
+        categorized_interactively = _prompt_uncategorized(transactions, config)
+        _save_interactive_corrections(categorized_interactively, config)
     review_rows = [row for row in transactions if row["needs_review"] == "true"]
 
-    _write_csv(categorized_path, CATEGORIZED_COLUMNS, transactions)
+    _status.update("Writing output files...")
+    ledger_rows = _merge_into_ledger(categorized_path, transactions)
+    _write_csv(categorized_path, CATEGORIZED_COLUMNS, ledger_rows)
     _write_csv(
         review_needed_path,
         REVIEW_NEEDED_COLUMNS,
-        [_to_review_row(row) for row in review_rows],
+        [_to_review_row(row) for row in ledger_rows if row.get("needs_review") == "true"],
     )
     report = {
         "status": "partial_success" if import_warnings else "success",
@@ -94,6 +162,7 @@ def _run_pipeline(argv: list[str], print_import_summary: bool = False) -> int:
         "successful_record_count": len(transactions),
         "unsuccessful_record_count": _unsuccessful_record_count(file_reports),
         "review_count": len(review_rows),
+        "uncategorized_count": _uncategorized_count(transactions),
         "duplicate_count": _count_flag(transactions, "duplicate_suspected"),
         "strict": args.strict,
         "interactive": not args.no_interactive,
@@ -101,6 +170,13 @@ def _run_pipeline(argv: list[str], print_import_summary: bool = False) -> int:
             "categorized_csv": str(categorized_path),
             "review_needed_csv": str(review_needed_path),
             "import_report_json": str(import_report_path),
+        },
+        "ledger": {
+            "transaction_count": len(ledger_rows),
+            "review_count": sum(
+                1 for row in ledger_rows if row.get("needs_review") == "true"
+            ),
+            "uncategorized_count": _uncategorized_count(ledger_rows),
         },
         "files": file_reports,
         "transaction_flags": _transaction_flags(transactions),
@@ -110,6 +186,7 @@ def _run_pipeline(argv: list[str], print_import_summary: bool = False) -> int:
         "ollama": ollama_report,
     }
     _write_report(import_report_path, report)
+    _status.clear()
 
     if print_import_summary:
         _print_import_summary(report)
@@ -126,6 +203,8 @@ Commands:
   honeymoney setup                 Create a local starter workspace
   honeymoney run                   Process configured CSV/PDF exports
   honeymoney import [PATH]         Import a pasted CSV/PDF path
+  honeymoney status [MONTH]        Show processed/categorized counts for a period
+  honeymoney report                Open a web report of recorded transactions
   honeymoney help                  Show this help
 
 Common run options:
@@ -133,7 +212,12 @@ Common run options:
   --input DIR_OR_FILE
   --output output/categorized.csv
   --strict
-  --no-interactive
+  --no-interactive                 Skip categorization and profile prompts
+
+Common status/report options:
+  --month june | --month 2026-06
+  --start 2026-06-01 --end 2026-06-30
+  --no-open                        (report) Write the HTML without opening it
 """
 
 
@@ -204,6 +288,18 @@ def _print_import_summary(report: dict[str, Any]) -> None:
         f"{report['successful_record_count']} successful records, "
         f"{report['unsuccessful_record_count']} unsuccessful records"
     )
+    uncategorized = report.get("uncategorized_count", 0)
+    if uncategorized:
+        print(
+            f"{uncategorized} records are still uncategorized; "
+            "run `honeymoney status` to see totals or re-run without --no-interactive"
+        )
+    ledger = report.get("ledger", {})
+    if ledger:
+        print(
+            f"Ledger now has {ledger['transaction_count']} records "
+            f"({ledger['uncategorized_count']} uncategorized)"
+        )
 
 
 def _unsuccessful_record_count(file_reports: list[dict[str, str]]) -> int:
@@ -219,6 +315,277 @@ def _clean_pasted_path(value: str) -> str:
     if len(cleaned) >= 2 and cleaned[0] == cleaned[-1] and cleaned[0] in {"'", '"'}:
         return cleaned[1:-1]
     return cleaned
+
+
+def _status_command(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(
+        prog="honeymoney status",
+        description="Show processed and categorized counts for a time period.",
+    )
+    parser.add_argument("period", nargs="?", help="Month name or YYYY-MM")
+    parser.add_argument("--month")
+    parser.add_argument("--start")
+    parser.add_argument("--end")
+    parser.add_argument("--config", dest="config_path")
+    args = parser.parse_args(argv)
+
+    start, end = _resolve_period(args.month or args.period, args.start, args.end)
+    config = _load_config(args.config_path)
+    categorized_path = Path(config["paths"]["output"])
+    ledger_rows = _read_ledger(categorized_path)
+    if not ledger_rows:
+        print(f"No processed records found at {categorized_path}")
+        print("Run `honeymoney import` or `honeymoney run` first.")
+        return 0
+
+    rows = _rows_in_period(ledger_rows, start, end)
+    categorized = [row for row in rows if _is_categorized(row)]
+    statements = {row.get("source_file", "") for row in rows if row.get("source_file")}
+    review = [row for row in rows if row.get("needs_review") == "true"]
+
+    print(f"Status for {start.isoformat()} to {end.isoformat()}")
+    print(f"  Statements processed: {len(statements)}")
+    print(f"  Records processed:    {len(rows)}")
+    print(f"  Categorized:          {len(categorized)}")
+    print(f"  Uncategorized:        {len(rows) - len(categorized)}")
+    print(f"  Needs review:         {len(review)}")
+    undated = sum(1 for row in ledger_rows if _parse_iso_date(row.get("date", "")) is None)
+    outside = len(ledger_rows) - len(rows) - undated
+    print(
+        f"Ledger total: {len(ledger_rows)} records "
+        f"({outside} outside this period, {undated} with unparseable dates)"
+    )
+    return 0
+
+
+def _report_command(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(
+        prog="honeymoney report",
+        description="Write and open an HTML report of recorded transactions.",
+    )
+    parser.add_argument("period", nargs="?", help="Month name or YYYY-MM")
+    parser.add_argument("--month")
+    parser.add_argument("--start")
+    parser.add_argument("--end")
+    parser.add_argument("--config", dest="config_path")
+    parser.add_argument("--output", dest="output_path", help="Report HTML path")
+    parser.add_argument("--no-open", action="store_true")
+    args = parser.parse_args(argv)
+
+    config = _load_config(args.config_path)
+    categorized_path = Path(config["paths"]["output"])
+    ledger_rows = _read_ledger(categorized_path)
+
+    month = args.month or args.period
+    if month or args.start or args.end:
+        start, end = _resolve_period(month, args.start, args.end)
+        rows = _rows_in_period(ledger_rows, start, end)
+        period_label = f"{start.isoformat()} to {end.isoformat()}"
+    else:
+        rows = ledger_rows
+        period_label = "All recorded transactions"
+
+    report_path = Path(args.output_path or categorized_path.parent / "report.html")
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    report_path.write_text(build_report_html(rows, period_label), encoding="utf-8")
+    print(f"Report written to {report_path} ({len(rows)} transactions)")
+    if not args.no_open:
+        webbrowser.open(report_path.resolve().as_uri())
+    return 0
+
+
+def _resolve_period(
+    month: str | None, start: str | None, end: str | None, today: date | None = None
+) -> tuple[date, date]:
+    today = today or date.today()
+    if month and (start or end):
+        raise ValueError("Use either a month or --start/--end, not both")
+    if month:
+        return _month_period(month, today)
+    if start or end:
+        start_date = date.fromisoformat(start) if start else date.min
+        end_date = date.fromisoformat(end) if end else today
+        if start_date > end_date:
+            raise ValueError(f"Start date {start_date} is after end date {end_date}")
+        return start_date, end_date
+    return _month_period(f"{today.year}-{today.month:02d}", today)
+
+
+def _month_period(value: str, today: date) -> tuple[date, date]:
+    text = value.strip().casefold()
+    numeric = re.fullmatch(r"(\d{4})-(\d{1,2})", text)
+    if numeric:
+        year, month = int(numeric.group(1)), int(numeric.group(2))
+    else:
+        month_names = {
+            name.casefold(): index
+            for index, name in enumerate(calendar.month_name)
+            if name
+        }
+        month_names.update(
+            {
+                name.casefold(): index
+                for index, name in enumerate(calendar.month_abbr)
+                if name
+            }
+        )
+        month = month_names.get(text, 0)
+        year = today.year
+    if not 1 <= month <= 12:
+        raise ValueError(f"Unrecognized month: {value}")
+    last_day = calendar.monthrange(year, month)[1]
+    return date(year, month, 1), date(year, month, last_day)
+
+
+def _read_ledger(categorized_path: Path) -> list[dict[str, str]]:
+    if not categorized_path.exists():
+        return []
+    with categorized_path.open(newline="", encoding="utf-8") as fh:
+        return [
+            {column: row.get(column) or "" for column in CATEGORIZED_COLUMNS}
+            for row in csv.DictReader(fh)
+        ]
+
+
+def _rows_in_period(
+    rows: list[dict[str, str]], start: date, end: date
+) -> list[dict[str, str]]:
+    in_period = []
+    for row in rows:
+        row_date = _parse_iso_date(row.get("date", ""))
+        if row_date is not None and start <= row_date <= end:
+            in_period.append(row)
+    return in_period
+
+
+def _is_categorized(row: dict[str, str]) -> bool:
+    return row.get("category", "") not in {"", "Unknown"}
+
+
+def _uncategorized_count(rows: list[dict[str, str]]) -> int:
+    return sum(1 for row in rows if not _is_categorized(row))
+
+
+def _merge_into_ledger(
+    categorized_path: Path, transactions: list[dict[str, str]]
+) -> list[dict[str, str]]:
+    merged = {
+        row["transaction_id"]: row
+        for row in _read_ledger(categorized_path)
+        if row.get("transaction_id")
+    }
+    for transaction in transactions:
+        merged[transaction["transaction_id"]] = transaction
+    return list(merged.values())
+
+
+def _prompt_uncategorized(
+    transactions: list[dict[str, str]], config: dict[str, Any]
+) -> list[dict[str, str]]:
+    pending = [row for row in transactions if not _is_categorized(row)]
+    if not pending:
+        return []
+    categories = sorted(
+        category for category in allowed_categories(config) if category != "Unknown"
+    )
+    print(f"\n{len(pending)} imported records have no category.")
+    print("Pick a category number, press Enter to skip one, or enter q to skip the rest.")
+    _print_category_menu(categories)
+    categorized = []
+    for position, transaction in enumerate(pending, start=1):
+        print(f"\n[{position}/{len(pending)}] {_transaction_prompt_line(transaction)}")
+        while True:
+            try:
+                choice = input("Category [number/Enter/q]: ").strip().casefold()
+            except EOFError:
+                return categorized
+            if choice == "":
+                break
+            if choice == "q":
+                return categorized
+            try:
+                selected = int(choice)
+            except ValueError:
+                selected = 0
+            if 1 <= selected <= len(categories):
+                _apply_interactive_category(transaction, categories[selected - 1])
+                categorized.append(transaction)
+                break
+            print("Enter a number from the list, Enter to skip, or q to stop.")
+    return categorized
+
+
+def _print_category_menu(categories: list[str], columns: int = 3) -> None:
+    if not categories:
+        return
+    row_count = (len(categories) + columns - 1) // columns
+    for row in range(row_count):
+        cells = []
+        for column in range(columns):
+            index = column * row_count + row
+            if index < len(categories):
+                cells.append(f"{index + 1:>2}. {categories[index]:<22}")
+        print("  " + "".join(cells).rstrip())
+
+
+def _transaction_prompt_line(transaction: dict[str, str]) -> str:
+    amount = transaction.get("posted_amount", "")
+    currency = transaction.get("posted_currency", "")
+    merchant = transaction.get("merchant", "")
+    description = transaction.get("original_description", "")
+    name = merchant or description or "(no description)"
+    parts = [transaction.get("date", ""), f"{amount} {currency}".strip(), name]
+    if description and description != name:
+        parts.append(description)
+    return "  ".join(part for part in parts if part)
+
+
+def _apply_interactive_category(transaction: dict[str, str], category: str) -> None:
+    transaction["category"] = category
+    transaction["confidence"] = "1.00"
+    transaction["needs_review"] = "false"
+    transaction["reason"] = "Categorized interactively"
+    transaction["flags"] = _remove_flag(transaction["flags"], "uncategorized")
+    transaction["flags"] = _append_flag(transaction["flags"], "manual_correction")
+
+
+def _save_interactive_corrections(
+    categorized: list[dict[str, str]], config: dict[str, Any]
+) -> None:
+    corrections_path = config.get("corrections")
+    if not corrections_path or not categorized:
+        return
+    path = Path(corrections_path)
+    fieldnames = [
+        "transaction_id",
+        "category",
+        "owner",
+        "payment_method",
+        "confidence",
+        "reason",
+        "notes",
+    ]
+    exists = path.exists()
+    if exists:
+        with path.open(newline="", encoding="utf-8") as fh:
+            header = next(csv.reader(fh), None)
+        if header:
+            fieldnames = header
+    else:
+        path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", newline="", encoding="utf-8") as fh:
+        writer = csv.DictWriter(fh, fieldnames=fieldnames, extrasaction="ignore")
+        if not exists:
+            writer.writeheader()
+        for transaction in categorized:
+            writer.writerow(
+                {
+                    "transaction_id": transaction["transaction_id"],
+                    "category": transaction["category"],
+                    "confidence": "1.00",
+                    "reason": "Categorized interactively",
+                }
+            )
 
 
 def _write_starter_workspace(root: Path, force: bool) -> None:
@@ -258,6 +625,7 @@ def _write_starter_workspace(root: Path, force: bool) -> None:
         },
         force,
     )
+    starter_profile_paths = _copy_starter_profiles(profiles_dir, force)
     _write_json_file(profile_mappings_path, {"filename_patterns": []}, force)
     _write_json_file(rules_path, {"version": 1, "rules": []}, force)
     _write_text_file(
@@ -271,7 +639,8 @@ def _write_starter_workspace(root: Path, force: bool) -> None:
             "base_currency": "HKD",
             "exchange_rates": {"HKD": 1.0, "USD": 7.8},
             "review_confidence_threshold": 0.8,
-            "profiles": [str(profile_path)],
+            "profiles": [str(profile_path)]
+            + [str(path) for path in starter_profile_paths],
             "profile_mappings": str(profile_mappings_path),
             "rules": str(rules_path),
             "corrections": str(corrections_path),
@@ -280,7 +649,8 @@ def _write_starter_workspace(root: Path, force: bool) -> None:
                 "enabled": False,
                 "url": "http://localhost:11434/api/generate",
                 "model": "qwen2.5:7b-instruct",
-                "batch_size": 20,
+                "batch_size": 5,
+                "timeout_seconds": 120,
             },
             "paths": {
                 "input": str(input_dir),
@@ -289,6 +659,18 @@ def _write_starter_workspace(root: Path, force: bool) -> None:
         },
         force,
     )
+
+
+def _copy_starter_profiles(profiles_dir: Path, force: bool) -> list[Path]:
+    copied = []
+    profile_resources = resources.files("honeymoney").joinpath("data/profiles")
+    for resource in sorted(profile_resources.iterdir(), key=lambda item: item.name):
+        if not resource.name.endswith(".json"):
+            continue
+        destination = profiles_dir / resource.name
+        _write_text_file(destination, resource.read_text(encoding="utf-8"), force)
+        copied.append(destination)
+    return copied
 
 
 def _write_json_file(path: Path, data: dict[str, Any], force: bool) -> None:
@@ -456,7 +838,10 @@ def _import_transactions(
     transactions: list[dict[str, str]] = []
     warnings: list[str] = []
     file_reports: list[dict[str, str]] = []
-    for input_file in input_files:
+    for file_number, input_file in enumerate(input_files, start=1):
+        _status.update(
+            f"Importing statements... ({file_number}/{len(input_files)}) {input_file.name}"
+        )
         suffix = input_file.suffix.lower()
         if suffix == ".pdf":
             if config.get("pdf", {}).get("enabled") is False:
@@ -625,6 +1010,7 @@ def _mapped_profile(
 def _prompt_for_profile(
     csv_path: Path, profiles: list[dict[str, Any]], profile_mappings_path: str | None
 ) -> dict[str, Any]:
+    _status.clear()
     print(f"Select profile for {csv_path.name}:")
     for index, profile in enumerate(profiles, start=1):
         label = profile.get("id") or profile.get("account_id") or "unknown"
@@ -679,6 +1065,23 @@ def _csv_headers(csv_path: Path) -> set[str]:
             return set()
 
 
+def _skip_descriptions(profile: dict[str, Any]) -> list[str]:
+    patterns = profile.get("skip_descriptions", [])
+    return [str(pattern).casefold() for pattern in patterns if str(pattern).strip()]
+
+
+def _row_is_skipped(row: dict[str, str], skip_patterns: list[str]) -> bool:
+    if not skip_patterns:
+        return False
+    haystacks = [
+        row.get("original_description", "").casefold(),
+        row.get("merchant", "").casefold(),
+    ]
+    return any(
+        pattern in haystack for pattern in skip_patterns for haystack in haystacks if haystack
+    )
+
+
 def _import_csv(
     csv_path: Path,
     profile: dict[str, Any],
@@ -690,22 +1093,24 @@ def _import_csv(
     columns["debit_values"] = csv_settings.get("debit_values", [])
     columns["credit_values"] = csv_settings.get("credit_values", [])
     columns["amount_default_sign"] = csv_settings.get("amount_default_sign", "")
+    skip_patterns = _skip_descriptions(profile)
     rows: list[dict[str, str]] = []
 
     with csv_path.open(newline="", encoding="utf-8") as fh:
         reader = csv.DictReader(fh)
         for row_number, source_row in enumerate(reader, start=2):
-            rows.append(
-                _normalized_row(
-                    source_row=source_row,
-                    row_number=row_number,
-                    profile=profile,
-                    config=config,
-                    input_path=csv_path,
-                    input_root=input_root,
-                    columns=columns,
-                )
+            normalized = _normalized_row(
+                source_row=source_row,
+                row_number=row_number,
+                profile=profile,
+                config=config,
+                input_path=csv_path,
+                input_root=input_root,
+                columns=columns,
             )
+            if _row_is_skipped(normalized, skip_patterns):
+                continue
+            rows.append(normalized)
 
     return rows
 
@@ -725,6 +1130,7 @@ def _import_pdf(
     columns["amount_default_sign"] = pdf_settings.get("amount_default_sign", "")
     has_header = pdf_settings.get("has_header", True)
     required_columns = set(pdf_settings.get("required_columns", []))
+    skip_patterns = _skip_descriptions(profile)
     rows: list[dict[str, str]] = []
     warnings: list[str] = []
     with _quiet_pdfminer_font_warnings():
@@ -766,18 +1172,19 @@ def _import_pdf(
                             source_row = _apply_pdf_row_regex(source_row, pdf_settings)
                             if source_row is None:
                                 continue
-                            rows.append(
-                                _normalized_row(
-                                    source_row=source_row,
-                                    row_number=row_number,
-                                    profile=profile,
-                                    config=config,
-                                    input_path=pdf_path,
-                                    input_root=input_root,
-                                    columns=columns,
-                                    source_page=str(page_number),
-                                )
+                            normalized = _normalized_row(
+                                source_row=source_row,
+                                row_number=row_number,
+                                profile=profile,
+                                config=config,
+                                input_path=pdf_path,
+                                input_root=input_root,
+                                columns=columns,
+                                source_page=str(page_number),
                             )
+                            if _row_is_skipped(normalized, skip_patterns):
+                                continue
+                            rows.append(normalized)
     return rows, warnings
 
 
@@ -1365,6 +1772,7 @@ def run() -> int:
     try:
         return main()
     except ValueError as error:
+        _status.clear()
         print(str(error), file=sys.stderr)
         return 2
 

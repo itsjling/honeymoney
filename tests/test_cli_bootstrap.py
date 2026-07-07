@@ -95,8 +95,20 @@ class CliBootstrapTest(unittest.TestCase):
             )
             self.assertEqual(
                 config["profiles"],
-                [str(resolved_root / "profiles" / "starter_csv.json")],
+                [str(resolved_root / "profiles" / "starter_csv.json")]
+                + [
+                    str(resolved_root / "profiles" / name)
+                    for name in [
+                        "hsbc_hk_bank.json",
+                        "hsbc_hk_bank_pdf.json",
+                        "hsbc_hk_credit_card_pdf.json",
+                        "mox_bank_pdf.json",
+                        "mox_credit_card.json",
+                        "mox_credit_card_pdf.json",
+                    ]
+                ],
             )
+            self.assertTrue((root / "profiles" / "mox_credit_card_pdf.json").exists())
             self.assertEqual(config["rules"], str(resolved_root / "rules.json"))
             self.assertEqual(
                 config["corrections"], str(resolved_root / "corrections.csv")
@@ -3365,6 +3377,7 @@ class CliBootstrapTest(unittest.TestCase):
             self.assertEqual(row["needs_review"], "true")
             self.assertIn("ollama_unavailable", row["flags"])
             self.assertIn("Ollama unavailable", row["reason"])
+            self.assertIn("Warning: Ollama unavailable", result.stderr)
             self.assertEqual(report["ollama"]["status"], "unavailable")
             self.assertGreaterEqual(len(report["warnings"]), 1)
 
