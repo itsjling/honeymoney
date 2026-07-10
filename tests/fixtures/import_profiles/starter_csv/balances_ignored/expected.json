@@ -1,0 +1,34 @@
+{
+  "warnings": [],
+  "rows": [
+    {
+      "date": "2026-05-02",
+      "transaction_date": "2026-05-02",
+      "posting_date": "",
+      "merchant": "PARKNSHOP",
+      "original_description": "PARKNSHOP",
+      "original_amount": "-120.50",
+      "original_currency": "HKD",
+      "posted_amount": "-120.50",
+      "posted_currency": "HKD",
+      "amount_hkd": "-120.50",
+      "account_id": "starter_csv",
+      "account": "Starter CSV",
+      "institution": "Local",
+      "country": "HK",
+      "owner": "Household",
+      "payment_method": "Bank Account",
+      "source_file": "statement.csv",
+      "source_row": "3",
+      "_flags_contains": ["uncategorized"]
+    },
+    {
+      "date": "2026-05-03",
+      "transaction_date": "2026-05-03",
+      "merchant": "SALARY",
+      "original_amount": "20000.00",
+      "amount_hkd": "20000.00",
+      "source_row": "4"
+    }
+  ]
+}

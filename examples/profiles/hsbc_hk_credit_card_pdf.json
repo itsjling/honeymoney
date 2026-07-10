@@ -12,6 +12,15 @@
   "pdf": {
     "parser": "pdfplumber",
     "has_header": true,
+    "word_rows": true,
+    "word_header_markers": ["Post date", "Trans date", "Description", "Amount"],
+    "word_table_end_markers": ["Note:", "REWARDCASH"],
+    "word_columns": {
+      "Post date": [50, 95],
+      "Trans date": [95, 135],
+      "Description of transaction": [135, 490],
+      "Amount (HKD)": [490, 575]
+    },
     "amount_default_sign": "expense",
     "split_multiline_rows": true,
     "split_multiline_row_count_columns": [

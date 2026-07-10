@@ -1,0 +1,33 @@
+{
+  "warnings": [],
+  "rows": [
+    {
+      "date": "2026-05-01",
+      "transaction_date": "2026-05-01",
+      "posting_date": "2026-05-02",
+      "merchant": "Mox Cafe",
+      "original_description": "CARD PURCHASE",
+      "original_amount": "-88.00",
+      "posted_amount": "-88.00",
+      "amount_hkd": "-88.00",
+      "original_currency": "HKD",
+      "account_id": "mox_credit_card",
+      "account": "Mox Credit Card",
+      "institution": "Mox",
+      "payment_method": "Credit Card",
+      "source_file": "statement.csv",
+      "source_row": "2"
+    },
+    {
+      "date": "2026-05-03",
+      "transaction_date": "2026-05-03",
+      "posting_date": "2026-05-04",
+      "merchant": "Mox Cafe",
+      "original_description": "REFUND",
+      "original_amount": "20.00",
+      "posted_amount": "20.00",
+      "amount_hkd": "20.00",
+      "source_row": "3"
+    }
+  ]
+}

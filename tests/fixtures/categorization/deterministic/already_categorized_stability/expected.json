@@ -1,0 +1,19 @@
+{
+  "rows": [
+    {
+      "transaction_id": "txn_stable",
+      "category": "Dining",
+      "needs_review": "false",
+      "reason": "Previously categorized",
+      "flags": ""
+    },
+    {
+      "transaction_id": "txn_matched",
+      "category": "Groceries",
+      "confidence": "0.90",
+      "needs_review": "false",
+      "reason": "Matched rule parksnshop",
+      "_flags_contains": ["matched_rule:parksnshop"]
+    }
+  ]
+}

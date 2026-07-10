@@ -1,0 +1,19 @@
+{
+  "report": {
+    "status": "invalid_response",
+    "applied_count": 0,
+    "invalid_count": 1
+  },
+  "warnings": [
+    "Ollama returned invalid categorizations",
+    "Ollama returned no categorization for 1 transaction(s)"
+  ],
+  "rows": [
+    {
+      "transaction_id": "txn_unknown",
+      "category": "Unknown",
+      "needs_review": "true",
+      "_flags_contains": ["ollama_invalid_response"]
+    }
+  ]
+}

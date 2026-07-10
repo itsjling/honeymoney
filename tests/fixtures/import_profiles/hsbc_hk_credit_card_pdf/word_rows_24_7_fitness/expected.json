@@ -1,0 +1,33 @@
+{
+  "warnings": [],
+  "rows": [
+    {
+      "date": "2026-06-01",
+      "transaction_date": "2026-06-01",
+      "posting_date": "2026-06-02",
+      "merchant": "24/7 FITNESS HONG KONG HK",
+      "original_description": "24/7 FITNESS HONG KONG HK",
+      "original_amount": "-498.00",
+      "posted_amount": "-498.00",
+      "amount_hkd": "-498.00",
+      "account_id": "hsbc_hk_credit_card",
+      "institution": "HSBC HK",
+      "payment_method": "Credit Card",
+      "source_file": "statement.pdf",
+      "source_page": "1",
+      "source_row": "1",
+      "notes": "Imported from PDF"
+    },
+    {
+      "date": "2026-06-02",
+      "transaction_date": "2026-06-02",
+      "posting_date": "2026-06-04",
+      "merchant": "DCC FEE-NON-HK MERCHANT",
+      "original_amount": "-0.08",
+      "posted_amount": "-0.08",
+      "amount_hkd": "-0.08",
+      "source_page": "1",
+      "source_row": "2"
+    }
+  ]
+}

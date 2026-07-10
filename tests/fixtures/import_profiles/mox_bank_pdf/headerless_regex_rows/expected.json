@@ -1,0 +1,32 @@
+{
+  "warnings": [],
+  "rows": [
+    {
+      "date": "2026-04-01",
+      "transaction_date": "2026-04-01",
+      "posting_date": "2026-04-02",
+      "merchant": "Coffee Shop",
+      "original_description": "Coffee Shop",
+      "original_amount": "88.00",
+      "posted_amount": "88.00",
+      "amount_hkd": "88.00",
+      "account_id": "mox_bank_main",
+      "account": "Mox Main",
+      "institution": "Mox",
+      "payment_method": "Bank Account",
+      "source_file": "statement.pdf",
+      "source_page": "1",
+      "source_row": "1",
+      "notes": "Imported from PDF"
+    },
+    {
+      "date": "2026-04-02",
+      "transaction_date": "2026-04-02",
+      "posting_date": "2026-04-03",
+      "merchant": "Refund",
+      "original_amount": "-12.00",
+      "amount_hkd": "-12.00",
+      "source_row": "3"
+    }
+  ]
+}

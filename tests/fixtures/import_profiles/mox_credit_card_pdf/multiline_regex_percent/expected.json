@@ -1,0 +1,23 @@
+{
+  "warnings": [],
+  "rows": [
+    {
+      "date": "2026-05-22",
+      "transaction_date": "2026-05-22",
+      "posting_date": "2026-05-23",
+      "merchant": "ShopBack IDFC Coffee Hong Kong HKG 5%",
+      "original_description": "ShopBack IDFC Coffee Hong Kong HKG 5%",
+      "original_amount": "-99.90",
+      "posted_amount": "-99.90",
+      "amount_hkd": "-99.90",
+      "account_id": "mox_credit_card",
+      "account": "Mox Credit Card",
+      "institution": "Mox",
+      "payment_method": "Credit Card",
+      "source_file": "statement.pdf",
+      "source_page": "1",
+      "source_row": "1",
+      "notes": "Imported from PDF"
+    }
+  ]
+}

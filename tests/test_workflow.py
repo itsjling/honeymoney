@@ -346,6 +346,149 @@ class WorkflowTest(unittest.TestCase):
                 rows = list(csv.DictReader(fh))
             self.assertEqual([row["merchant"] for row in rows], ["PARKNSHOP"])
 
+    def test_hsbc_credit_card_pdf_word_rows_keep_amounts_with_merchants(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            fake_modules = root / "fake_modules"
+            fake_modules.mkdir()
+            (fake_modules / "pdfplumber.py").write_text(
+                """
+import builtins
+import json
+
+
+class Page:
+    def __init__(self, words):
+        self._words = words
+
+    def extract_words(self, **kwargs):
+        return self._words
+
+    def extract_tables(self):
+        return []
+
+
+class Pdf:
+    def __init__(self, path):
+        self.path = path
+        self.pages = []
+
+    def __enter__(self):
+        data = json.loads(builtins.open(self.path, encoding="utf-8").read())
+        self.pages = [Page(page["words"]) for page in data["pages"]]
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+
+def open(path):
+    return Pdf(path)
+""",
+                encoding="utf-8",
+            )
+
+            def word(text: str, top: float, x0: float) -> dict[str, object]:
+                return {"text": text, "top": top, "x0": x0}
+
+            pdf_path = root / "statement.pdf"
+            pdf_path.write_text(
+                json.dumps(
+                    {
+                        "pages": [
+                            {
+                                "words": [
+                                    word("Post", 10, 60),
+                                    word("date", 10, 75),
+                                    word("Trans", 10, 100),
+                                    word("date", 10, 120),
+                                    word("Description", 10, 267),
+                                    word("Amount", 10, 495),
+                                    word("PREVIOUS", 20, 137),
+                                    word("BALANCE", 20, 180),
+                                    word("5,632.88", 20, 518),
+                                    word("19MAY", 30, 64),
+                                    word("18MAY", 30, 99),
+                                    word("GOGO", 30, 137),
+                                    word("TECH", 30, 161),
+                                    word("LIMITED", 30, 185),
+                                    word("95.00", 30, 532),
+                                    word("02JUN", 40, 64),
+                                    word("01JUN", 40, 99),
+                                    word("24/7", 40, 137),
+                                    word("FITNESS", 40, 161),
+                                    word("HONG", 40, 262),
+                                    word("KONG", 40, 286),
+                                    word("HK", 40, 334),
+                                    word("498.00", 40, 527),
+                                    word("04JUN", 50, 64),
+                                    word("02JUN", 50, 99),
+                                    word("DCC", 50, 137),
+                                    word("FEE-NON-HK", 50, 156),
+                                    word("MERCHANT", 50, 209),
+                                    word("0.08", 50, 537),
+                                ]
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            profile_path = root / "profile.json"
+            bundled_profile_path = (
+                REPO_ROOT
+                / "honeymoney"
+                / "data"
+                / "profiles"
+                / "hsbc_hk_credit_card_pdf.json"
+            )
+            profile_path.write_text(
+                bundled_profile_path.read_text(encoding="utf-8"),
+                encoding="utf-8",
+            )
+            config_path = root / "config.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "profiles": [str(profile_path)],
+                        "exchange_rates": {"HKD": 1.0},
+                        "pdf": {"enabled": True, "parser": "pdfplumber"},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            output_dir = root / "output"
+            env = dict(os.environ)
+            env["PYTHONPATH"] = f"{fake_modules}:{REPO_ROOT}"
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "honeymoney.cli",
+                    "--input",
+                    str(pdf_path),
+                    "--output",
+                    str(output_dir / "categorized.csv"),
+                    "--config",
+                    str(config_path),
+                    "--no-interactive",
+                ],
+                cwd=REPO_ROOT,
+                env=env,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            with (output_dir / "categorized.csv").open(newline="", encoding="utf-8") as fh:
+                rows = {row["merchant"]: row for row in csv.DictReader(fh)}
+            self.assertNotIn("PREVIOUS BALANCE", rows)
+            self.assertEqual(rows["24/7 FITNESS HONG KONG HK"]["amount_hkd"], "-498.00")
+            self.assertEqual(rows["DCC FEE-NON-HK MERCHANT"]["amount_hkd"], "-0.08")
+
     def test_sequential_imports_accumulate_into_ledger(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = self._setup_workspace(tmp)
@@ -769,6 +912,44 @@ class ResolvePeriodTest(unittest.TestCase):
     def test_rejects_start_after_end(self) -> None:
         with self.assertRaises(ValueError):
             _resolve_period(None, "2026-06-01", "2026-05-01", today=self.TODAY)
+
+
+class CategoryMenuTest(unittest.TestCase):
+    def _render(self, categories: list[str], columns: int) -> list[str]:
+        import contextlib
+        import io
+
+        from honeymoney.cli import _print_category_menu
+
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            _print_category_menu(categories, columns=columns)
+        return buffer.getvalue().splitlines()
+
+    def _leading_numbers(self, lines: list[str]) -> list[int]:
+        return [int(line.strip().split(".", 1)[0]) for line in lines]
+
+    def test_numbers_increment_down_each_column(self) -> None:
+        lines = self._render(["A", "B", "C", "D", "E"], columns=2)
+
+        # First column, read top to bottom, increments 1, 2, 3.
+        self.assertEqual(self._leading_numbers(lines), [1, 2, 3])
+        # Column-major: item 1 and item 4 sit on the same first row.
+        self.assertIn(" 1. A", lines[0])
+        self.assertIn(" 4. D", lines[0])
+        self.assertIn(" 5. E", lines[1])
+        self.assertIn(" 3. C", lines[2])
+
+    def test_full_taxonomy_columns_are_sequential(self) -> None:
+        categories = sorted(ALLOWED_CATEGORIES - {"Unknown"})
+        lines = self._render(categories, columns=3)
+
+        row_count = (len(categories) + 2) // 3
+        self.assertEqual(len(lines), row_count)
+        self.assertEqual(self._leading_numbers(lines), list(range(1, row_count + 1)))
+
+    def test_empty_categories_print_nothing(self) -> None:
+        self.assertEqual(self._render([], columns=3), [])
 
 
 if __name__ == "__main__":

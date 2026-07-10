@@ -1,0 +1,29 @@
+{
+  "rows": [
+    {
+      "transaction_id": "txn_apple",
+      "category": "Subscriptions",
+      "owner": "Justin",
+      "payment_method": "Credit Card",
+      "confidence": "0.91",
+      "needs_review": "false",
+      "reason": "Matched rule apple-exact-high-priority",
+      "notes": "Recurring Apple charge",
+      "_flags_contains": ["matched_rule:apple-exact-high-priority"]
+    },
+    {
+      "transaction_id": "txn_gogo",
+      "category": "Transport",
+      "confidence": "0.60",
+      "needs_review": "true",
+      "_flags_contains": ["matched_rule:gogo-low-confidence"]
+    },
+    {
+      "transaction_id": "txn_dcc",
+      "category": "Other",
+      "confidence": "0.99",
+      "needs_review": "false",
+      "_flags_contains": ["matched_rule:dcc-regex"]
+    }
+  ]
+}

@@ -1,0 +1,3 @@
+Transaction date,Post date,Description,Billing amount,Billing currency,Merchant name,Credit / Debit
+2026-05-01,2026-05-02,CARD PURCHASE,88.00,HKD,Mox Cafe,Debit
+2026-05-03,2026-05-04,REFUND,20.00,HKD,Mox Cafe,Credit

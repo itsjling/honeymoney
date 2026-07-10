@@ -1,0 +1,32 @@
+{
+  "report": {
+    "status": "success",
+    "applied_count": 3,
+    "invalid_count": 0
+  },
+  "warnings": [],
+  "request_batches": [["txn_1", "txn_2"], ["txn_3"]],
+  "rows": [
+    {
+      "transaction_id": "txn_1",
+      "category": "Dining",
+      "confidence": "0.90",
+      "needs_review": "false",
+      "reason": "Batch response"
+    },
+    {
+      "transaction_id": "txn_2",
+      "category": "Dining",
+      "confidence": "0.90",
+      "needs_review": "false",
+      "reason": "Batch response"
+    },
+    {
+      "transaction_id": "txn_3",
+      "category": "Dining",
+      "confidence": "0.90",
+      "needs_review": "false",
+      "reason": "Batch response"
+    }
+  ]
+}

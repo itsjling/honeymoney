@@ -1,0 +1,43 @@
+[
+  {
+    "id": "apple-keyword-low-priority",
+    "enabled": true,
+    "priority": 1,
+    "match_type": "keyword",
+    "patterns": ["APPLE"],
+    "fields": ["merchant"],
+    "category": "Shopping",
+    "confidence": 0.95
+  },
+  {
+    "id": "apple-exact-high-priority",
+    "enabled": true,
+    "priority": 10,
+    "match_type": "exact",
+    "patterns": ["APPLE.COM/BILL"],
+    "fields": ["merchant"],
+    "category": "Subscriptions",
+    "confidence": 0.91,
+    "owner": "Justin",
+    "payment_method": "Credit Card",
+    "notes": "Recurring Apple charge"
+  },
+  {
+    "id": "gogo-low-confidence",
+    "enabled": true,
+    "match_type": "keyword",
+    "patterns": ["GOGO"],
+    "fields": ["merchant"],
+    "category": "Transport",
+    "confidence": 0.6
+  },
+  {
+    "id": "dcc-regex",
+    "enabled": true,
+    "match_type": "regex",
+    "patterns": ["FEE-.+MERCHANT"],
+    "fields": ["merchant"],
+    "category": "Other",
+    "confidence": 0.99
+  }
+]

@@ -1279,6 +1279,24 @@ def _import_pdf(
     with _quiet_pdfminer_font_warnings():
         with pdfplumber.open(str(pdf_path)) as pdf:
             for page_number, page in enumerate(pdf.pages, start=1):
+                word_rows = _pdf_word_source_rows(page, pdf_settings)
+                if word_rows is not None:
+                    for row_number, source_row in enumerate(word_rows, start=1):
+                        normalized = _normalized_row(
+                            source_row=source_row,
+                            row_number=row_number,
+                            profile=profile,
+                            config=config,
+                            input_path=pdf_path,
+                            input_root=input_root,
+                            columns=columns,
+                            source_page=str(page_number),
+                        )
+                        if _row_is_skipped(normalized, skip_patterns):
+                            continue
+                        rows.append(normalized)
+                    continue
+
                 tables = _pdf_tables(page)
                 if not tables:
                     warnings.append(f"No table found on {pdf_path.name} page {page_number}")
@@ -1329,6 +1347,89 @@ def _import_pdf(
                                 continue
                             rows.append(normalized)
     return rows, warnings
+
+
+def _pdf_word_source_rows(
+    page: Any, pdf_settings: dict[str, Any]
+) -> list[dict[str, str]] | None:
+    if not pdf_settings.get("word_rows", False) or not hasattr(page, "extract_words"):
+        return None
+
+    word_columns = pdf_settings.get("word_columns", {})
+    if not isinstance(word_columns, dict):
+        return None
+
+    words = page.extract_words(x_tolerance=1, y_tolerance=3) or []
+    lines = _pdf_word_lines(words, float(pdf_settings.get("word_y_tolerance", 3)))
+    if not lines:
+        return None
+
+    rows: list[dict[str, str]] = []
+    in_table = False
+    for line in lines:
+        text = " ".join(str(word.get("text", "")) for word in line).strip()
+        if not in_table:
+            in_table = _pdf_word_header_seen(text, pdf_settings)
+            continue
+        if _pdf_word_table_end_seen(text, pdf_settings):
+            break
+
+        source_row = _pdf_word_row(line, word_columns)
+        if not any(source_row.values()):
+            continue
+        if not (
+            source_row.get("Post date", "").strip()
+            or source_row.get("Trans date", "").strip()
+        ):
+            continue
+        rows.append(source_row)
+    return rows if in_table else None
+
+
+def _pdf_word_lines(
+    words: list[dict[str, Any]], y_tolerance: float
+) -> list[list[dict[str, Any]]]:
+    lines: list[list[dict[str, Any]]] = []
+    for word in sorted(
+        words, key=lambda item: (float(item.get("top", 0)), float(item.get("x0", 0)))
+    ):
+        top = float(word.get("top", 0))
+        if lines and abs(top - float(lines[-1][0].get("top", 0))) <= y_tolerance:
+            lines[-1].append(word)
+        else:
+            lines.append([word])
+    return [sorted(line, key=lambda item: float(item.get("x0", 0))) for line in lines]
+
+
+def _pdf_word_header_seen(text: str, pdf_settings: dict[str, Any]) -> bool:
+    markers = pdf_settings.get(
+        "word_header_markers",
+        ["Post date", "Trans date", "Description", "Amount"],
+    )
+    folded = " ".join(text.casefold().split())
+    return all(str(marker).casefold() in folded for marker in markers)
+
+
+def _pdf_word_table_end_seen(text: str, pdf_settings: dict[str, Any]) -> bool:
+    markers = pdf_settings.get("word_table_end_markers", [])
+    folded = text.casefold()
+    return any(str(marker).casefold() in folded for marker in markers)
+
+
+def _pdf_word_row(
+    words: list[dict[str, Any]], word_columns: dict[str, Any]
+) -> dict[str, str]:
+    row: dict[str, str] = {}
+    for column, bounds in word_columns.items():
+        if not isinstance(bounds, list) or len(bounds) != 2:
+            continue
+        left, right = float(bounds[0]), float(bounds[1])
+        row[str(column)] = " ".join(
+            str(word.get("text", ""))
+            for word in words
+            if left <= float(word.get("x0", 0)) < right
+        ).strip()
+    return row
 
 
 @contextmanager

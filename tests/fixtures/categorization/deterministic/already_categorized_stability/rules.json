@@ -1,0 +1,11 @@
+[
+  {
+    "id": "parksnshop",
+    "enabled": true,
+    "match_type": "keyword",
+    "patterns": ["PARKNSHOP"],
+    "fields": ["merchant"],
+    "category": "Groceries",
+    "confidence": 0.9
+  }
+]

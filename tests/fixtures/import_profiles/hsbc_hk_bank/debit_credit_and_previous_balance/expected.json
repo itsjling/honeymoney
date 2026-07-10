@@ -1,0 +1,30 @@
+{
+  "warnings": [],
+  "rows": [
+    {
+      "date": "2026-05-19",
+      "transaction_date": "2026-05-19",
+      "merchant": "PARKNSHOP",
+      "original_description": "PARKNSHOP",
+      "original_amount": "-120.50",
+      "posted_amount": "-120.50",
+      "amount_hkd": "-120.50",
+      "original_currency": "HKD",
+      "account_id": "hsbc_hk_checking",
+      "account": "HSBC HK Checking",
+      "institution": "HSBC HK",
+      "payment_method": "Bank Account",
+      "source_file": "statement.csv",
+      "source_row": "3"
+    },
+    {
+      "date": "2026-05-20",
+      "transaction_date": "2026-05-20",
+      "merchant": "SALARY",
+      "original_amount": "20000.00",
+      "posted_amount": "20000.00",
+      "amount_hkd": "20000.00",
+      "source_row": "4"
+    }
+  ]
+}

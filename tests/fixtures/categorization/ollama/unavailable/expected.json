@@ -1,0 +1,14 @@
+{
+  "report": {
+    "status": "unavailable"
+  },
+  "warnings_prefix": "Ollama unavailable:",
+  "rows": [
+    {
+      "transaction_id": "txn_unknown",
+      "category": "Unknown",
+      "needs_review": "true",
+      "_flags_contains": ["ollama_unavailable"]
+    }
+  ]
+}

@@ -1,0 +1,27 @@
+{
+  "report": {
+    "status": "success",
+    "applied_count": 1,
+    "invalid_count": 0
+  },
+  "warnings": [],
+  "request_transaction_ids": ["txn_unknown"],
+  "request_absent_fields": ["source_file", "source_page", "source_row", "notes"],
+  "rows": [
+    {
+      "transaction_id": "txn_unknown",
+      "category": "Dining",
+      "owner": "Household",
+      "confidence": "0.86",
+      "needs_review": "false",
+      "reason": "Restaurant-like merchant",
+      "_flags_contains": ["ollama_categorized"]
+    },
+    {
+      "transaction_id": "txn_done",
+      "category": "Groceries",
+      "needs_review": "false",
+      "reason": "Already categorized"
+    }
+  ]
+}
