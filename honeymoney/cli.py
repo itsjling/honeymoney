@@ -4,21 +4,26 @@ import argparse
 import calendar
 import csv
 import hashlib
+import io
 import json
 import logging
+import os
 import re
 import shutil
 import sys
+import tempfile
 import webbrowser
 from contextlib import contextmanager
-from importlib import resources
-from datetime import datetime
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from fnmatch import fnmatch
+from importlib import resources
 from pathlib import Path
 from typing import Any
 
+from honeymoney.ollama import OllamaProgress, apply_ollama_fallback
+from honeymoney.report import build_report_html
+from honeymoney.rules import apply_rules, load_rules
 from honeymoney.schema import (
     CATEGORIZED_COLUMNS,
     REVIEW_NEEDED_COLUMNS,
@@ -26,9 +31,58 @@ from honeymoney.schema import (
     allowed_owners,
     allowed_payment_methods,
 )
-from honeymoney.report import build_report_html
-from honeymoney.rules import apply_rules, load_rules
-from honeymoney.ollama import apply_ollama_fallback, OllamaProgress
+
+JSON_SCHEMA_VERSION = 1
+CORRECTION_FIELDS = [
+    "category",
+    "owner",
+    "payment_method",
+    "confidence",
+    "reason",
+    "notes",
+    "needs_review",
+]
+CORRECTION_COLUMNS = ["transaction_id", *CORRECTION_FIELDS]
+
+
+def _emit_json(
+    command: str,
+    status: str,
+    *,
+    data: dict[str, Any] | None = None,
+    artifacts: dict[str, Any] | None = None,
+    warnings: list[Any] | None = None,
+    errors: list[Any] | None = None,
+) -> None:
+    print(
+        json.dumps(
+            {
+                "schema_version": JSON_SCHEMA_VERSION,
+                "command": command,
+                "status": status,
+                "data": data or {},
+                "artifacts": artifacts or {},
+                "warnings": warnings or [],
+                "errors": errors or [],
+            },
+            sort_keys=True,
+        )
+    )
+
+
+class _CommandArgumentParser(argparse.ArgumentParser):
+    def __init__(self, *args: Any, json_errors: bool = False, **kwargs: Any) -> None:
+        self._json_errors = json_errors
+        super().__init__(*args, **kwargs)
+
+    def error(self, message: str) -> None:
+        if self._json_errors:
+            raise ValueError(f"{self.prog}: {message}")
+        super().error(message)
+
+
+def _command_parser(argv: list[str], **kwargs: Any) -> _CommandArgumentParser:
+    return _CommandArgumentParser(json_errors="--json" in argv, **kwargs)
 
 
 class _StatusLine:
@@ -86,6 +140,10 @@ def main(argv: list[str] | None = None) -> int:
         return _import_command(argv[1:])
     if argv and argv[0] == "status":
         return _status_command(argv[1:])
+    if argv and argv[0] == "pending":
+        return _pending_command(argv[1:])
+    if argv and argv[0] == "correct":
+        return _correct_command(argv[1:])
     if argv and argv[0] == "report":
         return _report_command(argv[1:])
     if argv and argv[0] == "review":
@@ -95,8 +153,13 @@ def main(argv: list[str] | None = None) -> int:
     return _run_pipeline(argv)
 
 
-def _run_pipeline(argv: list[str], print_import_summary: bool = False) -> int:
-    parser = argparse.ArgumentParser(
+def _run_pipeline(
+    argv: list[str],
+    print_import_summary: bool = False,
+    json_command: str = "run",
+) -> int:
+    parser = _command_parser(
+        argv,
         prog="honeymoney",
         description="Categorize local household transaction exports.",
     )
@@ -107,10 +170,14 @@ def _run_pipeline(argv: list[str], print_import_summary: bool = False) -> int:
     parser.add_argument("--no-interactive", action="store_true")
     parser.add_argument("--replace", action="store_true")
     parser.add_argument("--reset", action="store_true")
+    parser.add_argument("--json", action="store_true")
     args = parser.parse_args(argv)
+    interactive = not (args.no_interactive or args.json)
 
     config = _load_config(args.config_path)
     input_path = Path(args.input_path or config["paths"]["input"])
+    if not input_path.exists():
+        raise ValueError(f"Input path does not exist: {input_path}")
     categorized_path = Path(args.output_path or config["paths"]["output"])
     output_dir = categorized_path.parent
     review_needed_path = output_dir / "review_needed.csv"
@@ -119,7 +186,9 @@ def _run_pipeline(argv: list[str], print_import_summary: bool = False) -> int:
     output_dir.mkdir(parents=True, exist_ok=True)
 
     input_files = _discover_input_files(input_path)
-    source_files = {_relative_source(input_file, input_path) for input_file in input_files}
+    source_files = {
+        _relative_source(input_file, input_path) for input_file in input_files
+    }
     existing_ledger_rows = _read_ledger(categorized_path)
     existing_source_files = _processed_source_files(existing_ledger_rows, source_files)
     if existing_source_files and not (args.replace or args.reset):
@@ -143,7 +212,7 @@ def _run_pipeline(argv: list[str], print_import_summary: bool = False) -> int:
         profiles,
         config,
         input_path,
-        interactive=not args.no_interactive,
+        interactive=interactive,
         profile_mappings=profile_mappings,
         profile_mappings_path=config.get("profile_mappings"),
     )
@@ -163,7 +232,7 @@ def _run_pipeline(argv: list[str], print_import_summary: bool = False) -> int:
     corrections = _load_corrections(config)
     _apply_corrections(transactions, corrections)
     _status.clear()
-    if not args.no_interactive:
+    if interactive:
         categorized_interactively = _prompt_uncategorized(transactions, config)
         _save_interactive_corrections(categorized_interactively, config)
     review_rows = [row for row in transactions if row["needs_review"] == "true"]
@@ -182,7 +251,7 @@ def _run_pipeline(argv: list[str], print_import_summary: bool = False) -> int:
         "uncategorized_count": _uncategorized_count(transactions),
         "duplicate_count": _count_flag(transactions, "duplicate_suspected"),
         "strict": args.strict,
-        "interactive": not args.no_interactive,
+        "interactive": interactive,
         "replace": args.replace or args.reset,
         "reset": args.reset,
         "output": {
@@ -210,6 +279,15 @@ def _run_pipeline(argv: list[str], print_import_summary: bool = False) -> int:
     if print_import_summary:
         _print_import_summary(report)
 
+    if args.json:
+        _emit_json(
+            json_command,
+            report["status"],
+            data=report,
+            artifacts=report["output"],
+            warnings=report["warnings"],
+        )
+
     if args.strict and import_warnings:
         return 1
     return 0
@@ -224,6 +302,8 @@ Commands:
   honeymoney import [PATH]         Import a pasted CSV/PDF path
   honeymoney review                Categorize transactions needing review
   honeymoney status [MONTH]        Show processed/categorized counts for a period
+  honeymoney pending [MONTH]       List transactions that need review
+  honeymoney correct --file FILE   Apply validated transaction corrections
   honeymoney report [MONTH]        Open a web report for a period
   honeymoney help                  Show this help
 
@@ -235,6 +315,7 @@ Common run options:
   --no-interactive                 Skip categorization and profile prompts
   --replace                        Re-import a previously processed source file
   --reset                          Re-import and clear old corrections for the source
+  --json                           Emit one machine-readable JSON document
 
 Common status/report options:
   --month june | --month 2026-06
@@ -244,16 +325,33 @@ Common status/report options:
 
 
 def _setup_command(argv: list[str]) -> int:
-    parser = argparse.ArgumentParser(
+    parser = _command_parser(
+        argv,
         prog="honeymoney setup",
         description="Create a starter Honeymoney workspace.",
     )
     parser.add_argument("--root")
     parser.add_argument("--force", action="store_true")
+    parser.add_argument("--json", action="store_true")
     args = parser.parse_args(argv)
 
+    if args.json and not args.root:
+        raise ValueError("honeymoney setup --json requires --root")
     root = _setup_root(args.root)
     _write_starter_workspace(root, force=args.force)
+    if args.json:
+        _emit_json(
+            "setup",
+            "success",
+            data={"root": str(root)},
+            artifacts={
+                "config_json": str(root / "config.json"),
+                "corrections_csv": str(root / "corrections.csv"),
+                "input_directory": str(root / "input"),
+                "output_directory": str(root / "output"),
+            },
+        )
+        return 0
     print(f"Created Honeymoney workspace at {root}")
     print("")
     print("Next:")
@@ -274,7 +372,8 @@ def _setup_root(root_arg: str | None) -> Path:
 
 
 def _import_command(argv: list[str]) -> int:
-    parser = argparse.ArgumentParser(
+    parser = _command_parser(
+        argv,
         prog="honeymoney import",
         description="Import one pasted CSV/PDF file or folder path.",
     )
@@ -285,10 +384,13 @@ def _import_command(argv: list[str]) -> int:
     parser.add_argument("--no-interactive", action="store_true")
     parser.add_argument("--replace", action="store_true")
     parser.add_argument("--reset", action="store_true")
+    parser.add_argument("--json", action="store_true")
     args = parser.parse_args(argv)
 
     input_path = args.path
     if not input_path:
+        if args.json:
+            raise ValueError("honeymoney import --json requires a path")
         input_path = input("Paste a CSV/PDF file or folder path: ")
     input_path = _clean_pasted_path(input_path)
     if not input_path:
@@ -303,11 +405,17 @@ def _import_command(argv: list[str]) -> int:
         run_args.append("--strict")
     if args.no_interactive:
         run_args.append("--no-interactive")
+    if args.json:
+        run_args.append("--json")
     if args.reset:
         run_args.append("--reset")
     elif args.replace:
         run_args.append("--replace")
-    return _run_pipeline(run_args, print_import_summary=True)
+    return _run_pipeline(
+        run_args,
+        print_import_summary=not args.json,
+        json_command="import",
+    )
 
 
 def _print_import_summary(report: dict[str, Any]) -> None:
@@ -331,7 +439,8 @@ def _print_import_summary(report: dict[str, Any]) -> None:
 
 
 def _review_command(argv: list[str]) -> int:
-    parser = argparse.ArgumentParser(
+    parser = _command_parser(
+        argv,
         prog="honeymoney review",
         description="Interactively categorize transactions marked as needing review.",
     )
@@ -373,7 +482,8 @@ def _clean_pasted_path(value: str) -> str:
 
 
 def _status_command(argv: list[str]) -> int:
-    parser = argparse.ArgumentParser(
+    parser = _command_parser(
+        argv,
         prog="honeymoney status",
         description="Show processed and categorized counts for a time period.",
     )
@@ -382,6 +492,7 @@ def _status_command(argv: list[str]) -> int:
     parser.add_argument("--start")
     parser.add_argument("--end")
     parser.add_argument("--config", dest="config_path")
+    parser.add_argument("--json", action="store_true")
     args = parser.parse_args(argv)
 
     start, end = _resolve_period(args.month or args.period, args.start, args.end)
@@ -389,6 +500,26 @@ def _status_command(argv: list[str]) -> int:
     categorized_path = Path(config["paths"]["output"])
     ledger_rows = _read_ledger(categorized_path)
     if not ledger_rows:
+        if args.json:
+            _emit_json(
+                "status",
+                "success",
+                data={
+                    "period": {"start": start.isoformat(), "end": end.isoformat()},
+                    "statements_processed": 0,
+                    "records_processed": 0,
+                    "categorized": 0,
+                    "uncategorized": 0,
+                    "needs_review": 0,
+                    "ledger": {
+                        "total_records": 0,
+                        "outside_period": 0,
+                        "unparseable_dates": 0,
+                    },
+                },
+                artifacts={"categorized_csv": str(categorized_path.resolve())},
+            )
+            return 0
         print(f"No processed records found at {categorized_path}")
         print("Run `honeymoney import` or `honeymoney run` first.")
         return 0
@@ -397,6 +528,31 @@ def _status_command(argv: list[str]) -> int:
     categorized = [row for row in rows if _is_categorized(row)]
     statements = {row.get("source_file", "") for row in rows if row.get("source_file")}
     review = [row for row in rows if row.get("needs_review") == "true"]
+    undated = sum(
+        1 for row in ledger_rows if _parse_iso_date(row.get("date", "")) is None
+    )
+    outside = len(ledger_rows) - len(rows) - undated
+
+    if args.json:
+        _emit_json(
+            "status",
+            "success",
+            data={
+                "period": {"start": start.isoformat(), "end": end.isoformat()},
+                "statements_processed": len(statements),
+                "records_processed": len(rows),
+                "categorized": len(categorized),
+                "uncategorized": len(rows) - len(categorized),
+                "needs_review": len(review),
+                "ledger": {
+                    "total_records": len(ledger_rows),
+                    "outside_period": outside,
+                    "unparseable_dates": undated,
+                },
+            },
+            artifacts={"categorized_csv": str(categorized_path.resolve())},
+        )
+        return 0
 
     print(f"Status for {start.isoformat()} to {end.isoformat()}")
     print(f"  Statements processed: {len(statements)}")
@@ -404,8 +560,6 @@ def _status_command(argv: list[str]) -> int:
     print(f"  Categorized:          {len(categorized)}")
     print(f"  Uncategorized:        {len(rows) - len(categorized)}")
     print(f"  Needs review:         {len(review)}")
-    undated = sum(1 for row in ledger_rows if _parse_iso_date(row.get("date", "")) is None)
-    outside = len(ledger_rows) - len(rows) - undated
     print(
         f"Ledger total: {len(ledger_rows)} records "
         f"({outside} outside this period, {undated} with unparseable dates)"
@@ -414,7 +568,8 @@ def _status_command(argv: list[str]) -> int:
 
 
 def _report_command(argv: list[str]) -> int:
-    parser = argparse.ArgumentParser(
+    parser = _command_parser(
+        argv,
         prog="honeymoney report",
         description="Write and open an HTML report for a time period.",
     )
@@ -425,6 +580,7 @@ def _report_command(argv: list[str]) -> int:
     parser.add_argument("--config", dest="config_path")
     parser.add_argument("--output", dest="output_path", help="Report HTML path")
     parser.add_argument("--no-open", action="store_true")
+    parser.add_argument("--json", action="store_true")
     args = parser.parse_args(argv)
 
     config = _load_config(args.config_path)
@@ -438,10 +594,267 @@ def _report_command(argv: list[str]) -> int:
     report_path = Path(args.output_path or categorized_path.parent / "report.html")
     report_path.parent.mkdir(parents=True, exist_ok=True)
     report_path.write_text(build_report_html(rows, period_label), encoding="utf-8")
+    if args.json:
+        _emit_json(
+            "report",
+            "success",
+            data={
+                "period": {"start": start.isoformat(), "end": end.isoformat()},
+                "transaction_count": len(rows),
+            },
+            artifacts={"report_html": str(report_path.resolve())},
+        )
+        return 0
     print(f"Report written to {report_path} ({len(rows)} transactions)")
     if not args.no_open:
         webbrowser.open(report_path.resolve().as_uri())
     return 0
+
+
+def _pending_command(argv: list[str]) -> int:
+    parser = _command_parser(
+        argv,
+        prog="honeymoney pending",
+        description="List transactions that need review for a time period.",
+    )
+    parser.add_argument("period", nargs="?", help="Month name or YYYY-MM")
+    parser.add_argument("--month")
+    parser.add_argument("--start")
+    parser.add_argument("--end")
+    parser.add_argument("--config", dest="config_path")
+    parser.add_argument("--json", action="store_true")
+    args = parser.parse_args(argv)
+
+    start, end = _resolve_period(args.month or args.period, args.start, args.end)
+    config = _load_config(args.config_path)
+    categorized_path = Path(config["paths"]["output"])
+    ledger_rows = _read_ledger(categorized_path)
+    pending_rows = [
+        _to_review_row(row)
+        for row in _rows_in_period(ledger_rows, start, end)
+        if row.get("needs_review") == "true"
+    ]
+
+    if args.json:
+        _emit_json(
+            "pending",
+            "success",
+            data={
+                "period": {"start": start.isoformat(), "end": end.isoformat()},
+                "count": len(pending_rows),
+                "transactions": pending_rows,
+            },
+            artifacts={
+                "categorized_csv": str(categorized_path.resolve()),
+                "review_needed_csv": str(
+                    (categorized_path.parent / "review_needed.csv").resolve()
+                ),
+            },
+        )
+        return 0
+
+    print(f"Pending review for {start.isoformat()} to {end.isoformat()}")
+    print(f"  Transactions: {len(pending_rows)}")
+    for row in pending_rows:
+        print(f"  {row['transaction_id']}  {row['date']}  {row['merchant']}")
+    return 0
+
+
+def _correct_command(argv: list[str]) -> int:
+    parser = _command_parser(
+        argv,
+        prog="honeymoney correct",
+        description="Apply a validated JSON batch of transaction corrections.",
+    )
+    parser.add_argument("--file", dest="correction_file")
+    parser.add_argument("--config", dest="config_path")
+    parser.add_argument("--output", dest="output_path")
+    parser.add_argument("--json", action="store_true")
+    args = parser.parse_args(argv)
+    if not args.correction_file:
+        raise ValueError(
+            "honeymoney correct requires --file PATH (or --file - for stdin)"
+        )
+
+    config = _load_config(args.config_path)
+    categorized_path = Path(args.output_path or config["paths"]["output"])
+    corrections_value = config.get("corrections")
+    if not corrections_value:
+        raise ValueError("Config must define a corrections CSV path")
+    corrections_path = Path(corrections_value)
+    ledger_rows = _read_ledger(categorized_path)
+    ledger_ids = {
+        row["transaction_id"] for row in ledger_rows if row.get("transaction_id")
+    }
+    correction_batch = _load_json_correction_batch(
+        args.correction_file, config, ledger_ids
+    )
+
+    existing_corrections = _load_corrections(config)
+    merged_corrections = dict(existing_corrections)
+    ledger_by_id = {
+        row["transaction_id"]: row for row in ledger_rows if row.get("transaction_id")
+    }
+    effective_batch: dict[str, dict[str, str]] = {}
+    for transaction_id, correction_patch in correction_batch.items():
+        merged_correction = {
+            **existing_corrections.get(transaction_id, {}),
+            **correction_patch,
+        }
+        if "needs_review" not in merged_correction:
+            merged_correction["needs_review"] = ledger_by_id[transaction_id].get(
+                "needs_review", "true"
+            )
+        effective_batch[transaction_id] = merged_correction
+        merged_corrections[transaction_id] = merged_correction
+
+    corrected_ledger = [dict(row) for row in ledger_rows]
+    _apply_corrections(corrected_ledger, effective_batch)
+    review_rows = [
+        _to_review_row(row)
+        for row in corrected_ledger
+        if row.get("needs_review") == "true"
+    ]
+    correction_rows = [
+        {"transaction_id": transaction_id, **correction}
+        for transaction_id, correction in sorted(merged_corrections.items())
+    ]
+
+    review_needed_path = categorized_path.parent / "review_needed.csv"
+    _atomic_write_text_files(
+        {
+            corrections_path: _csv_document(CORRECTION_COLUMNS, correction_rows),
+            categorized_path: _csv_document(CATEGORIZED_COLUMNS, corrected_ledger),
+            review_needed_path: _csv_document(REVIEW_NEEDED_COLUMNS, review_rows),
+        }
+    )
+
+    data = {
+        "applied_count": len(correction_batch),
+        "remaining_review_count": len(review_rows),
+        "transaction_ids": sorted(correction_batch),
+    }
+    artifacts = {
+        "corrections_csv": str(corrections_path.resolve()),
+        "categorized_csv": str(categorized_path.resolve()),
+        "review_needed_csv": str(review_needed_path.resolve()),
+    }
+    if args.json:
+        _emit_json("correct", "success", data=data, artifacts=artifacts)
+    else:
+        print(
+            f"Applied {len(correction_batch)} corrections; "
+            f"{len(review_rows)} transactions still need review"
+        )
+    return 0
+
+
+def _load_json_correction_batch(
+    source: str,
+    config: dict[str, Any],
+    ledger_ids: set[str],
+) -> dict[str, dict[str, str]]:
+    if source == "-":
+        payload = json.load(sys.stdin)
+    else:
+        with Path(source).open(encoding="utf-8") as fh:
+            payload = json.load(fh)
+    if not isinstance(payload, list):
+        raise ValueError("Correction input must be a JSON array")
+
+    corrections: dict[str, dict[str, str]] = {}
+    for index, item in enumerate(payload):
+        if not isinstance(item, dict):
+            raise ValueError(f"Correction at index {index} must be a JSON object")
+        unknown_fields = set(item) - {"transaction_id", *CORRECTION_FIELDS}
+        if unknown_fields:
+            fields = ", ".join(sorted(unknown_fields))
+            raise ValueError(
+                f"Unsupported correction fields at index {index}: {fields}"
+            )
+        transaction_id = item.get("transaction_id")
+        if not isinstance(transaction_id, str) or not transaction_id.strip():
+            raise ValueError(f"Correction at index {index} requires transaction_id")
+        transaction_id = transaction_id.strip()
+        if transaction_id in corrections:
+            raise ValueError(
+                f"Duplicate transaction_id in correction batch: {transaction_id}"
+            )
+        if transaction_id not in ledger_ids:
+            raise ValueError(
+                f"Unknown transaction_id in correction batch: {transaction_id}"
+            )
+
+        correction = _normalize_json_correction(index, item)
+        if not correction:
+            raise ValueError(
+                f"Correction for {transaction_id} must set at least one correction field"
+            )
+        _validate_correction(transaction_id, correction, config)
+        corrections[transaction_id] = correction
+    return corrections
+
+
+def _normalize_json_correction(index: int, item: dict[str, Any]) -> dict[str, str]:
+    correction: dict[str, str] = {}
+    for field in CORRECTION_FIELDS:
+        if field not in item:
+            continue
+        value = item[field]
+        if field == "needs_review":
+            if isinstance(value, bool):
+                correction[field] = str(value).lower()
+                continue
+            if isinstance(value, str) and value.casefold() in {"true", "false"}:
+                correction[field] = value.casefold()
+                continue
+            raise ValueError(
+                f"Correction field needs_review at index {index} must be boolean"
+            )
+        if (
+            field == "confidence"
+            and isinstance(value, (int, float))
+            and not isinstance(value, bool)
+        ):
+            correction[field] = str(value)
+            continue
+        if not isinstance(value, str):
+            raise ValueError(
+                f"Correction field {field} at index {index} must be a string"
+            )
+        correction[field] = value.strip()
+    return correction
+
+
+def _csv_document(columns: list[str], rows: list[dict[str, str]]) -> str:
+    buffer = io.StringIO(newline="")
+    writer = csv.DictWriter(buffer, fieldnames=columns, extrasaction="ignore")
+    writer.writeheader()
+    writer.writerows(rows)
+    return buffer.getvalue()
+
+
+def _atomic_write_text_files(files: dict[Path, str]) -> None:
+    staged: list[tuple[Path, Path]] = []
+    try:
+        for target, content in files.items():
+            target.parent.mkdir(parents=True, exist_ok=True)
+            descriptor, temporary_name = tempfile.mkstemp(
+                dir=target.parent,
+                prefix=f".{target.name}.",
+                suffix=".tmp",
+            )
+            temporary_path = Path(temporary_name)
+            with os.fdopen(descriptor, "w", encoding="utf-8", newline="") as fh:
+                fh.write(content)
+                fh.flush()
+                os.fsync(fh.fileno())
+            staged.append((temporary_path, target))
+        for temporary_path, target in staged:
+            os.replace(temporary_path, target)
+    finally:
+        for temporary_path, _ in staged:
+            temporary_path.unlink(missing_ok=True)
 
 
 def _resolve_period(
@@ -550,7 +963,11 @@ def _write_ledger_outputs(
     _write_csv(
         review_needed_path,
         REVIEW_NEEDED_COLUMNS,
-        [_to_review_row(row) for row in ledger_rows if row.get("needs_review") == "true"],
+        [
+            _to_review_row(row)
+            for row in ledger_rows
+            if row.get("needs_review") == "true"
+        ],
     )
 
 
@@ -591,7 +1008,9 @@ def _prompt_category_assignments(
         category for category in allowed_categories(config) if category != "Unknown"
     )
     print(heading)
-    print("Pick a category number, press Enter to skip one, or enter q to skip the rest.")
+    print(
+        "Pick a category number, press Enter to skip one, or enter q to skip the rest."
+    )
     _print_category_menu(categories)
     categorized = []
     for position, transaction in enumerate(pending, start=1):
@@ -821,6 +1240,19 @@ def _load_config(config_path: str | None) -> dict[str, Any]:
     with Path(config_path).open(encoding="utf-8") as fh:
         config = json.load(fh)
 
+    if not isinstance(config, dict):
+        raise ValueError("Config must be a JSON object")
+    paths = config.get("paths")
+    if paths is not None and not isinstance(paths, dict):
+        raise ValueError("Config field paths must be a JSON object")
+    for path_field, path_value in (paths or {}).items():
+        if path_field not in {"input", "output"}:
+            continue
+        if not isinstance(path_value, str) or not path_value.strip():
+            raise ValueError(
+                f"Config field paths.{path_field} must be a non-empty string"
+            )
+
     config.setdefault("paths", {})
     config["paths"].setdefault("input", "./input")
     config["paths"].setdefault("output", "./output/categorized.csv")
@@ -846,11 +1278,12 @@ def _validate_profile(
             f"Missing required profile fields in profile {profile_id}: account_id"
         )
     if profile.get("owner") and profile["owner"] not in allowed_owners(config):
-        raise ValueError(f"Unsupported owner in profile {profile_id}: {profile['owner']}")
-    if (
-        profile.get("payment_method")
-        and profile["payment_method"] not in allowed_payment_methods(config)
-    ):
+        raise ValueError(
+            f"Unsupported owner in profile {profile_id}: {profile['owner']}"
+        )
+    if profile.get("payment_method") and profile[
+        "payment_method"
+    ] not in allowed_payment_methods(config):
         raise ValueError(
             f"Unsupported payment_method in profile {profile_id}: "
             f"{profile['payment_method']}"
@@ -900,7 +1333,9 @@ def _load_corrections(config: dict[str, Any]) -> dict[str, dict[str, str]]:
 def _validate_correction(
     transaction_id: str, correction: dict[str, str], config: dict[str, Any]
 ) -> None:
-    if correction.get("category") and correction["category"] not in allowed_categories(config):
+    if correction.get("category") and correction["category"] not in allowed_categories(
+        config
+    ):
         raise ValueError(
             f"Unsupported category in correction {transaction_id}: {correction['category']}"
         )
@@ -908,10 +1343,9 @@ def _validate_correction(
         raise ValueError(
             f"Unsupported owner in correction {transaction_id}: {correction['owner']}"
         )
-    if (
-        correction.get("payment_method")
-        and correction["payment_method"] not in allowed_payment_methods(config)
-    ):
+    if correction.get("payment_method") and correction[
+        "payment_method"
+    ] not in allowed_payment_methods(config):
         raise ValueError(
             "Unsupported payment_method in correction "
             f"{transaction_id}: {correction['payment_method']}"
@@ -924,7 +1358,11 @@ def _validate_correction(
                 f"Unsupported confidence in correction {transaction_id}: "
                 f"{correction['confidence']}"
             )
-        if not confidence.is_finite() or confidence < Decimal("0") or confidence > Decimal("1"):
+        if (
+            not confidence.is_finite()
+            or confidence < Decimal("0")
+            or confidence > Decimal("1")
+        ):
             raise ValueError(
                 f"Unsupported confidence in correction {transaction_id}: "
                 f"{correction['confidence']}"
@@ -991,7 +1429,9 @@ def _import_transactions(
                     profile_mappings,
                     profile_mappings_path,
                 )
-                imported, pdf_warnings = _import_pdf(input_file, profile, config, input_root)
+                imported, pdf_warnings = _import_pdf(
+                    input_file, profile, config, input_root
+                )
                 warnings.extend(pdf_warnings)
             except ImportError:
                 warning = (
@@ -1008,9 +1448,7 @@ def _import_transactions(
                 )
                 continue
             except Exception as error:
-                warning = (
-                    f"PDF parsing failed for {_relative_source(input_file, input_root)}: {error}"
-                )
+                warning = f"PDF parsing failed for {_relative_source(input_file, input_root)}: {error}"
                 warnings.append(warning)
                 file_reports.append(
                     {
@@ -1109,7 +1547,9 @@ def _select_csv_profile(
                 str(profile.get("id") or profile.get("account_id") or "unknown")
                 for profile in matching_profiles
             )
-            raise ValueError(f"Ambiguous profile detection for {csv_path.name}: {labels}")
+            raise ValueError(
+                f"Ambiguous profile detection for {csv_path.name}: {labels}"
+            )
         return _prompt_for_profile(csv_path, matching_profiles, profile_mappings_path)
 
     if len(profiles) > 1:
@@ -1124,7 +1564,8 @@ def _mapped_profile(
     source_path: Path, profiles: list[dict[str, Any]], mappings: dict[str, Any]
 ) -> dict[str, Any] | None:
     profiles_by_id = {
-        str(profile.get("id") or profile.get("account_id")): profile for profile in profiles
+        str(profile.get("id") or profile.get("account_id")): profile
+        for profile in profiles
     }
     for mapping in mappings.get("filename_patterns", []):
         if fnmatch(source_path.name, str(mapping.get("pattern", ""))):
@@ -1221,7 +1662,10 @@ def _row_is_skipped(row: dict[str, str], skip_patterns: list[str]) -> bool:
         row.get("merchant", "").casefold(),
     ]
     return any(
-        pattern in haystack for pattern in skip_patterns for haystack in haystacks if haystack
+        pattern in haystack
+        for pattern in skip_patterns
+        for haystack in haystacks
+        if haystack
     )
 
 
@@ -1299,7 +1743,9 @@ def _import_pdf(
 
                 tables = _pdf_tables(page)
                 if not tables:
-                    warnings.append(f"No table found on {pdf_path.name} page {page_number}")
+                    warnings.append(
+                        f"No table found on {pdf_path.name} page {page_number}"
+                    )
                     text_length = _pymupdf_page_text_length(pdf_path, page_number)
                     if text_length is not None:
                         warnings.append(
@@ -1308,7 +1754,11 @@ def _import_pdf(
                         )
                     continue
                 for table in tables:
-                    header = [str(cell or "").strip() for cell in table[0]] if has_header else []
+                    header = (
+                        [str(cell or "").strip() for cell in table[0]]
+                        if has_header
+                        else []
+                    )
                     if required_columns and not required_columns.issubset(set(header)):
                         warnings.append(
                             "Skipped table on "
@@ -1317,7 +1767,9 @@ def _import_pdf(
                         continue
                     data_rows = table[1:] if has_header else table
                     start_row = 2 if has_header else 1
-                    for table_row_number, cells in enumerate(data_rows, start=start_row):
+                    for table_row_number, cells in enumerate(
+                        data_rows, start=start_row
+                    ):
                         expanded_rows = _expand_pdf_cells(
                             cells, header, has_header, pdf_settings
                         )
@@ -1329,7 +1781,9 @@ def _import_pdf(
                                 if len(expanded_rows) > 1
                                 else table_row_number
                             )
-                            source_row = _pdf_source_row(expanded_cells, header, has_header)
+                            source_row = _pdf_source_row(
+                                expanded_cells, header, has_header
+                            )
                             source_row = _apply_pdf_row_regex(source_row, pdf_settings)
                             if source_row is None:
                                 continue
@@ -1582,7 +2036,9 @@ def _normalized_row(
     transaction_date = _normalize_date(
         _value(source_row, columns.get("transaction_date")), profile
     )
-    posting_date = _normalize_date(_value(source_row, columns.get("posting_date")), profile)
+    posting_date = _normalize_date(
+        _value(source_row, columns.get("posting_date")), profile
+    )
     canonical_date = transaction_date or posting_date
     description = _value(source_row, columns.get("description"))
     merchant = _value(source_row, columns.get("merchant")) or description
@@ -1677,7 +2133,9 @@ def _transaction_identity_base(transaction: dict[str, str]) -> str:
         "merchant",
         "original_description",
     ]
-    return "|".join(_normalize_identity_part(transaction.get(field, "")) for field in fields)
+    return "|".join(
+        _normalize_identity_part(transaction.get(field, "")) for field in fields
+    )
 
 
 def _normalize_identity_part(value: str) -> str:
@@ -1709,7 +2167,7 @@ def _transaction_flags(transactions: list[dict[str, str]]) -> dict[str, list[str
 
 
 def _transaction_diagnostics(
-    transactions: list[dict[str, str]]
+    transactions: list[dict[str, str]],
 ) -> dict[str, dict[str, str | bool]]:
     diagnostics: dict[str, dict[str, str | bool]] = {}
     for transaction in transactions:
@@ -1901,7 +2359,14 @@ def _apply_corrections(
         if not correction:
             continue
 
-        for field in ["category", "owner", "payment_method", "confidence", "reason", "notes"]:
+        for field in [
+            "category",
+            "owner",
+            "payment_method",
+            "confidence",
+            "reason",
+            "notes",
+        ]:
             if field in correction:
                 transaction[field] = correction[field]
 
@@ -1921,9 +2386,9 @@ def _annotate_duplicate_suspicions(transactions: list[dict[str, str]]) -> None:
 
     near_date_groups: dict[str, list[dict[str, str]]] = {}
     for transaction in transactions:
-        near_date_groups.setdefault(_duplicate_key_without_date(transaction), []).append(
-            transaction
-        )
+        near_date_groups.setdefault(
+            _duplicate_key_without_date(transaction), []
+        ).append(transaction)
 
     for group in near_date_groups.values():
         for index, transaction in enumerate(group):
@@ -1948,7 +2413,9 @@ def _duplicate_key(transaction: dict[str, str]) -> str:
         "merchant",
         "original_description",
     ]
-    return "|".join(_normalize_identity_part(transaction.get(field, "")) for field in fields)
+    return "|".join(
+        _normalize_identity_part(transaction.get(field, "")) for field in fields
+    )
 
 
 def _duplicate_key_without_date(transaction: dict[str, str]) -> str:
@@ -1959,7 +2426,9 @@ def _duplicate_key_without_date(transaction: dict[str, str]) -> str:
         "merchant",
         "original_description",
     ]
-    return "|".join(_normalize_identity_part(transaction.get(field, "")) for field in fields)
+    return "|".join(
+        _normalize_identity_part(transaction.get(field, "")) for field in fields
+    )
 
 
 def _parse_iso_date(value: str) -> date | None:
@@ -2015,8 +2484,17 @@ def _write_report(path: Path, report: dict[str, Any]) -> None:
 def run() -> int:
     try:
         return main()
-    except ValueError as error:
+    except (OSError, ValueError) as error:
         _status.clear()
+        argv = sys.argv[1:]
+        if "--json" in argv:
+            command = argv[0] if argv and not argv[0].startswith("-") else "run"
+            _emit_json(
+                command,
+                "error",
+                errors=[{"type": type(error).__name__, "message": str(error)}],
+            )
+            return 2
         print(str(error), file=sys.stderr)
         return 2
 

@@ -34,7 +34,8 @@ def apply_ollama_fallback(
     unresolved = [
         transaction
         for transaction in transactions
-        if transaction.get("category") == "Unknown" and transaction.get("needs_review") == "true"
+        if transaction.get("category") == "Unknown"
+        and transaction.get("needs_review") == "true"
     ]
     if not unresolved:
         return {"status": "skipped", "reason": "no unresolved transactions"}, []
@@ -60,16 +61,29 @@ def apply_ollama_fallback(
             if progress is not None:
                 progress(
                     OllamaProgress(
-                        _batch_number, batch_count, _start, _end, len(unresolved), elapsed
+                        _batch_number,
+                        batch_count,
+                        _start,
+                        _end,
+                        len(unresolved),
+                        elapsed,
                     )
                 )
 
         tick(0.0)
         try:
             response_body = _request_ollama(
-                batch, ollama_config, config, tick=tick if progress is not None else None
+                batch,
+                ollama_config,
+                config,
+                tick=tick if progress is not None else None,
             )
-        except (OSError, urllib.error.URLError, TimeoutError, json.JSONDecodeError) as error:
+        except (
+            OSError,
+            urllib.error.URLError,
+            TimeoutError,
+            json.JSONDecodeError,
+        ) as error:
             error_text = _error_text(error)
             warning = f"Ollama unavailable: {error_text}"
             for transaction in unresolved:
@@ -96,7 +110,9 @@ def apply_ollama_fallback(
         warnings = ["Ollama returned invalid categorizations"]
         warnings.extend(details[:5])
         if len(details) > 5:
-            warnings.append(f"...and {len(details) - 5} more invalid Ollama categorizations")
+            warnings.append(
+                f"...and {len(details) - 5} more invalid Ollama categorizations"
+            )
         applied_ids = {
             transaction["transaction_id"]
             for transaction in unresolved
@@ -111,7 +127,11 @@ def apply_ollama_fallback(
             transaction["reason"] = _append_reason(
                 transaction["reason"], "Ollama returned invalid categorization"
             )
-    return {"status": status, "applied_count": applied, "invalid_count": invalid}, warnings
+    return {
+        "status": status,
+        "applied_count": applied,
+        "invalid_count": invalid,
+    }, warnings
 
 
 def _batch_size(ollama_config: dict[str, Any]) -> int:
@@ -312,7 +332,9 @@ def _apply_ollama_response(
         if problem:
             invalid += 1
             subject = transaction.get("merchant", "") if transaction else transaction_id
-            details.append(f"Ollama categorization rejected ({subject or 'unknown'}): {problem}")
+            details.append(
+                f"Ollama categorization rejected ({subject or 'unknown'}): {problem}"
+            )
             continue
 
         handled_ids.add(transaction_id)

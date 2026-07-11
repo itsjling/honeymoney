@@ -49,6 +49,10 @@ Show the short command reference:
 honeymoney help
 ```
 
+For Codex setup, privacy boundaries, and machine-readable command examples,
+see [`docs/agents/codex.md`](docs/agents/codex.md). For the processing pipeline
+and source map, see [`docs/architecture.md`](docs/architecture.md).
+
 You can also run without installing:
 
 ```bash
@@ -98,6 +102,31 @@ honeymoney review
 ```
 
 Interactively categorizes transactions already marked as needing review in `categorized.csv`. It uses the same category prompt as import, saves your choices to `corrections.csv`, updates `categorized.csv`, and rewrites `review_needed.csv`.
+
+## Structured agent commands
+
+`setup`, `run`, `import`, `status`, and `report` accept `--json`. JSON mode
+prints exactly one versioned document to stdout, never prompts, and never opens
+a browser. Exit code `0` is success, `1` is strict partial success, and `2` is
+an input, configuration, or validation error.
+
+```bash
+honeymoney import ./statement.csv --config ./money/config.json --json
+honeymoney status 2026-05 --config ./money/config.json --json
+honeymoney pending 2026-05 --config ./money/config.json --json
+```
+
+`pending` returns transactions requiring review. Apply reviewed corrections as
+one validated JSON batch:
+
+```bash
+honeymoney correct --config ./money/config.json --file corrections.json --json
+```
+
+The batch is validated in full before any output changes and merges fields by
+`transaction_id`; omitted fields remain unchanged. Use `--file -` to read the
+JSON array from stdin. The interactive `review` command remains available for
+human review.
 
 ```bash
 honeymoney status

@@ -205,7 +205,9 @@ class OllamaTest(unittest.TestCase):
         self.assertEqual(report["status"], "success")
         self.assertEqual(report["applied_count"], 2)
         self.assertEqual([len(batch) for batch in captured_batches], [1, 1])
-        self.assertEqual([row["category"] for row in transactions], ["Dining", "Dining"])
+        self.assertEqual(
+            [row["category"] for row in transactions], ["Dining", "Dining"]
+        )
 
     def test_progress_callback_reports_each_batch(self) -> None:
         class Handler(BaseHTTPRequestHandler):
@@ -259,7 +261,12 @@ class OllamaTest(unittest.TestCase):
                 }
             },
             progress=lambda event: progress_calls.append(
-                (event.batch_number, event.batch_count, event.start_index, event.end_index)
+                (
+                    event.batch_number,
+                    event.batch_count,
+                    event.start_index,
+                    event.end_index,
+                )
             ),
         )
 
@@ -321,7 +328,9 @@ class OllamaTest(unittest.TestCase):
         self.assertIn(
             "Ollama returned no categorization for 1 transaction(s)", warnings
         )
-        self.assertEqual([row["category"] for row in transactions], ["Unknown", "Unknown"])
+        self.assertEqual(
+            [row["category"] for row in transactions], ["Unknown", "Unknown"]
+        )
         for transaction in transactions:
             self.assertIn("ollama_invalid_response", transaction["flags"])
 
@@ -341,6 +350,7 @@ class OllamaTest(unittest.TestCase):
             ],
         ]:
             with self.subTest(response=response):
+
                 class Handler(BaseHTTPRequestHandler):
                     def do_POST(self) -> None:
                         length = int(self.headers["Content-Length"])

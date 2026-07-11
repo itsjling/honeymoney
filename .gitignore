@@ -1,7 +1,12 @@
 samples/
 private_samples/
+money/
 .DS_Store
 output/
 __pycache__/
 *.pyc
 .venv/
+build/
+dist/
+*.egg-info/
+.ruff_cache/

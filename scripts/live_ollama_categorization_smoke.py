@@ -1,9 +1,9 @@
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import sys
-import argparse
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -59,7 +59,9 @@ def main() -> int:
             ),
             "model": os.environ.get("HONEYMONEY_OLLAMA_MODEL", "qwen2.5:7b-instruct"),
             "batch_size": 2,
-            "timeout_seconds": float(os.environ.get("HONEYMONEY_OLLAMA_TIMEOUT", "120")),
+            "timeout_seconds": float(
+                os.environ.get("HONEYMONEY_OLLAMA_TIMEOUT", "120")
+            ),
         }
     }
 
@@ -67,10 +69,15 @@ def main() -> int:
     print(json.dumps({"report": report, "warnings": warnings, "rows": rows}, indent=2))
 
     if report.get("status") != "success":
-        print("Live Ollama smoke failed: categorization did not succeed.", file=sys.stderr)
+        print(
+            "Live Ollama smoke failed: categorization did not succeed.", file=sys.stderr
+        )
         return 1
     if all(row.get("category") == "Unknown" for row in rows):
-        print("Live Ollama smoke failed: all rows remained uncategorized.", file=sys.stderr)
+        print(
+            "Live Ollama smoke failed: all rows remained uncategorized.",
+            file=sys.stderr,
+        )
         return 1
     return 0
 

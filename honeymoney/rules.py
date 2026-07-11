@@ -24,7 +24,9 @@ def load_rules(config: dict[str, Any]) -> list[dict[str, Any]]:
     return rules
 
 
-def validate_rules(rules: list[dict[str, Any]], config: dict[str, Any] | None = None) -> None:
+def validate_rules(
+    rules: list[dict[str, Any]], config: dict[str, Any] | None = None
+) -> None:
     seen_ids: set[str] = set()
     categories = allowed_categories(config)
     owners = allowed_owners(config)
@@ -54,13 +56,12 @@ def validate_rules(rules: list[dict[str, Any]], config: dict[str, Any] | None = 
             continue
 
         if rule.get("category") and rule["category"] not in categories:
-            raise ValueError(f"Unsupported category in rule {rule_id}: {rule['category']}")
+            raise ValueError(
+                f"Unsupported category in rule {rule_id}: {rule['category']}"
+            )
         if rule.get("owner") and rule["owner"] not in owners:
             raise ValueError(f"Unsupported owner in rule {rule_id}: {rule['owner']}")
-        if (
-            rule.get("payment_method")
-            and rule["payment_method"] not in payment_methods
-        ):
+        if rule.get("payment_method") and rule["payment_method"] not in payment_methods:
             raise ValueError(
                 f"Unsupported payment_method in rule {rule_id}: {rule['payment_method']}"
             )
@@ -71,7 +72,11 @@ def validate_rules(rules: list[dict[str, Any]], config: dict[str, Any] | None = 
                 raise ValueError(
                     f"Unsupported confidence in rule {rule_id}: {rule['confidence']}"
                 ) from error
-            if not confidence.is_finite() or confidence < Decimal("0") or confidence > Decimal("1"):
+            if (
+                not confidence.is_finite()
+                or confidence < Decimal("0")
+                or confidence > Decimal("1")
+            ):
                 raise ValueError(
                     f"Unsupported confidence in rule {rule_id}: {rule['confidence']}"
                 )

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-
 CATEGORIZED_COLUMNS = [
     "transaction_id",
     "date",

@@ -17,7 +17,6 @@ from unittest.mock import patch
 from honeymoney.cli import _report_command, _resolve_period, _StatusLine
 from honeymoney.schema import ALLOWED_CATEGORIES
 
-
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 PROMPT_CATEGORIES = sorted(ALLOWED_CATEGORIES - {"Unknown"})
@@ -252,7 +251,9 @@ class WorkflowTest(unittest.TestCase):
 
             self.assertEqual(review_result.returncode, 0, review_result.stderr)
             self.assertIn("1 records need review", review_result.stdout)
-            self.assertIn("Review complete: 1 updated, 0 still need review", review_result.stdout)
+            self.assertIn(
+                "Review complete: 1 updated, 0 still need review", review_result.stdout
+            )
             with (root / "output" / "categorized.csv").open(
                 newline="", encoding="utf-8"
             ) as fh:
@@ -289,7 +290,9 @@ class WorkflowTest(unittest.TestCase):
 
             self.assertEqual(review_result.returncode, 0, review_result.stderr)
             self.assertIn("No transactions need review.", review_result.stdout)
-            self.assertIn("Review complete: 0 updated, 0 still need review", review_result.stdout)
+            self.assertIn(
+                "Review complete: 0 updated, 0 still need review", review_result.stdout
+            )
 
     def test_hsbc_bank_profile_skips_previous_balance_line(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -483,7 +486,9 @@ def open(path):
             )
 
             self.assertEqual(result.returncode, 0, result.stderr)
-            with (output_dir / "categorized.csv").open(newline="", encoding="utf-8") as fh:
+            with (output_dir / "categorized.csv").open(
+                newline="", encoding="utf-8"
+            ) as fh:
                 rows = {row["merchant"]: row for row in csv.DictReader(fh)}
             self.assertNotIn("PREVIOUS BALANCE", rows)
             self.assertEqual(rows["24/7 FITNESS HONG KONG HK"]["amount_hkd"], "-498.00")
@@ -627,7 +632,13 @@ def open(path):
             self.assertIn("Honeymoney Report", html)
             self.assertIn("2026-05-01 to 2026-05-31", html)
             self.assertIn("PARKNSHOP", html)
-            for external_reference in ['src="http', "src='http", 'href="http', "url(http", "@import"]:
+            for external_reference in [
+                'src="http',
+                "src='http",
+                'href="http',
+                "url(http",
+                "@import",
+            ]:
                 self.assertNotIn(external_reference, html)
 
     def test_report_command_defaults_to_current_calendar_month(self) -> None:
@@ -680,7 +691,10 @@ def open(path):
             )
             report_path = output_dir / "report.html"
 
-            with patch("honeymoney.cli.date", FixedDate), redirect_stdout(io.StringIO()):
+            with (
+                patch("honeymoney.cli.date", FixedDate),
+                redirect_stdout(io.StringIO()),
+            ):
                 result = _report_command(
                     [
                         "--config",
@@ -788,6 +802,7 @@ class StatusLineTtyTest(unittest.TestCase):
         server = HTTPServer(("127.0.0.1", 0), Handler)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
+        self.addCleanup(server.server_close)
         self.addCleanup(server.shutdown)
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -850,7 +865,9 @@ class StatusLineTtyTest(unittest.TestCase):
                     if not chunk:
                         break
                     output += chunk
-                self.assertEqual(process.wait(timeout=60), 0, output.decode(errors="replace"))
+                self.assertEqual(
+                    process.wait(timeout=60), 0, output.decode(errors="replace")
+                )
             finally:
                 os.close(master)
                 if process.poll() is None:

@@ -77,7 +77,9 @@ class FakeOllamaServer:
 
 
 class OllamaCategorizationTest(unittest.TestCase):
-    def test_success_sends_only_unresolved_minimal_payload_and_applies_response(self) -> None:
+    def test_success_sends_only_unresolved_minimal_payload_and_applies_response(
+        self,
+    ) -> None:
         case_dir = categorization_case("ollama", "success_minimal_payload")
         rows = load_json(case_dir / "rows.json")
         response_payload = load_json(case_dir / "response.json")
@@ -153,10 +155,7 @@ class OllamaCategorizationTest(unittest.TestCase):
             prompt = json.loads(request["prompt"])
             return {
                 "response": json.dumps(
-                    [
-                        {"id": item["id"], **template}
-                        for item in prompt["transactions"]
-                    ]
+                    [{"id": item["id"], **template} for item in prompt["transactions"]]
                 )
             }
 

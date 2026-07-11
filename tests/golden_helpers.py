@@ -8,7 +8,6 @@ from unittest.mock import patch
 
 from honeymoney.cli import _import_csv, _import_pdf
 
-
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PROFILE_DIR = REPO_ROOT / "honeymoney" / "data" / "profiles"
 FIXTURE_DIR = REPO_ROOT / "tests" / "fixtures"
@@ -53,7 +52,9 @@ def base_config() -> dict:
     }
 
 
-def import_profile_case(profile: dict, case_dir: Path) -> tuple[list[dict[str, str]], list[str]]:
+def import_profile_case(
+    profile: dict, case_dir: Path
+) -> tuple[list[dict[str, str]], list[str]]:
     if (case_dir / "input.csv").exists():
         return _import_csv_case(profile, case_dir / "input.csv"), []
     if (case_dir / "tables.json").exists() or (case_dir / "words.json").exists():
@@ -143,7 +144,9 @@ def _import_pdf_case(
             self.pages = [
                 Page(
                     table_pages[index] if index < len(table_pages) else [],
-                    word_fixture_pages[index] if index < len(word_fixture_pages) else [],
+                    word_fixture_pages[index]
+                    if index < len(word_fixture_pages)
+                    else [],
                 )
                 for index in range(page_count)
             ]

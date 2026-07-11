@@ -4,7 +4,6 @@ import html
 import json
 from decimal import Decimal, InvalidOperation
 
-
 _PAGE_TEMPLATE = """<!doctype html>
 <html lang="en">
 <head>

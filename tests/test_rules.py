@@ -47,11 +47,11 @@ class RulesTest(unittest.TestCase):
         self.assertEqual(transactions[0]["category"], "Subscriptions")
         self.assertEqual(transactions[0]["confidence"], "0.91")
         self.assertEqual(transactions[0]["needs_review"], "false")
-        self.assertEqual(
-            transactions[0]["flags"], "matched_rule:apple-subscriptions"
-        )
+        self.assertEqual(transactions[0]["flags"], "matched_rule:apple-subscriptions")
 
-    def test_disabled_invalid_rule_is_allowed_but_active_invalid_rule_fails(self) -> None:
+    def test_disabled_invalid_rule_is_allowed_but_active_invalid_rule_fails(
+        self,
+    ) -> None:
         validate_rules(
             [
                 {

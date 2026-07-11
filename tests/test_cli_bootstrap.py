@@ -5,10 +5,9 @@ import subprocess
 import sys
 import tempfile
 import threading
+import unittest
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
-import unittest
-
 
 EXPECTED_CATEGORIZED_COLUMNS = [
     "transaction_id",
@@ -636,7 +635,9 @@ class CliBootstrapTest(unittest.TestCase):
             )
 
             self.assertEqual(result.returncode, 0, result.stderr)
-            with (output_dir / "categorized.csv").open(newline="", encoding="utf-8") as fh:
+            with (output_dir / "categorized.csv").open(
+                newline="", encoding="utf-8"
+            ) as fh:
                 [row] = list(csv.DictReader(fh))
             report = json.loads((output_dir / "import_report.json").read_text())
 
@@ -720,7 +721,9 @@ class CliBootstrapTest(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("Ambiguous profile detection", result.stderr)
 
-    def test_non_interactive_undetected_profile_fails_when_multiple_profiles_exist(self) -> None:
+    def test_non_interactive_undetected_profile_fails_when_multiple_profiles_exist(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             input_dir = root / "input"
@@ -794,7 +797,9 @@ class CliBootstrapTest(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("Could not detect profile", result.stderr)
 
-    def test_interactive_ambiguous_profile_detection_prompts_for_selection(self) -> None:
+    def test_interactive_ambiguous_profile_detection_prompts_for_selection(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             input_dir = root / "input"
@@ -842,7 +847,9 @@ class CliBootstrapTest(unittest.TestCase):
                 profile_paths.append(str(profile_path))
 
             config_path = root / "config.json"
-            config_path.write_text(json.dumps({"profiles": profile_paths}), encoding="utf-8")
+            config_path.write_text(
+                json.dumps({"profiles": profile_paths}), encoding="utf-8"
+            )
 
             result = subprocess.run(
                 [
@@ -866,7 +873,9 @@ class CliBootstrapTest(unittest.TestCase):
 
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn("Select profile for ambiguous.csv", result.stdout)
-            with (output_dir / "categorized.csv").open(newline="", encoding="utf-8") as fh:
+            with (output_dir / "categorized.csv").open(
+                newline="", encoding="utf-8"
+            ) as fh:
                 [row] = list(csv.DictReader(fh))
             self.assertEqual(row["account_id"], "second")
 
@@ -953,7 +962,11 @@ class CliBootstrapTest(unittest.TestCase):
             mapping = json.loads(mapping_path.read_text())
             self.assertEqual(
                 mapping,
-                {"filename_patterns": [{"pattern": "ambiguous.csv", "profile": "second"}]},
+                {
+                    "filename_patterns": [
+                        {"pattern": "ambiguous.csv", "profile": "second"}
+                    ]
+                },
             )
 
     def test_profile_mapping_file_can_select_profile_by_filename_pattern(self) -> None:
@@ -1004,7 +1017,9 @@ class CliBootstrapTest(unittest.TestCase):
 
             mapping_path = root / "profile_mappings.json"
             mapping_path.write_text(
-                json.dumps({"filename_patterns": [{"pattern": "mox-*.csv", "profile": "mox"}]}),
+                json.dumps(
+                    {"filename_patterns": [{"pattern": "mox-*.csv", "profile": "mox"}]}
+                ),
                 encoding="utf-8",
             )
             config_path = root / "config.json"
@@ -1039,7 +1054,9 @@ class CliBootstrapTest(unittest.TestCase):
             )
 
             self.assertEqual(result.returncode, 0, result.stderr)
-            with (output_dir / "categorized.csv").open(newline="", encoding="utf-8") as fh:
+            with (output_dir / "categorized.csv").open(
+                newline="", encoding="utf-8"
+            ) as fh:
                 [row] = list(csv.DictReader(fh))
             self.assertEqual(row["account_id"], "mox")
 
@@ -1116,7 +1133,9 @@ class CliBootstrapTest(unittest.TestCase):
 
             self.assertEqual(result.returncode, 0, result.stderr)
 
-            with (output_dir / "categorized.csv").open(newline="", encoding="utf-8") as fh:
+            with (output_dir / "categorized.csv").open(
+                newline="", encoding="utf-8"
+            ) as fh:
                 [row] = list(csv.DictReader(fh))
 
             self.assertEqual(row["source_file"], "single.csv")
@@ -1298,7 +1317,9 @@ class CliBootstrapTest(unittest.TestCase):
             )
 
             self.assertEqual(result.returncode, 0, result.stderr)
-            with (output_dir / "categorized.csv").open(newline="", encoding="utf-8") as fh:
+            with (output_dir / "categorized.csv").open(
+                newline="", encoding="utf-8"
+            ) as fh:
                 rows = list(csv.DictReader(fh))
 
             self.assertEqual(rows[0]["merchant"], "Mox Cafe")
@@ -1380,7 +1401,9 @@ class CliBootstrapTest(unittest.TestCase):
             )
 
             self.assertEqual(result.returncode, 0, result.stderr)
-            with (output_dir / "categorized.csv").open(newline="", encoding="utf-8") as fh:
+            with (output_dir / "categorized.csv").open(
+                newline="", encoding="utf-8"
+            ) as fh:
                 [row] = list(csv.DictReader(fh))
 
             self.assertEqual(row["original_amount"], "-10.00")
@@ -1463,7 +1486,9 @@ class CliBootstrapTest(unittest.TestCase):
             )
 
             self.assertEqual(result.returncode, 0, result.stderr)
-            with (output_dir / "categorized.csv").open(newline="", encoding="utf-8") as fh:
+            with (output_dir / "categorized.csv").open(
+                newline="", encoding="utf-8"
+            ) as fh:
                 [row] = list(csv.DictReader(fh))
 
             self.assertEqual(row["original_amount"], "-10.00")
@@ -1541,7 +1566,9 @@ class CliBootstrapTest(unittest.TestCase):
             )
 
             self.assertEqual(result.returncode, 0, result.stderr)
-            with (output_dir / "categorized.csv").open(newline="", encoding="utf-8") as fh:
+            with (output_dir / "categorized.csv").open(
+                newline="", encoding="utf-8"
+            ) as fh:
                 [row] = list(csv.DictReader(fh))
 
             self.assertEqual(row["transaction_date"], "2026-05-01")
@@ -1619,7 +1646,9 @@ class CliBootstrapTest(unittest.TestCase):
             )
 
             self.assertEqual(result.returncode, 0, result.stderr)
-            with (output_dir / "categorized.csv").open(newline="", encoding="utf-8") as fh:
+            with (output_dir / "categorized.csv").open(
+                newline="", encoding="utf-8"
+            ) as fh:
                 [row] = list(csv.DictReader(fh))
 
             self.assertEqual(row["transaction_date"], "2026-05-01")
@@ -1744,7 +1773,9 @@ class CliBootstrapTest(unittest.TestCase):
             )
 
             self.assertEqual(result.returncode, 0, result.stderr)
-            with (output_dir / "categorized.csv").open(newline="", encoding="utf-8") as fh:
+            with (output_dir / "categorized.csv").open(
+                newline="", encoding="utf-8"
+            ) as fh:
                 rows = list(csv.DictReader(fh))
 
             self.assertEqual(len(rows), 2)
@@ -1848,7 +1879,9 @@ class CliBootstrapTest(unittest.TestCase):
             )
 
             self.assertEqual(result.returncode, 0, result.stderr)
-            with (output_dir / "categorized.csv").open(newline="", encoding="utf-8") as fh:
+            with (output_dir / "categorized.csv").open(
+                newline="", encoding="utf-8"
+            ) as fh:
                 rows = list(csv.DictReader(fh))
 
             self.assertEqual(rows[0]["category"], "Groceries")
@@ -1949,7 +1982,9 @@ class CliBootstrapTest(unittest.TestCase):
             )
 
             self.assertEqual(result.returncode, 0, result.stderr)
-            with (output_dir / "categorized.csv").open(newline="", encoding="utf-8") as fh:
+            with (output_dir / "categorized.csv").open(
+                newline="", encoding="utf-8"
+            ) as fh:
                 [row] = list(csv.DictReader(fh))
 
             self.assertEqual(row["payment_method"], "Credit Card")
@@ -2045,7 +2080,9 @@ class CliBootstrapTest(unittest.TestCase):
             )
 
             self.assertEqual(result.returncode, 0, result.stderr)
-            with (output_dir / "categorized.csv").open(newline="", encoding="utf-8") as fh:
+            with (output_dir / "categorized.csv").open(
+                newline="", encoding="utf-8"
+            ) as fh:
                 [row] = list(csv.DictReader(fh))
 
             self.assertEqual(row["category"], "Octopus")
@@ -2173,7 +2210,9 @@ class CliBootstrapTest(unittest.TestCase):
             )
 
             self.assertEqual(result.returncode, 0, result.stderr)
-            with (output_dir / "categorized.csv").open(newline="", encoding="utf-8") as fh:
+            with (output_dir / "categorized.csv").open(
+                newline="", encoding="utf-8"
+            ) as fh:
                 rows = list(csv.DictReader(fh))
 
             self.assertEqual(rows[0]["category"], "Subscriptions")
@@ -2384,7 +2423,9 @@ class CliBootstrapTest(unittest.TestCase):
                 result.stderr,
             )
 
-    def test_configured_taxonomy_allows_custom_profile_owner_and_rule_category(self) -> None:
+    def test_configured_taxonomy_allows_custom_profile_owner_and_rule_category(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             input_dir = root / "input"
@@ -2476,7 +2517,9 @@ class CliBootstrapTest(unittest.TestCase):
             )
 
             self.assertEqual(result.returncode, 0, result.stderr)
-            with (output_dir / "categorized.csv").open(newline="", encoding="utf-8") as fh:
+            with (output_dir / "categorized.csv").open(
+                newline="", encoding="utf-8"
+            ) as fh:
                 [row] = list(csv.DictReader(fh))
 
             self.assertEqual(row["category"], "Pet Care")
@@ -2558,7 +2601,9 @@ class CliBootstrapTest(unittest.TestCase):
                 encoding="utf-8",
             )
             config_path = root / "config.json"
-            config_path.write_text(json.dumps({"rules": str(rules_path)}), encoding="utf-8")
+            config_path.write_text(
+                json.dumps({"rules": str(rules_path)}), encoding="utf-8"
+            )
 
             result = subprocess.run(
                 [
@@ -3074,7 +3119,9 @@ class CliBootstrapTest(unittest.TestCase):
             )
 
             self.assertEqual(result.returncode, 0, result.stderr)
-            with (output_dir / "categorized.csv").open(newline="", encoding="utf-8") as fh:
+            with (output_dir / "categorized.csv").open(
+                newline="", encoding="utf-8"
+            ) as fh:
                 rows = list(csv.DictReader(fh))
             with (output_dir / "review_needed.csv").open(
                 newline="", encoding="utf-8"
@@ -3095,8 +3142,16 @@ class CliBootstrapTest(unittest.TestCase):
             self.assertEqual(
                 sorted(report["transaction_flags"].values()),
                 [
-                    ["duplicate_identity_collision", "duplicate_suspected", "matched_rule:parksnshop-groceries"],
-                    ["duplicate_identity_collision", "duplicate_suspected", "matched_rule:parksnshop-groceries"],
+                    [
+                        "duplicate_identity_collision",
+                        "duplicate_suspected",
+                        "matched_rule:parksnshop-groceries",
+                    ],
+                    [
+                        "duplicate_identity_collision",
+                        "duplicate_suspected",
+                        "matched_rule:parksnshop-groceries",
+                    ],
                 ],
             )
             self.assertEqual(
@@ -3183,7 +3238,9 @@ class CliBootstrapTest(unittest.TestCase):
             )
 
             self.assertEqual(result.returncode, 0, result.stderr)
-            with (output_dir / "categorized.csv").open(newline="", encoding="utf-8") as fh:
+            with (output_dir / "categorized.csv").open(
+                newline="", encoding="utf-8"
+            ) as fh:
                 rows = list(csv.DictReader(fh))
 
             self.assertEqual(len(rows), 2)
@@ -3284,10 +3341,15 @@ class CliBootstrapTest(unittest.TestCase):
             )
 
             self.assertEqual(result.returncode, 0, result.stderr)
-            with (output_dir / "categorized.csv").open(newline="", encoding="utf-8") as fh:
+            with (output_dir / "categorized.csv").open(
+                newline="", encoding="utf-8"
+            ) as fh:
                 rows = list(csv.DictReader(fh))
 
-            self.assertEqual({row["account_id"] for row in rows}, {"hsbc_hk_checking", "hsbc_hk_card"})
+            self.assertEqual(
+                {row["account_id"] for row in rows},
+                {"hsbc_hk_checking", "hsbc_hk_card"},
+            )
             self.assertNotEqual(rows[0]["transaction_id"], rows[1]["transaction_id"])
             for row in rows:
                 self.assertIn("duplicate_suspected", row["flags"])
@@ -3369,7 +3431,9 @@ class CliBootstrapTest(unittest.TestCase):
             )
 
             self.assertEqual(result.returncode, 0, result.stderr)
-            with (output_dir / "categorized.csv").open(newline="", encoding="utf-8") as fh:
+            with (output_dir / "categorized.csv").open(
+                newline="", encoding="utf-8"
+            ) as fh:
                 [row] = list(csv.DictReader(fh))
             report = json.loads((output_dir / "import_report.json").read_text())
 
@@ -3491,7 +3555,9 @@ class CliBootstrapTest(unittest.TestCase):
             )
 
             self.assertEqual(result.returncode, 0, result.stderr)
-            with (output_dir / "categorized.csv").open(newline="", encoding="utf-8") as fh:
+            with (output_dir / "categorized.csv").open(
+                newline="", encoding="utf-8"
+            ) as fh:
                 [row] = list(csv.DictReader(fh))
             report = json.loads((output_dir / "import_report.json").read_text())
 
@@ -3608,7 +3674,9 @@ class CliBootstrapTest(unittest.TestCase):
             )
 
             self.assertEqual(result.returncode, 0, result.stderr)
-            with (output_dir / "categorized.csv").open(newline="", encoding="utf-8") as fh:
+            with (output_dir / "categorized.csv").open(
+                newline="", encoding="utf-8"
+            ) as fh:
                 [row] = list(csv.DictReader(fh))
             report = json.loads((output_dir / "import_report.json").read_text())
 
@@ -3653,7 +3721,9 @@ class CliBootstrapTest(unittest.TestCase):
             )
 
             self.assertEqual(result.returncode, 0, result.stderr)
-            with (output_dir / "categorized.csv").open(newline="", encoding="utf-8") as fh:
+            with (output_dir / "categorized.csv").open(
+                newline="", encoding="utf-8"
+            ) as fh:
                 rows = list(csv.DictReader(fh))
             report = json.loads((output_dir / "import_report.json").read_text())
 
@@ -3700,7 +3770,9 @@ class CliBootstrapTest(unittest.TestCase):
             )
 
             self.assertEqual(result.returncode, 0, result.stderr)
-            with (output_dir / "categorized.csv").open(newline="", encoding="utf-8") as fh:
+            with (output_dir / "categorized.csv").open(
+                newline="", encoding="utf-8"
+            ) as fh:
                 rows = list(csv.DictReader(fh))
             report = json.loads((output_dir / "import_report.json").read_text())
 
@@ -3827,7 +3899,9 @@ def open(path):
             )
 
             self.assertEqual(result.returncode, 0, result.stderr)
-            with (output_dir / "categorized.csv").open(newline="", encoding="utf-8") as fh:
+            with (output_dir / "categorized.csv").open(
+                newline="", encoding="utf-8"
+            ) as fh:
                 [row] = list(csv.DictReader(fh))
             report = json.loads((output_dir / "import_report.json").read_text())
 
@@ -3975,7 +4049,9 @@ def open(path):
             )
 
             self.assertEqual(result.returncode, 0, result.stderr)
-            with (output_dir / "categorized.csv").open(newline="", encoding="utf-8") as fh:
+            with (output_dir / "categorized.csv").open(
+                newline="", encoding="utf-8"
+            ) as fh:
                 [row] = list(csv.DictReader(fh))
             report = json.loads((output_dir / "import_report.json").read_text())
 
@@ -4112,11 +4188,15 @@ def open(path):
             )
 
             self.assertEqual(result.returncode, 0, result.stderr)
-            with (output_dir / "categorized.csv").open(newline="", encoding="utf-8") as fh:
+            with (output_dir / "categorized.csv").open(
+                newline="", encoding="utf-8"
+            ) as fh:
                 rows = list(csv.DictReader(fh))
 
             self.assertEqual([row["merchant"] for row in rows], ["Coffee Shop", "Taxi"])
-            self.assertEqual([row["transaction_date"] for row in rows], ["2026-05-01", "2026-05-02"])
+            self.assertEqual(
+                [row["transaction_date"] for row in rows], ["2026-05-01", "2026-05-02"]
+            )
             self.assertEqual([row["amount_hkd"] for row in rows], ["-88.00", "45.00"])
 
     def test_headerless_pdf_table_can_use_column_indexes(self) -> None:
@@ -4238,7 +4318,9 @@ def open(path):
             )
 
             self.assertEqual(result.returncode, 0, result.stderr)
-            with (output_dir / "categorized.csv").open(newline="", encoding="utf-8") as fh:
+            with (output_dir / "categorized.csv").open(
+                newline="", encoding="utf-8"
+            ) as fh:
                 rows = list(csv.DictReader(fh))
 
             self.assertEqual(rows[0]["merchant"], "Coffee Shop")
@@ -4248,7 +4330,9 @@ def open(path):
             self.assertEqual(rows[1]["merchant"], "Refund")
             self.assertEqual(rows[1]["original_amount"], "12.00")
 
-    def test_headerless_pdf_row_regex_can_extract_single_cell_transactions(self) -> None:
+    def test_headerless_pdf_row_regex_can_extract_single_cell_transactions(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             fake_modules = root / "fake_modules"
@@ -4375,14 +4459,22 @@ def open(path):
             )
 
             self.assertEqual(result.returncode, 0, result.stderr)
-            with (output_dir / "categorized.csv").open(newline="", encoding="utf-8") as fh:
+            with (output_dir / "categorized.csv").open(
+                newline="", encoding="utf-8"
+            ) as fh:
                 rows = list(csv.DictReader(fh))
 
-            self.assertEqual([row["merchant"] for row in rows], ["Coffee Shop", "Refund"])
-            self.assertEqual([row["transaction_date"] for row in rows], ["2026-04-01", "2026-04-02"])
+            self.assertEqual(
+                [row["merchant"] for row in rows], ["Coffee Shop", "Refund"]
+            )
+            self.assertEqual(
+                [row["transaction_date"] for row in rows], ["2026-04-01", "2026-04-02"]
+            )
             self.assertEqual([row["amount_hkd"] for row in rows], ["88.00", "-12.00"])
 
-    def test_pdf_row_regex_can_join_capture_groups_without_font_warning_noise(self) -> None:
+    def test_pdf_row_regex_can_join_capture_groups_without_font_warning_noise(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             fake_modules = root / "fake_modules"
@@ -4431,7 +4523,9 @@ def open(path):
                         "pages": [
                             [
                                 [""],
-                                ["Activity date Settlement date Description Amount (HKD)"],
+                                [
+                                    "Activity date Settlement date Description Amount (HKD)"
+                                ],
                                 [
                                     "ShopBack IDFC Coffee Hong "
                                     "22 May 22 May -99.90 Kong HKG"
@@ -4523,23 +4617,25 @@ def open(path):
 
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertNotIn("Could not get FontBBox", result.stderr)
-            with (output_dir / "categorized.csv").open(newline="", encoding="utf-8") as fh:
+            with (output_dir / "categorized.csv").open(
+                newline="", encoding="utf-8"
+            ) as fh:
                 [row] = list(csv.DictReader(fh))
 
             self.assertEqual(row["merchant"], "ShopBack IDFC Coffee Hong Kong HKG")
             self.assertEqual(row["transaction_date"], "2026-05-22")
             self.assertEqual(row["amount_hkd"], "-99.90")
 
-    def test_committed_synthetic_pdf_table_fixtures_cover_bank_and_card_shapes(self) -> None:
+    def test_committed_synthetic_pdf_table_fixtures_cover_bank_and_card_shapes(
+        self,
+    ) -> None:
         fixtures_dir = Path(__file__).resolve().parent / "fixtures" / "pdf_tables"
         profiles_dir = Path(__file__).resolve().parents[1] / "examples" / "profiles"
         cases = [
             (
                 "hsbc_hk_bank_pdf.json",
                 json.loads(
-                    (profiles_dir / "hsbc_hk_bank_pdf.json").read_text(
-                        encoding="utf-8"
-                    )
+                    (profiles_dir / "hsbc_hk_bank_pdf.json").read_text(encoding="utf-8")
                 ),
                 [
                     {
@@ -4743,7 +4839,9 @@ def open(path):
                     for row, expected in zip(rows, expected_rows):
                         for field, value in expected.items():
                             self.assertEqual(row[field], value)
-                    self.assertTrue(all(row["notes"] == "Imported from PDF" for row in rows))
+                    self.assertTrue(
+                        all(row["notes"] == "Imported from PDF" for row in rows)
+                    )
 
     def test_example_config_includes_all_requested_pdf_profiles(self) -> None:
         repo_root = Path(__file__).resolve().parents[1]
@@ -4814,11 +4912,23 @@ def open(path):
                         "pages": [
                             [
                                 [
-                                    ["Date", "Description", "Debit", "Credit", "Currency"],
+                                    [
+                                        "Date",
+                                        "Description",
+                                        "Debit",
+                                        "Credit",
+                                        "Currency",
+                                    ],
                                     ["2026-05-01", "PARKNSHOP", "120.50", "", "HKD"],
                                 ],
                                 [
-                                    ["Date", "Description", "Debit", "Credit", "Currency"],
+                                    [
+                                        "Date",
+                                        "Description",
+                                        "Debit",
+                                        "Credit",
+                                        "Currency",
+                                    ],
                                     ["2026-05-02", "SALARY", "", "20000.00", "HKD"],
                                 ],
                             ]
@@ -4889,7 +4999,9 @@ def open(path):
             )
 
             self.assertEqual(result.returncode, 0, result.stderr)
-            with (output_dir / "categorized.csv").open(newline="", encoding="utf-8") as fh:
+            with (output_dir / "categorized.csv").open(
+                newline="", encoding="utf-8"
+            ) as fh:
                 rows = list(csv.DictReader(fh))
 
             self.assertEqual([row["merchant"] for row in rows], ["PARKNSHOP", "SALARY"])
@@ -4942,7 +5054,13 @@ def open(path):
                             [
                                 [["Account", "Balance"], ["Checking", "1000.00"]],
                                 [
-                                    ["Date", "Description", "Debit", "Credit", "Currency"],
+                                    [
+                                        "Date",
+                                        "Description",
+                                        "Debit",
+                                        "Credit",
+                                        "Currency",
+                                    ],
                                     ["2026-05-01", "PARKNSHOP", "120.50", "", "HKD"],
                                 ],
                             ]
@@ -5014,7 +5132,9 @@ def open(path):
             )
 
             self.assertEqual(result.returncode, 0, result.stderr)
-            with (output_dir / "categorized.csv").open(newline="", encoding="utf-8") as fh:
+            with (output_dir / "categorized.csv").open(
+                newline="", encoding="utf-8"
+            ) as fh:
                 rows = list(csv.DictReader(fh))
             report = json.loads((output_dir / "import_report.json").read_text())
 
@@ -5207,7 +5327,9 @@ def open(path):
             self.assertEqual(result.returncode, 1)
             self.assertTrue((output_dir / "import_report.json").exists())
 
-    def test_mixed_v1_acceptance_path_uses_csv_pdf_rules_corrections_duplicates_and_ollama(self) -> None:
+    def test_mixed_v1_acceptance_path_uses_csv_pdf_rules_corrections_duplicates_and_ollama(
+        self,
+    ) -> None:
         class Handler(BaseHTTPRequestHandler):
             def do_POST(self) -> None:
                 length = int(self.headers["Content-Length"])
@@ -5244,7 +5366,13 @@ def open(path):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             repo_root = Path(__file__).resolve().parents[1]
-            fixture_path = repo_root / "tests" / "fixtures" / "pdf_tables" / "hsbc_hk_bank_pdf.json"
+            fixture_path = (
+                repo_root
+                / "tests"
+                / "fixtures"
+                / "pdf_tables"
+                / "hsbc_hk_bank_pdf.json"
+            )
             fake_modules = root / "fake_modules"
             input_dir = root / "input"
             profiles_dir = root / "profiles"
@@ -5497,7 +5625,10 @@ def open(path):
             self.assertTrue(review_rows)
             self.assertEqual(report["transaction_count"], 5)
             self.assertEqual(report["ollama"]["status"], "success")
-            self.assertEqual({file["source_file"] for file in report["files"]}, {"transactions.csv", "statement.pdf"})
+            self.assertEqual(
+                {file["source_file"] for file in report["files"]},
+                {"transactions.csv", "statement.pdf"},
+            )
             parksnshop_rows = [row for row in rows if row["merchant"] == "PARKNSHOP"]
             self.assertEqual(len(parksnshop_rows), 2)
             for row in parksnshop_rows:
