@@ -296,6 +296,8 @@ def _run_pipeline(
 def _help_text() -> str:
     return """Honeymoney
 
+A local-first CLI for importing, categorizing, and reviewing household transactions.
+
 Commands:
   honeymoney setup                 Create a local starter workspace
   honeymoney run                   Process configured CSV/PDF exports

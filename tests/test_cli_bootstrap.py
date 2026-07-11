@@ -40,21 +40,28 @@ EXPECTED_CATEGORIZED_COLUMNS = [
 
 
 class CliBootstrapTest(unittest.TestCase):
-    def test_help_command_prints_simple_commands(self) -> None:
-        result = subprocess.run(
-            [sys.executable, "-m", "honeymoney.cli", "help"],
-            cwd=Path(__file__).resolve().parents[1],
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            check=False,
-        )
+    def test_help_commands_print_description_and_simple_commands(self) -> None:
+        for help_argument in ("help", "--help", "-h"):
+            with self.subTest(help_argument=help_argument):
+                result = subprocess.run(
+                    [sys.executable, "-m", "honeymoney.cli", help_argument],
+                    cwd=Path(__file__).resolve().parents[1],
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    check=False,
+                )
 
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("honeymoney setup", result.stdout)
-        self.assertIn("honeymoney run", result.stdout)
-        self.assertIn("honeymoney import", result.stdout)
-        self.assertIn("honeymoney help", result.stdout)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn(
+                    "A local-first CLI for importing, categorizing, and reviewing "
+                    "household transactions.",
+                    result.stdout,
+                )
+                self.assertIn("honeymoney setup", result.stdout)
+                self.assertIn("honeymoney run", result.stdout)
+                self.assertIn("honeymoney import", result.stdout)
+                self.assertIn("honeymoney help", result.stdout)
 
     def test_setup_command_creates_starter_workspace(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
