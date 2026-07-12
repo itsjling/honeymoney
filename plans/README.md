@@ -15,7 +15,7 @@ commits, logs, issues, or prompts.
 | Plan | Title | Priority | Effort | Depends on | Status |
 |---|---|---:|---:|---|---|
 | [001](001-preserve-failed-replacements.md) | Preserve failed replacement rows | P1 | S | — | DONE |
-| [002](002-validate-public-config.md) | Validate public config | P1 | M | — | TODO |
+| [002](002-validate-public-config.md) | Validate public config | P1 | M | — | DONE |
 | [003](003-validate-profile-structure.md) | Validate profile structure | P1 | M | 002 | TODO |
 | [004](004-define-empty-corrections.md) | Define empty correction semantics | P1 | S | 002 | TODO |
 | [005](005-failure-atomic-persistence.md) | Make persistence recoverable | P1 | L | 001, 004 | TODO |
