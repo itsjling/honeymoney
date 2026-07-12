@@ -145,6 +145,12 @@
       "skillPath": "skills/engineering/implement/SKILL.md",
       "computedHash": "5eedab2e36a68278662484e8e243624fe0bb74040299aa6c8a525feb65b0365c"
     },
+    "improve": {
+      "source": "shadcn/improve",
+      "sourceType": "github",
+      "skillPath": "skills/improve/SKILL.md",
+      "computedHash": "39a9358732dcff385e9e4d3e60b4547856f834e54a58b35e455aa9bd49928c13"
+    },
     "improve-codebase-architecture": {
       "source": "mattpocock/skills",
       "sourceType": "github",
