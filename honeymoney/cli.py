@@ -238,7 +238,12 @@ def _run_pipeline(
     review_rows = [row for row in transactions if row["needs_review"] == "true"]
 
     _status.update("Writing output files...")
-    replace_sources = source_files if args.replace or args.reset else None
+    processed_source_files = {
+        file_report["source_file"]
+        for file_report in file_reports
+        if file_report.get("status") == "processed"
+    }
+    replace_sources = processed_source_files if args.replace or args.reset else None
     ledger_rows = _merge_into_ledger(categorized_path, transactions, replace_sources)
     _write_ledger_outputs(categorized_path, ledger_rows)
     report = {

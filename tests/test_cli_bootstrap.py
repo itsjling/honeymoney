@@ -3789,6 +3789,234 @@ class CliBootstrapTest(unittest.TestCase):
             self.assertEqual(report["files"][0]["status"], "skipped")
             self.assertIn("PDF parsing disabled", report["warnings"][0])
 
+    def test_mixed_folder_replace_preserves_failed_pdf_but_replaces_csv(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            fake_modules = root / "fake_modules"
+            fake_modules.mkdir()
+            (fake_modules / "pdfplumber.py").write_text(
+                """
+import builtins
+import json
+
+
+class Page:
+    def __init__(self, table):
+        self._table = table
+
+    def extract_table(self):
+        return self._table
+
+
+class Pdf:
+    def __init__(self, path):
+        self.path = path
+        self.pages = []
+
+    def __enter__(self):
+        data = json.loads(builtins.open(self.path, encoding="utf-8").read())
+        self.pages = [
+            Page(page.get("table") if isinstance(page, dict) else page)
+            for page in data["pages"]
+        ]
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+
+def open(path):
+    return Pdf(path)
+""",
+                encoding="utf-8",
+            )
+            input_dir = root / "input"
+            input_dir.mkdir()
+            csv_path = input_dir / "may.csv"
+            csv_path.write_text(
+                "\n".join(
+                    [
+                        "Date,Description,Amount,Currency",
+                        "2026-05-04,PARKNSHOP,-120.50,HKD",
+                        "2026-05-05,WELLCOME,-60.00,HKD",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            pdf_path = input_dir / "statement.pdf"
+            pdf_path.write_text(
+                json.dumps(
+                    {
+                        "pages": [
+                            [
+                                [
+                                    "Date",
+                                    "Description",
+                                    "Debit",
+                                    "Credit",
+                                    "Currency",
+                                ],
+                                ["2026-05-01", "GOGO TECH", "95.00", "", "HKD"],
+                            ]
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            csv_profile_path = root / "csv_profile.json"
+            csv_profile_path.write_text(
+                json.dumps(
+                    {
+                        "id": "household_bank_csv",
+                        "account_id": "household_checking",
+                        "account": "Household Checking",
+                        "institution": "Household Bank",
+                        "country": "HK",
+                        "account_currency": "HKD",
+                        "owner": "Household",
+                        "payment_method": "Bank Account",
+                        "csv": {
+                            "detect_headers": [
+                                "Date",
+                                "Description",
+                                "Amount",
+                                "Currency",
+                            ],
+                            "columns": {
+                                "transaction_date": "Date",
+                                "description": "Description",
+                                "amount": "Amount",
+                                "original_currency": "Currency",
+                            },
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            pdf_profile_path = root / "pdf_profile.json"
+            pdf_profile_path.write_text(
+                json.dumps(
+                    {
+                        "id": "hsbc_hk_bank_pdf",
+                        "account_id": "hsbc_hk_checking",
+                        "account": "HSBC HK Checking",
+                        "institution": "HSBC HK",
+                        "country": "HK",
+                        "account_currency": "HKD",
+                        "owner": "Household",
+                        "payment_method": "Bank Account",
+                        "pdf": {
+                            "columns": {
+                                "transaction_date": "Date",
+                                "description": "Description",
+                                "debit": "Debit",
+                                "credit": "Credit",
+                                "original_currency": "Currency",
+                            }
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            mapping_path = root / "profile_mappings.json"
+            mapping_path.write_text(
+                json.dumps(
+                    {
+                        "filename_patterns": [
+                            {"pattern": "*.pdf", "profile": "hsbc_hk_bank_pdf"}
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            config_path = root / "config.json"
+            output_dir = root / "output"
+
+            def write_config(pdf_enabled: bool) -> None:
+                config_path.write_text(
+                    json.dumps(
+                        {
+                            "profiles": [str(csv_profile_path), str(pdf_profile_path)],
+                            "profile_mappings": str(mapping_path),
+                            "exchange_rates": {"HKD": 1.0},
+                            "pdf": {"enabled": pdf_enabled, "parser": "pdfplumber"},
+                            "paths": {
+                                "input": str(input_dir),
+                                "output": str(output_dir / "categorized.csv"),
+                            },
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+
+            env = dict(**os.environ)
+            env["PYTHONPATH"] = f"{fake_modules}:{Path(__file__).resolve().parents[1]}"
+
+            def run(extra_args: list[str]) -> subprocess.CompletedProcess:
+                return subprocess.run(
+                    [
+                        sys.executable,
+                        "-m",
+                        "honeymoney.cli",
+                        "--config",
+                        str(config_path),
+                        "--no-interactive",
+                        *extra_args,
+                    ],
+                    cwd=Path(__file__).resolve().parents[1],
+                    env=env,
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    check=False,
+                )
+
+            write_config(pdf_enabled=True)
+            first = run([])
+            self.assertEqual(first.returncode, 0, first.stderr)
+            with (output_dir / "categorized.csv").open(
+                newline="", encoding="utf-8"
+            ) as fh:
+                first_rows = list(csv.DictReader(fh))
+            self.assertEqual(
+                {row["merchant"] for row in first_rows},
+                {"PARKNSHOP", "WELLCOME", "GOGO TECH"},
+            )
+
+            csv_path.write_text(
+                "\n".join(
+                    [
+                        "Date,Description,Amount,Currency",
+                        "2026-05-04,PARKNSHOP,-120.50,HKD",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            write_config(pdf_enabled=False)
+            replacement = run(["--replace"])
+
+            self.assertEqual(replacement.returncode, 0, replacement.stderr)
+            with (output_dir / "categorized.csv").open(
+                newline="", encoding="utf-8"
+            ) as fh:
+                rows = list(csv.DictReader(fh))
+            report = json.loads((output_dir / "import_report.json").read_text())
+
+            self.assertEqual(
+                {row["merchant"] for row in rows},
+                {"PARKNSHOP", "GOGO TECH"},
+                "the CSV source should be replaced while the failed PDF source "
+                "keeps its previously imported rows",
+            )
+            files_by_source = {
+                file_report["source_file"]: file_report
+                for file_report in report["files"]
+            }
+            self.assertEqual(files_by_source["may.csv"]["status"], "processed")
+            self.assertEqual(files_by_source["statement.pdf"]["status"], "skipped")
+            self.assertEqual(report["status"], "partial_success")
+            self.assertIn("PDF parsing disabled", " ".join(report["warnings"]))
+
     def test_text_pdf_table_can_be_imported_with_pdfplumber(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

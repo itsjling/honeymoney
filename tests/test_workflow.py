@@ -494,6 +494,287 @@ def open(path):
             self.assertEqual(rows["24/7 FITNESS HONG KONG HK"]["amount_hkd"], "-498.00")
             self.assertEqual(rows["DCC FEE-NON-HK MERCHANT"]["amount_hkd"], "-0.08")
 
+    _FAKE_PDFPLUMBER_TABLE_SOURCE = """
+import builtins
+import json
+
+
+class Page:
+    def __init__(self, table):
+        self._table = table
+
+    def extract_table(self):
+        return self._table
+
+
+class Pdf:
+    def __init__(self, path):
+        self.path = path
+        self.pages = []
+
+    def __enter__(self):
+        data = json.loads(builtins.open(self.path, encoding="utf-8").read())
+        self.pages = [
+            Page(page.get("table") if isinstance(page, dict) else page)
+            for page in data["pages"]
+        ]
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+
+def open(path):
+    return Pdf(path)
+"""
+
+    def _write_pdf_bank_profile(self, path: Path) -> None:
+        path.write_text(
+            json.dumps(
+                {
+                    "id": "hsbc_hk_bank_pdf",
+                    "account_id": "hsbc_hk_checking",
+                    "account": "HSBC HK Checking",
+                    "institution": "HSBC HK",
+                    "country": "HK",
+                    "account_currency": "HKD",
+                    "owner": "Household",
+                    "payment_method": "Bank Account",
+                    "pdf": {
+                        "columns": {
+                            "transaction_date": "Date",
+                            "description": "Description",
+                            "debit": "Debit",
+                            "credit": "Credit",
+                            "original_currency": "Currency",
+                        }
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    def test_import_replace_preserves_rows_when_pdf_disabled_after_success(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            fake_modules = root / "fake_modules"
+            fake_modules.mkdir()
+            (fake_modules / "pdfplumber.py").write_text(
+                self._FAKE_PDFPLUMBER_TABLE_SOURCE, encoding="utf-8"
+            )
+            pdf_path = root / "statement.pdf"
+            pdf_path.write_text(
+                json.dumps(
+                    {
+                        "pages": [
+                            [
+                                [
+                                    "Date",
+                                    "Description",
+                                    "Debit",
+                                    "Credit",
+                                    "Currency",
+                                ],
+                                ["2026-05-01", "PARKNSHOP", "120.50", "", "HKD"],
+                            ]
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            profile_path = root / "profile.json"
+            self._write_pdf_bank_profile(profile_path)
+            config_path = root / "config.json"
+            output_dir = root / "output"
+
+            def write_config(pdf_enabled: bool) -> None:
+                config_path.write_text(
+                    json.dumps(
+                        {
+                            "profiles": [str(profile_path)],
+                            "exchange_rates": {"HKD": 1.0},
+                            "pdf": {"enabled": pdf_enabled, "parser": "pdfplumber"},
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+
+            env = dict(os.environ)
+            env["PYTHONPATH"] = f"{fake_modules}:{REPO_ROOT}"
+
+            def run() -> subprocess.CompletedProcess:
+                return subprocess.run(
+                    [
+                        sys.executable,
+                        "-m",
+                        "honeymoney.cli",
+                        "--input",
+                        str(pdf_path),
+                        "--output",
+                        str(output_dir / "categorized.csv"),
+                        "--config",
+                        str(config_path),
+                        "--no-interactive",
+                    ],
+                    cwd=REPO_ROOT,
+                    env=env,
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    check=False,
+                )
+
+            write_config(pdf_enabled=True)
+            first = run()
+            self.assertEqual(first.returncode, 0, first.stderr)
+            with (output_dir / "categorized.csv").open(
+                newline="", encoding="utf-8"
+            ) as fh:
+                [row] = list(csv.DictReader(fh))
+            self.assertEqual(row["merchant"], "PARKNSHOP")
+
+            write_config(pdf_enabled=False)
+            replacement = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "honeymoney.cli",
+                    "--input",
+                    str(pdf_path),
+                    "--output",
+                    str(output_dir / "categorized.csv"),
+                    "--config",
+                    str(config_path),
+                    "--replace",
+                    "--no-interactive",
+                ],
+                cwd=REPO_ROOT,
+                env=env,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+
+            self.assertEqual(replacement.returncode, 0, replacement.stderr)
+            with (output_dir / "categorized.csv").open(
+                newline="", encoding="utf-8"
+            ) as fh:
+                rows = list(csv.DictReader(fh))
+            report = json.loads((output_dir / "import_report.json").read_text())
+
+            self.assertEqual(
+                [row["merchant"] for row in rows],
+                ["PARKNSHOP"],
+                "failed replacement must preserve the last known-good ledger rows",
+            )
+            self.assertEqual(report["status"], "partial_success")
+            self.assertEqual(report["files"][0]["source_file"], "statement.pdf")
+            self.assertEqual(report["files"][0]["status"], "skipped")
+            self.assertIn("PDF parsing disabled", report["warnings"][0])
+
+    def test_import_replace_preserves_rows_when_pdf_parsing_raises(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            fake_modules = root / "fake_modules"
+            fake_modules.mkdir()
+            (fake_modules / "pdfplumber.py").write_text(
+                self._FAKE_PDFPLUMBER_TABLE_SOURCE, encoding="utf-8"
+            )
+            pdf_path = root / "statement.pdf"
+            pdf_path.write_text(
+                json.dumps(
+                    {
+                        "pages": [
+                            [
+                                [
+                                    "Date",
+                                    "Description",
+                                    "Debit",
+                                    "Credit",
+                                    "Currency",
+                                ],
+                                ["2026-05-01", "PARKNSHOP", "120.50", "", "HKD"],
+                            ]
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            profile_path = root / "profile.json"
+            self._write_pdf_bank_profile(profile_path)
+            config_path = root / "config.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "profiles": [str(profile_path)],
+                        "exchange_rates": {"HKD": 1.0},
+                        "pdf": {"enabled": True, "parser": "pdfplumber"},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            output_dir = root / "output"
+            env = dict(os.environ)
+            env["PYTHONPATH"] = f"{fake_modules}:{REPO_ROOT}"
+
+            def run(extra_args: list[str]) -> subprocess.CompletedProcess:
+                return subprocess.run(
+                    [
+                        sys.executable,
+                        "-m",
+                        "honeymoney.cli",
+                        "--input",
+                        str(pdf_path),
+                        "--output",
+                        str(output_dir / "categorized.csv"),
+                        "--config",
+                        str(config_path),
+                        "--no-interactive",
+                        *extra_args,
+                    ],
+                    cwd=REPO_ROOT,
+                    env=env,
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    check=False,
+                )
+
+            first = run([])
+            self.assertEqual(first.returncode, 0, first.stderr)
+            with (output_dir / "categorized.csv").open(
+                newline="", encoding="utf-8"
+            ) as fh:
+                [row] = list(csv.DictReader(fh))
+            self.assertEqual(row["merchant"], "PARKNSHOP")
+
+            (fake_modules / "pdfplumber.py").write_text(
+                "def open(path):\n"
+                "    raise RuntimeError('pdfplumber intentionally broken')\n",
+                encoding="utf-8",
+            )
+            replacement = run(["--replace"])
+
+            self.assertEqual(replacement.returncode, 0, replacement.stderr)
+            with (output_dir / "categorized.csv").open(
+                newline="", encoding="utf-8"
+            ) as fh:
+                rows = list(csv.DictReader(fh))
+            report = json.loads((output_dir / "import_report.json").read_text())
+
+            self.assertEqual(
+                [row["merchant"] for row in rows],
+                ["PARKNSHOP"],
+                "failed replacement must preserve the last known-good ledger rows",
+            )
+            self.assertEqual(report["status"], "partial_success")
+            self.assertEqual(report["files"][0]["source_file"], "statement.pdf")
+            self.assertEqual(report["files"][0]["status"], "failed")
+            self.assertIn("PDF parsing failed", report["warnings"][0])
+
     def test_sequential_imports_accumulate_into_ledger(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = self._setup_workspace(tmp)
