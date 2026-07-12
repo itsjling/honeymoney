@@ -1,0 +1,38 @@
+# Reviewed constraints for CI/dev installs of `.[pdf,dev]`.
+#
+# Pins every direct and transitive dependency resolved for the `pdf` and
+# `dev` extras so the same commit installs the same versions on every
+# machine and in CI, on both supported Python versions (3.10 and 3.13).
+#
+# This file does NOT affect published package metadata: `pyproject.toml`
+# keeps compatible (unpinned or range) requirements for end users. This
+# file is consumed only via `pip install -c constraints/dev.txt`.
+#
+# Refresh workflow (see README.md "Updating dependency constraints"):
+#   1. Create a clean venv on the oldest supported Python (3.10).
+#   2. pip install -e ".[pdf,dev]" (no -c, so pip resolves fresh).
+#   3. pip freeze --exclude-editable > constraints/dev.txt, then restore
+#      this header comment.
+#   4. Repeat in a clean venv on the newest supported Python (3.13) and
+#      confirm the same versions resolve (add any Python-version-specific
+#      transitive packages, e.g. tomli/typing_extensions, unchanged).
+#   5. Run ./scripts/check.sh (parser goldens included) on both versions
+#      before committing.
+
+build==1.5.1
+cffi==2.1.0
+charset-normalizer==3.4.9
+cryptography==49.0.0
+packaging==26.2
+pdfminer.six==20260107
+pdfplumber==0.11.10
+pillow==12.3.0
+pycparser==3.0
+pymupdf==1.28.0
+pypdfium2==5.11.0
+pyproject_hooks==1.2.0
+ruff==0.15.21
+setuptools==79.0.1
+tomli==2.4.1; python_version < "3.11"
+typing_extensions==4.16.0; python_full_version < "3.11"
+wheel==0.47.0

@@ -11,6 +11,10 @@ environment when desired, then run:
 ```
 
 Set `PYTHON=/path/to/python` when Codex should use a specific interpreter.
+`./scripts/bootstrap.sh` installs `.[pdf,dev]` constrained by
+`constraints/dev.txt` so dependency versions are reproducible; see
+README.md's "Development / CI dependency constraints" section for the
+refresh workflow.
 
 ## Codex cloud
 

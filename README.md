@@ -224,3 +224,34 @@ Corrections apply by exact `transaction_id` and clear review by default.
 ```bash
 python3 -m unittest discover
 ```
+
+## Development / CI dependency constraints
+
+`pyproject.toml` keeps compatible (unpinned or ranged) requirements so
+published package metadata does not unnecessarily hard-pin end users.
+Development and CI installs additionally apply `constraints/dev.txt`, which
+pins every direct and transitive dependency of the `pdf` and `dev` extras to
+versions reviewed together, so the same commit resolves the same set of
+package versions on every machine and CI run. `./scripts/bootstrap.sh`
+applies it automatically via `pip install -c constraints/dev.txt -e ".[pdf,dev]"`.
+
+Both supported Python versions (3.10 and 3.13) resolve to the same pinned
+versions from `constraints/dev.txt`; a couple of transitive packages
+(`tomli`, `typing_extensions`) are installed only on Python <3.11 via
+environment markers, which is expected.
+
+To refresh the constraints (run on Python 3.10, the oldest supported
+version):
+
+```bash
+python3.10 -m venv /tmp/honeymoney-constraints-refresh
+/tmp/honeymoney-constraints-refresh/bin/pip install --disable-pip-version-check -e ".[pdf,dev]"
+/tmp/honeymoney-constraints-refresh/bin/pip freeze --exclude-editable > constraints/dev.txt
+rm -rf /tmp/honeymoney-constraints-refresh
+```
+
+Then restore the header comment at the top of `constraints/dev.txt`, confirm
+the same versions also resolve cleanly in a clean Python 3.13 venv, run the
+parser import-profile goldens and `./scripts/check.sh` on both versions, and
+commit the refreshed file deliberately (never as an automated/blind update —
+see `constraints/dev.txt` for the full refresh workflow and rationale).
