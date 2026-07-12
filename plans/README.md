@@ -26,7 +26,7 @@ commits, logs, issues, or prompts.
 | [010](010-cross-import-duplicates.md) | Detect cross-import duplicates | P2 | M | 008, 009 | TODO |
 | [011](011-optimize-duplicate-window.md) | Optimize duplicate scanning | P2 | M | 010 | TODO |
 | [012](012-safe-spreadsheet-exports.md) | Make CSV exports spreadsheet-safe | P2 | M | 005 | TODO |
-| [013](013-pin-ci-toolchain.md) | Stabilize CI dependency resolution | P3 | S | — | TODO |
+| [013](013-pin-ci-toolchain.md) | Stabilize CI dependency resolution | P3 | S | — | DONE |
 | [014](014-single-ledger-read.md) | Read ledger once per import | P3 | S | 005, 009 | TODO |
 | [015](015-local-categorization-memory.md) | Add local categorization memory | P2 | M | 004, 008 | TODO |
 | [016](016-profile-validation-command.md) | Add profile validation tooling | P2 | M | 003 | TODO |
