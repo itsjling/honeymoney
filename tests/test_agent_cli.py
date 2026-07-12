@@ -628,6 +628,249 @@ class AgentCliTest(unittest.TestCase):
                 self._json(ambiguous_result)["errors"][0]["message"],
             )
 
+    def test_malformed_public_config_sections_fail_with_structured_errors(
+        self,
+    ) -> None:
+        cases = [
+            ("paths not an object", {"paths": []}, "paths must be a JSON object"),
+            (
+                "paths.output not a string",
+                {"paths": {"output": []}},
+                "paths.output must be a non-empty string",
+            ),
+            (
+                "profiles not an array",
+                {"profiles": "profiles/starter.json"},
+                "profiles must be a JSON array",
+            ),
+            (
+                "profiles item not a string",
+                {"profiles": [123]},
+                "profiles[0] must be a non-empty string",
+            ),
+            (
+                "profiles item empty",
+                {"profiles": [""]},
+                "profiles[0] must be a non-empty string",
+            ),
+            (
+                "profile_mappings not a string",
+                {"profile_mappings": {"filename_patterns": []}},
+                "profile_mappings must be a string",
+            ),
+            (
+                "rules not a string",
+                {"rules": 12},
+                "rules must be a string",
+            ),
+            (
+                "corrections not a string",
+                {"corrections": ["corrections.csv"]},
+                "corrections must be a string",
+            ),
+            (
+                "pdf not an object",
+                {"pdf": "enabled"},
+                "pdf must be a JSON object",
+            ),
+            (
+                "pdf.enabled not a boolean",
+                {"pdf": {"enabled": "true"}},
+                "pdf.enabled must be a boolean",
+            ),
+            (
+                "pdf.parser not a string",
+                {"pdf": {"parser": 1}},
+                "pdf.parser must be a non-empty string",
+            ),
+            (
+                "ollama not an object",
+                {"ollama": "enabled"},
+                "ollama must be a JSON object",
+            ),
+            (
+                "ollama.enabled not a boolean",
+                {"ollama": {"enabled": "yes"}},
+                "ollama.enabled must be a boolean",
+            ),
+            (
+                "ollama.url not a string",
+                {"ollama": {"url": 11434}},
+                "ollama.url must be a non-empty string",
+            ),
+            (
+                "ollama.model not a string",
+                {"ollama": {"model": None}},
+                "ollama.model must be a non-empty string",
+            ),
+            (
+                "ollama.batch_size is a boolean, not an integer",
+                {"ollama": {"batch_size": True}},
+                "ollama.batch_size must be an integer",
+            ),
+            (
+                "ollama.batch_size not an integer",
+                {"ollama": {"batch_size": 2.5}},
+                "ollama.batch_size must be an integer",
+            ),
+            (
+                "ollama.batch_size below minimum",
+                {"ollama": {"batch_size": 0}},
+                "ollama.batch_size must be at least 1",
+            ),
+            (
+                "ollama.timeout_seconds is a boolean, not a number",
+                {"ollama": {"timeout_seconds": False}},
+                "ollama.timeout_seconds must be a number",
+            ),
+            (
+                "ollama.timeout_seconds not positive",
+                {"ollama": {"timeout_seconds": 0}},
+                "ollama.timeout_seconds must be greater than 0",
+            ),
+            (
+                "ollama.timeout_seconds non-finite",
+                {"ollama": {"timeout_seconds": float("inf")}},
+                "ollama.timeout_seconds must be a finite number",
+            ),
+            (
+                "exchange_rates not an object",
+                {"exchange_rates": ["HKD", 1.0]},
+                "exchange_rates must be a JSON object",
+            ),
+            (
+                "exchange_rates value not a number",
+                {"exchange_rates": {"USD": "7.8"}},
+                "exchange_rates.USD must be a number",
+            ),
+            (
+                "exchange_rates value is a boolean, not a number",
+                {"exchange_rates": {"USD": True}},
+                "exchange_rates.USD must be a number",
+            ),
+            (
+                "exchange_rates value not positive",
+                {"exchange_rates": {"USD": 0}},
+                "exchange_rates.USD must be greater than 0",
+            ),
+            (
+                "exchange_rates value non-finite",
+                {"exchange_rates": {"USD": float("nan")}},
+                "exchange_rates.USD must be a finite number",
+            ),
+            (
+                "base_currency not a string",
+                {"base_currency": 840},
+                "base_currency must be a non-empty string",
+            ),
+            (
+                "review_confidence_threshold is a boolean, not a number",
+                {"review_confidence_threshold": True},
+                "review_confidence_threshold must be a number",
+            ),
+            (
+                "review_confidence_threshold out of range",
+                {"review_confidence_threshold": 1.5},
+                "review_confidence_threshold must be at most 1",
+            ),
+            (
+                "review_confidence_threshold negative",
+                {"review_confidence_threshold": -0.1},
+                "review_confidence_threshold must be at least 0",
+            ),
+            (
+                "review_confidence_threshold non-finite",
+                {"review_confidence_threshold": float("nan")},
+                "review_confidence_threshold must be a finite number",
+            ),
+            (
+                "categories not an array",
+                {"categories": "Groceries"},
+                "categories must be a JSON array",
+            ),
+            (
+                "categories item not a string",
+                {"categories": [1, 2]},
+                "categories[0] must be a non-empty string",
+            ),
+            (
+                "owners not an array",
+                {"owners": {"Household": True}},
+                "owners must be a JSON array",
+            ),
+            (
+                "owners item empty string",
+                {"owners": [""]},
+                "owners[0] must be a non-empty string",
+            ),
+            (
+                "payment_methods not an array",
+                {"payment_methods": "Cash"},
+                "payment_methods must be a JSON array",
+            ),
+            (
+                "payment_methods item not a string",
+                {"payment_methods": [None]},
+                "payment_methods[0] must be a non-empty string",
+            ),
+        ]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for description, overrides, expected_message in cases:
+                with self.subTest(description=description):
+                    config_path = root / "config.json"
+                    config_path.write_text(json.dumps(overrides), encoding="utf-8")
+
+                    result = self._run_cli(
+                        ["status", "--config", str(config_path), "--json"]
+                    )
+
+                    self.assertEqual(result.returncode, 2, result.stderr)
+                    self.assertEqual(result.stderr, "")
+                    payload = self._json(result)
+                    self.assertEqual(payload["command"], "status")
+                    self.assertEqual(payload["status"], "error")
+                    self.assertIn(expected_message, payload["errors"][0]["message"])
+
+    def test_valid_public_config_sections_still_load(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config_path = root / "config.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "base_currency": "HKD",
+                        "exchange_rates": {"HKD": 1.0, "USD": 7.8},
+                        "review_confidence_threshold": 0.8,
+                        "categories": ["Income", "Groceries"],
+                        "owners": ["Household"],
+                        "payment_methods": ["Bank Account"],
+                        "pdf": {"enabled": True, "parser": "pdfplumber"},
+                        "ollama": {
+                            "enabled": False,
+                            "url": "http://localhost:11434/api/generate",
+                            "model": "qwen2.5:7b-instruct",
+                            "batch_size": 5,
+                            "timeout_seconds": 120,
+                            "think": False,
+                        },
+                        "paths": {
+                            "input": str(root / "input"),
+                            "output": str(root / "output" / "categorized.csv"),
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            result = self._run_cli(["status", "--config", str(config_path), "--json"])
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            payload = self._json(result)
+            self.assertEqual(payload["command"], "status")
+            self.assertEqual(payload["status"], "success")
+
     def test_report_json_never_opens_a_browser(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

@@ -185,9 +185,17 @@ Common edits:
 Set `ollama.enabled` to `true` to categorize remaining unknown transactions with a local Ollama model. Options in the `ollama` config section:
 
 - `model`: must be a model you have pulled locally (check with `ollama list`).
-- `timeout_seconds`: request timeout per batch (default 120).
-- `batch_size`: transactions per request (default 5). Local inference is generation-bound, so total time is roughly constant regardless of batch size (~1-2s per transaction); a smaller batch just means the status line updates more often and any one request has less to lose if it fails.
+- `timeout_seconds`: request timeout per batch (default 120); must be a positive number.
+- `batch_size`: transactions per request (default 5); must be a whole number of at least 1. Local inference is generation-bound, so total time is roughly constant regardless of batch size (~1-2s per transaction); a smaller batch just means the status line updates more often and any one request has less to lose if it fails.
 - `think`: allow thinking models to reason before answering (default `false`; slower and unnecessary since responses are schema-constrained).
+
+All public config sections (`paths`, `profiles`, `profile_mappings`, `rules`,
+`corrections`, `pdf`, `ollama`, `exchange_rates`, `categories`, `owners`, and
+`payment_methods`) are validated when the config is loaded, so a malformed
+section fails fast with a field-specific error instead of an unhandled crash.
+`exchange_rates` values must be positive, finite numbers; `base_currency` must
+be a string; and `review_confidence_threshold` must be a number between `0`
+and `1` inclusive.
 
 Requests constrain the response to the allowed categories and owners. The status line shows which batch is in flight (`batch 2/20 (transactions 6-10 of 98, 4s)`) and ticks up every second while waiting, so a slow local model doesn't look stuck. If Ollama is unreachable, the model is missing, or a categorization is rejected, the import prints a warning explaining why and the affected rows stay uncategorized for interactive or manual review.
 

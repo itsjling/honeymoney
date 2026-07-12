@@ -7,6 +7,7 @@ import hashlib
 import io
 import json
 import logging
+import math
 import os
 import re
 import shutil
@@ -1249,21 +1250,159 @@ def _load_config(config_path: str | None) -> dict[str, Any]:
 
     if not isinstance(config, dict):
         raise ValueError("Config must be a JSON object")
-    paths = config.get("paths")
-    if paths is not None and not isinstance(paths, dict):
-        raise ValueError("Config field paths must be a JSON object")
-    for path_field, path_value in (paths or {}).items():
-        if path_field not in {"input", "output"}:
-            continue
-        if not isinstance(path_value, str) or not path_value.strip():
-            raise ValueError(
-                f"Config field paths.{path_field} must be a non-empty string"
-            )
+    _validate_config(config)
 
     config.setdefault("paths", {})
     config["paths"].setdefault("input", "./input")
     config["paths"].setdefault("output", "./output/categorized.csv")
     return config
+
+
+def _require_json_object(value: Any, field: str) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise ValueError(f"Config field {field} must be a JSON object")
+    return value
+
+
+def _require_string(value: Any, field: str) -> str:
+    if not isinstance(value, str):
+        raise ValueError(f"Config field {field} must be a string")
+    return value
+
+
+def _require_non_empty_string(value: Any, field: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"Config field {field} must be a non-empty string")
+    return value
+
+
+def _require_bool(value: Any, field: str) -> bool:
+    if not isinstance(value, bool):
+        raise ValueError(f"Config field {field} must be a boolean")
+    return value
+
+
+def _require_string_list(value: Any, field: str) -> list[str]:
+    if not isinstance(value, list):
+        raise ValueError(f"Config field {field} must be a JSON array")
+    for index, item in enumerate(value):
+        if not isinstance(item, str) or not item.strip():
+            raise ValueError(
+                f"Config field {field}[{index}] must be a non-empty string"
+            )
+    return value
+
+
+def _require_number(
+    value: Any,
+    field: str,
+    *,
+    minimum: float | None = None,
+    maximum: float | None = None,
+    exclusive_minimum: bool = False,
+) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"Config field {field} must be a number")
+    numeric = float(value)
+    if not math.isfinite(numeric):
+        raise ValueError(f"Config field {field} must be a finite number")
+    if minimum is not None:
+        if exclusive_minimum and numeric <= minimum:
+            raise ValueError(f"Config field {field} must be greater than {minimum}")
+        if not exclusive_minimum and numeric < minimum:
+            raise ValueError(f"Config field {field} must be at least {minimum}")
+    if maximum is not None and numeric > maximum:
+        raise ValueError(f"Config field {field} must be at most {maximum}")
+    return numeric
+
+
+def _require_int(value: Any, field: str, *, minimum: int | None = None) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"Config field {field} must be an integer")
+    if minimum is not None and value < minimum:
+        raise ValueError(f"Config field {field} must be at least {minimum}")
+    return value
+
+
+def _validate_config(config: dict[str, Any]) -> None:
+    """Validate the structural shape of every public config section.
+
+    Raises a field-specific ValueError for the first structural problem found
+    so malformed configuration always fails with the JSON error envelope and
+    exit code 2 instead of an unhandled traceback. Valid, already-supported
+    configuration must pass through unchanged.
+    """
+    paths = config.get("paths")
+    if paths is not None:
+        _require_json_object(paths, "paths")
+        for path_field in ("input", "output"):
+            if path_field in paths:
+                _require_non_empty_string(paths[path_field], f"paths.{path_field}")
+
+    if "profiles" in config:
+        _require_string_list(config["profiles"], "profiles")
+
+    for field in ("profile_mappings", "rules", "corrections"):
+        if field in config and config[field] is not None:
+            _require_string(config[field], field)
+
+    if "pdf" in config:
+        pdf = _require_json_object(config["pdf"], "pdf")
+        if "enabled" in pdf:
+            _require_bool(pdf["enabled"], "pdf.enabled")
+        if "parser" in pdf:
+            _require_non_empty_string(pdf["parser"], "pdf.parser")
+
+    if "ollama" in config:
+        ollama = _require_json_object(config["ollama"], "ollama")
+        if "enabled" in ollama:
+            _require_bool(ollama["enabled"], "ollama.enabled")
+        if "think" in ollama:
+            _require_bool(ollama["think"], "ollama.think")
+        if "url" in ollama:
+            _require_non_empty_string(ollama["url"], "ollama.url")
+        if "model" in ollama:
+            _require_non_empty_string(ollama["model"], "ollama.model")
+        if "batch_size" in ollama:
+            _require_int(ollama["batch_size"], "ollama.batch_size", minimum=1)
+        if "timeout_seconds" in ollama:
+            _require_number(
+                ollama["timeout_seconds"],
+                "ollama.timeout_seconds",
+                minimum=0,
+                exclusive_minimum=True,
+            )
+
+    if "exchange_rates" in config:
+        exchange_rates = _require_json_object(
+            config["exchange_rates"], "exchange_rates"
+        )
+        for currency, rate in exchange_rates.items():
+            if not isinstance(currency, str) or not currency.strip():
+                raise ValueError(
+                    "Config field exchange_rates keys must be non-empty strings"
+                )
+            _require_number(
+                rate,
+                f"exchange_rates.{currency}",
+                minimum=0,
+                exclusive_minimum=True,
+            )
+
+    if "base_currency" in config:
+        _require_non_empty_string(config["base_currency"], "base_currency")
+
+    if "review_confidence_threshold" in config:
+        _require_number(
+            config["review_confidence_threshold"],
+            "review_confidence_threshold",
+            minimum=0,
+            maximum=1,
+        )
+
+    for field in ("categories", "owners", "payment_methods"):
+        if field in config:
+            _require_string_list(config[field], field)
 
 
 def _load_profiles(config: dict[str, Any]) -> list[dict[str, Any]]:
