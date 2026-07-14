@@ -14,23 +14,23 @@ commits, logs, issues, or prompts.
 
 | Plan | Title | Priority | Effort | Depends on | Status |
 |---|---|---:|---:|---|---|
-| [001](001-preserve-failed-replacements.md) | Preserve failed replacement rows | P1 | S | — | TODO |
-| [002](002-validate-public-config.md) | Validate public config | P1 | M | — | TODO |
-| [003](003-validate-profile-structure.md) | Validate profile structure | P1 | M | 002 | TODO |
-| [004](004-define-empty-corrections.md) | Define empty correction semantics | P1 | S | 002 | TODO |
-| [005](005-failure-atomic-persistence.md) | Make persistence recoverable | P1 | L | 001, 004 | TODO |
-| [006](006-transactional-reset.md) | Make reset transactional | P1 | M | 005 | TODO |
-| [007](007-enforce-local-ollama.md) | Enforce local-only Ollama | P1 | M | 002 | TODO |
-| [008](008-stable-transaction-identity.md) | Stabilize transaction identity | P1 | L | 001, 005, 006 | TODO |
-| [009](009-stable-source-namespace.md) | Stabilize source namespace | P1 | M | 008 | TODO |
-| [010](010-cross-import-duplicates.md) | Detect cross-import duplicates | P2 | M | 008, 009 | TODO |
-| [011](011-optimize-duplicate-window.md) | Optimize duplicate scanning | P2 | M | 010 | TODO |
-| [012](012-safe-spreadsheet-exports.md) | Make CSV exports spreadsheet-safe | P2 | M | 005 | TODO |
-| [013](013-pin-ci-toolchain.md) | Stabilize CI dependency resolution | P3 | S | — | TODO |
-| [014](014-single-ledger-read.md) | Read ledger once per import | P3 | S | 005, 009 | TODO |
-| [015](015-local-categorization-memory.md) | Add local categorization memory | P2 | M | 004, 008 | TODO |
-| [016](016-profile-validation-command.md) | Add profile validation tooling | P2 | M | 003 | TODO |
-| [017](017-extract-cli-boundaries.md) | Extract CLI module boundaries | P3 | L | 001–016 | TODO |
+| [001](001-preserve-failed-replacements.md) | Preserve failed replacement rows | P1 | S | — | DONE (`e8ae14c`) |
+| [002](002-validate-public-config.md) | Validate public config | P1 | M | — | DONE (`34e3d19`, `8ca7813`) |
+| [003](003-validate-profile-structure.md) | Validate profile structure | P1 | M | 002 | DONE (`d5543ac`) |
+| [004](004-define-empty-corrections.md) | Define empty correction semantics | P1 | S | 002 | DONE (`b989a5c`) |
+| [005](005-failure-atomic-persistence.md) | Make persistence recoverable | P1 | L | 001, 004 | DONE (`c59682f`, `9f71419`, `fa892cf`, `8a2af0c`) |
+| [006](006-transactional-reset.md) | Make reset transactional | P1 | M | 005 | DONE (`655c704`) |
+| [007](007-enforce-local-ollama.md) | Enforce local-only Ollama | P1 | M | 002 | DONE (`5d6711a`) |
+| [008](008-stable-transaction-identity.md) | Stabilize transaction identity | P1 | L | 001, 005, 006 | DONE (`2660ecc`) |
+| [009](009-stable-source-namespace.md) | Stabilize source namespace | P1 | M | 008 | DONE (`691c6e8`) |
+| [010](010-cross-import-duplicates.md) | Detect cross-import duplicates | P2 | M | 008, 009 | DONE (`ab45c05`) |
+| [011](011-optimize-duplicate-window.md) | Optimize duplicate scanning | P2 | M | 010 | DONE (`11ddae3`) |
+| [012](012-safe-spreadsheet-exports.md) | Make CSV exports spreadsheet-safe | P2 | M | 005 | DONE (`0ba6a9e`) |
+| [013](013-pin-ci-toolchain.md) | Stabilize CI dependency resolution | P3 | S | — | DONE (`8399d79`) |
+| [014](014-single-ledger-read.md) | Read ledger once per import | P3 | S | 005, 009 | DONE (`6a6d8bb`) |
+| [015](015-local-categorization-memory.md) | Add local categorization memory | P2 | M | 004, 008 | DONE (`9c2e6c3`) |
+| [016](016-profile-validation-command.md) | Add profile validation tooling | P2 | M | 003 | DONE (`9495a54`, `4cb40da`) |
+| [017](017-extract-cli-boundaries.md) | Extract CLI module boundaries | P3 | L | 001–016 | DONE (`50522e3`) |
 
 Status values: `TODO`, `IN PROGRESS`, `DONE`, `BLOCKED` (with reason), or
 `REJECTED` (with rationale).
