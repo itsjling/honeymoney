@@ -1,6 +1,13 @@
 import unittest
 
-from tests.golden_helpers import assert_import_case, load_profile, starter_profile
+from honeymoney.cli import _assign_transaction_ids
+from tests.golden_helpers import (
+    FIXTURE_DIR,
+    assert_import_case,
+    import_profile_case,
+    load_profile,
+    starter_profile,
+)
 
 
 class StarterCsvProfileTest(unittest.TestCase):
@@ -33,6 +40,37 @@ class HsbcBankPdfProfileTest(unittest.TestCase):
             load_profile("hsbc_hk_bank_pdf.json"),
             "table_balances_ignored",
         )
+
+
+class HsbcOnePdfProfileTest(unittest.TestCase):
+    def test_sectioned_accounts_multiline_rows_summaries_and_artifacts(self) -> None:
+        assert_import_case(
+            self,
+            load_profile("hsbc_one_pdf.json"),
+            "sectioned_multiline_transactions",
+        )
+
+    def test_account_identity_produces_stable_transaction_ids(self) -> None:
+        profile = load_profile("hsbc_one_pdf.json")
+        case_dir = (
+            FIXTURE_DIR
+            / "import_profiles"
+            / "hsbc_one_pdf"
+            / "sectioned_multiline_transactions"
+        )
+        first_rows, _ = import_profile_case(profile, case_dir)
+        second_rows, _ = import_profile_case(profile, case_dir)
+
+        first_ids = [
+            row["transaction_id"] for row in _assign_transaction_ids(first_rows)
+        ]
+        second_ids = [
+            row["transaction_id"] for row in _assign_transaction_ids(second_rows)
+        ]
+
+        self.assertEqual(first_ids, second_ids)
+        self.assertEqual(len(set(first_ids)), len(first_ids))
+        self.assertNotEqual(first_ids[1], first_ids[2])
 
 
 class HsbcCreditCardPdfProfileTest(unittest.TestCase):

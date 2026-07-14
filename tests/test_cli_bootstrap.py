@@ -109,6 +109,7 @@ class CliBootstrapTest(unittest.TestCase):
                         "hsbc_hk_bank.json",
                         "hsbc_hk_bank_pdf.json",
                         "hsbc_hk_credit_card_pdf.json",
+                        "hsbc_one_pdf.json",
                         "mox_bank_pdf.json",
                         "mox_credit_card.json",
                         "mox_credit_card_pdf.json",
@@ -4867,6 +4868,7 @@ def open(path):
             {
                 "hsbc_hk_bank_pdf",
                 "hsbc_hk_credit_card_pdf",
+                "hsbc_one_pdf",
                 "mox_bank_pdf",
                 "mox_credit_card_pdf",
             },

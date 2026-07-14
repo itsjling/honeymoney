@@ -557,6 +557,7 @@ def open(path):
         self.assertEqual(
             packaged, sorted(path.name for path in examples_dir.glob("*.json"))
         )
+        self.assertIn("hsbc_one_pdf.json", packaged)
         self.assertIn("mox_credit_card_pdf.json", packaged)
         for name in packaged:
             self.assertEqual(

@@ -1,0 +1,44 @@
+{
+  "warnings": [],
+  "rows": [
+    {
+      "date": "2025-12-31",
+      "transaction_date": "2025-12-31",
+      "merchant": "GREEN MARKET REFERENCE",
+      "original_description": "GREEN MARKET REFERENCE",
+      "original_amount": "1000.00",
+      "posted_amount": "1000.00",
+      "amount_hkd": "1000.00",
+      "account_id": "hsbc_one_hkd_savings",
+      "account": "HSBC One HKD Savings",
+      "source_file": "statement.pdf",
+      "source_page": "1",
+      "source_row": "8"
+    },
+    {
+      "date": "2025-12-31",
+      "merchant": "CITY TRANSIT",
+      "original_amount": "-25.00",
+      "account_id": "hsbc_one_hkd_savings",
+      "source_page": "1",
+      "source_row": "9"
+    },
+    {
+      "date": "2025-12-31",
+      "merchant": "CITY TRANSIT",
+      "original_amount": "-25.00",
+      "account_id": "hsbc_one_hkd_current",
+      "account": "HSBC One HKD Current",
+      "source_page": "1",
+      "source_row": "16"
+    },
+    {
+      "date": "2026-01-02",
+      "merchant": "TRANSFER IN",
+      "original_amount": "200.00",
+      "account_id": "hsbc_one_hkd_current",
+      "source_page": "1",
+      "source_row": "18"
+    }
+  ]
+}

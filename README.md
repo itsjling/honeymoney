@@ -73,7 +73,7 @@ Creates a starter local workspace with:
 - `rules.json`
 - `corrections.csv`
 - `profile_mappings.json`
-- `profiles/` with `starter_csv.json` plus the bundled HSBC HK and Mox bank/card profiles (CSV and PDF), all linked in `config.json`
+- `profiles/` with `starter_csv.json` plus the bundled HSBC HK, HSBC One, and Mox bank/card profiles (CSV and PDF), all linked in `config.json`
 - `input/`
 - `output/`
 
@@ -220,7 +220,7 @@ PDF support is for text-based statement PDFs. Install the PDF extra:
 python3 -m pip install -e ".[pdf]"
 ```
 
-Current example profiles cover HSBC Hong Kong and Mox bank/card statement shapes. Real private samples should stay in `samples/` or `private_samples/`.
+Current example profiles cover HSBC Hong Kong and Mox bank/card statement shapes. The `hsbc_one_pdf` profile imports HSBC One combined-account statements directly: it separates HKD Savings and HKD Current transactions into stable account identities while retaining the original PDF as source provenance. Select that profile when prompted and optionally save the filename mapping for future statements. Real private samples should stay in `samples/` or `private_samples/`.
 
 ## Review Loop
 

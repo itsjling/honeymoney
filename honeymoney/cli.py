@@ -1933,6 +1933,26 @@ def _import_pdf(
     warnings: list[str] = []
     with _quiet_pdfminer_font_warnings():
         with pdfplumber.open(str(pdf_path)) as pdf:
+            if pdf_settings.get("word_rows") == "sectioned":
+                source_rows = _pdf_sectioned_word_source_rows(
+                    pdf, pdf_path, pdf_settings
+                )
+                for source_row, page_number, row_number in source_rows:
+                    normalized = _normalized_row(
+                        source_row=source_row,
+                        row_number=row_number,
+                        profile=profile,
+                        config=config,
+                        input_path=pdf_path,
+                        input_root=input_root,
+                        columns=columns,
+                        source_page=str(page_number),
+                    )
+                    if _row_is_skipped(normalized, skip_patterns):
+                        continue
+                    rows.append(normalized)
+                return rows, warnings
+
             for page_number, page in enumerate(pdf.pages, start=1):
                 word_rows = _pdf_word_source_rows(page, pdf_settings)
                 if word_rows is not None:
@@ -2012,6 +2032,233 @@ def _import_pdf(
                                 continue
                             rows.append(normalized)
     return rows, warnings
+
+
+def _pdf_sectioned_word_source_rows(
+    pdf: Any, pdf_path: Path, pdf_settings: dict[str, Any]
+) -> list[tuple[dict[str, str], int, int]]:
+    settings = pdf_settings.get("sectioned_word_rows", {})
+    if not isinstance(settings, dict):
+        raise ValueError("PDF sectioned_word_rows settings must be an object")
+
+    page_lines = [
+        _pdf_word_lines(
+            page.extract_words(x_tolerance=1, y_tolerance=3) or [],
+            float(pdf_settings.get("word_y_tolerance", 3)),
+        )
+        for page in pdf.pages
+    ]
+    statement_date = _pdf_sectioned_statement_date(page_lines, pdf_path, settings)
+    accounts = settings.get("accounts", {})
+    if not isinstance(accounts, dict) or not accounts:
+        raise ValueError("PDF sectioned_word_rows requires account sections")
+
+    rows: list[tuple[dict[str, str], int, int]] = []
+    current_date = ""
+    account_dates: dict[str, str] = {}
+    current_account: dict[str, str] | None = None
+    description_parts: list[str] = []
+    in_table = False
+    date_pattern = re.compile(str(settings.get("date_regex", "")))
+    amount_pattern = re.compile(
+        str(settings.get("amount_regex", r"^-?\d[\d,]*\.\d{2}$"))
+    )
+    columns = settings.get("columns", {})
+    if not isinstance(columns, dict):
+        raise ValueError("PDF sectioned word columns must be an object")
+    skip_descriptions = [
+        str(marker).casefold()
+        for marker in settings.get("skip_descriptions", [])
+        if str(marker).strip()
+    ]
+    table_end_descriptions = [
+        str(marker).casefold()
+        for marker in settings.get("table_end_descriptions", [])
+        if str(marker).strip()
+    ]
+
+    for page_number, lines in enumerate(page_lines, start=1):
+        for line_number, line in enumerate(lines, start=1):
+            text = " ".join(str(word.get("text", "")) for word in line).strip()
+            folded = " ".join(text.casefold().split())
+
+            matched_account = next(
+                (
+                    account
+                    for marker, account in accounts.items()
+                    if str(marker).casefold() in folded
+                ),
+                None,
+            )
+            if isinstance(matched_account, dict):
+                current_account = {
+                    "account_id": str(matched_account.get("account_id", "")),
+                    "account": str(matched_account.get("account", "")),
+                }
+                current_date = account_dates.get(current_account["account_id"], "")
+                in_table = False
+                description_parts = []
+                continue
+
+            if _pdf_line_has_marker(folded, settings.get("section_end_markers", [])):
+                current_account = None
+                in_table = False
+                description_parts = []
+                continue
+
+            if current_account is None:
+                continue
+            if _pdf_line_has_all_markers(folded, settings.get("header_markers", [])):
+                in_table = True
+                description_parts = []
+                continue
+            if not in_table:
+                continue
+
+            date_match = date_pattern.match(text)
+            if date_match is not None:
+                current_date = _pdf_sectioned_date(date_match, statement_date)
+                account_dates[current_account["account_id"]] = current_date
+
+            description = _pdf_words_in_bounds(line, columns.get("description"))
+            if description:
+                description_parts.append(description)
+            joined_description = " ".join(description_parts).strip()
+            folded_description = joined_description.casefold()
+            if any(marker in folded_description for marker in skip_descriptions):
+                description_parts = []
+                if any(
+                    marker in folded_description for marker in table_end_descriptions
+                ):
+                    in_table = False
+                continue
+
+            deposits = _pdf_amounts_in_bounds(
+                line, columns.get("deposit"), amount_pattern
+            )
+            withdrawals = _pdf_amounts_in_bounds(
+                line, columns.get("withdrawal"), amount_pattern
+            )
+            if not deposits and not withdrawals:
+                continue
+            if deposits and withdrawals:
+                raise ValueError(
+                    "Both deposit and withdrawal found on "
+                    f"{pdf_path.name} page {page_number} row {line_number}"
+                )
+            amount = deposits[0] if deposits else withdrawals[0]
+            if _parse_decimal(amount) == Decimal("0"):
+                description_parts = []
+                continue
+            if not current_date:
+                raise ValueError(
+                    "Amount found before a transaction date on "
+                    f"{pdf_path.name} page {page_number} row {line_number}"
+                )
+
+            rows.append(
+                (
+                    {
+                        "Date": current_date,
+                        "Description": joined_description or "Bank transaction",
+                        "Deposit": deposits[0] if deposits else "",
+                        "Withdrawal": withdrawals[0] if withdrawals else "",
+                        "Account ID": current_account["account_id"],
+                        "Account": current_account["account"],
+                    },
+                    page_number,
+                    line_number,
+                )
+            )
+            description_parts = []
+
+    return rows
+
+
+def _pdf_sectioned_statement_date(
+    page_lines: list[list[list[dict[str, Any]]]],
+    pdf_path: Path,
+    settings: dict[str, Any],
+) -> date:
+    text_pattern = settings.get("statement_year_regex")
+    if text_pattern:
+        for lines in page_lines:
+            for line in lines:
+                text = " ".join(str(word.get("text", "")) for word in line)
+                match = re.search(str(text_pattern), text)
+                if match is not None:
+                    return _pdf_statement_date_from_match(match)
+
+    filename_pattern = settings.get("statement_year_filename_regex")
+    if filename_pattern:
+        match = re.search(str(filename_pattern), pdf_path.name)
+        if match is not None:
+            return _pdf_statement_date_from_match(match)
+
+    raise ValueError(f"Could not determine statement year for {pdf_path.name}")
+
+
+def _pdf_statement_date_from_match(match: re.Match[str]) -> date:
+    groups = match.groupdict()
+    year = int(groups["year"])
+    day = int(groups.get("statement_day") or 31)
+    month_value = groups.get("statement_month")
+    if not month_value:
+        return date(year, 12, day)
+    if month_value.isdigit():
+        return date(year, int(month_value), day)
+    for date_format in ("%d %b %Y", "%d %B %Y"):
+        try:
+            return datetime.strptime(f"{day} {month_value} {year}", date_format).date()
+        except ValueError:
+            continue
+    raise ValueError(f"Unsupported statement month: {month_value}")
+
+
+def _pdf_sectioned_date(match: re.Match[str], statement_date: date) -> str:
+    parsed = datetime.strptime(
+        f"{match.group('day')} {match.group('month')} {statement_date.year}",
+        "%d %b %Y",
+    ).date()
+    if parsed.month > statement_date.month:
+        parsed = parsed.replace(year=parsed.year - 1)
+    return parsed.isoformat()
+
+
+def _pdf_line_has_marker(text: str, markers: Any) -> bool:
+    return any(str(marker).casefold() in text for marker in markers)
+
+
+def _pdf_line_has_all_markers(text: str, markers: Any) -> bool:
+    normalized_markers = [str(marker).casefold() for marker in markers]
+    return bool(normalized_markers) and all(
+        marker in text for marker in normalized_markers
+    )
+
+
+def _pdf_words_in_bounds(words: list[dict[str, Any]], bounds: Any) -> str:
+    return " ".join(_pdf_word_texts_in_bounds(words, bounds)).strip()
+
+
+def _pdf_word_texts_in_bounds(words: list[dict[str, Any]], bounds: Any) -> list[str]:
+    if not isinstance(bounds, list) or len(bounds) != 2:
+        return []
+    left, right = float(bounds[0]), float(bounds[1])
+    return [
+        str(word.get("text", ""))
+        for word in words
+        if left <= float(word.get("x0", 0)) < right
+    ]
+
+
+def _pdf_amounts_in_bounds(
+    words: list[dict[str, Any]], bounds: Any, pattern: re.Pattern[str]
+) -> list[str]:
+    return [
+        text
+        for text in _pdf_word_texts_in_bounds(words, bounds)
+        if pattern.fullmatch(text)
+    ]
 
 
 def _pdf_word_source_rows(
@@ -2286,8 +2533,10 @@ def _normalized_row(
         "date": canonical_date,
         "transaction_date": transaction_date,
         "posting_date": posting_date,
-        "account_id": str(profile.get("account_id", "")),
-        "account": str(profile.get("account", "")),
+        "account_id": _value(source_row, columns.get("account_id"))
+        or str(profile.get("account_id", "")),
+        "account": _value(source_row, columns.get("account"))
+        or str(profile.get("account", "")),
         "institution": str(profile.get("institution", "")),
         "country": str(profile.get("country", "")),
         "original_amount": _format_decimal(original_amount),

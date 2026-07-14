@@ -1,0 +1,60 @@
+{
+  "id": "hsbc_one_pdf",
+  "account_id": "hsbc_one_hkd",
+  "account": "HSBC One HKD",
+  "institution": "HSBC HK",
+  "country": "HK",
+  "account_currency": "HKD",
+  "owner": "Household",
+  "payment_method": "Bank Account",
+  "date_formats": ["%Y-%m-%d"],
+  "pdf": {
+    "parser": "pdfplumber",
+    "word_rows": "sectioned",
+    "columns": {
+      "transaction_date": "Date",
+      "description": "Description",
+      "debit": "Withdrawal",
+      "credit": "Deposit",
+      "account_id": "Account ID",
+      "account": "Account"
+    },
+    "sectioned_word_rows": {
+      "accounts": {
+        "HKD Savings": {
+          "account_id": "hsbc_one_hkd_savings",
+          "account": "HSBC One HKD Savings"
+        },
+        "HKD Current": {
+          "account_id": "hsbc_one_hkd_current",
+          "account": "HSBC One HKD Current"
+        }
+      },
+      "section_end_markers": ["Foreign Currency"],
+      "header_markers": [
+        "Date",
+        "Transaction",
+        "Details",
+        "Deposit",
+        "Withdrawal",
+        "Balance"
+      ],
+      "columns": {
+        "description": [95, 330],
+        "deposit": [330, 414],
+        "withdrawal": [414, 480]
+      },
+      "date_regex": "^(?P<day>\\d{1,2})\\s+(?P<month>[A-Za-z]{3})\\b",
+      "statement_year_regex": "\\b(?P<statement_day>\\d{1,2})\\s+(?P<statement_month>[A-Za-z]{3,9})\\s+(?P<year>20\\d{2})\\b",
+      "statement_year_filename_regex": "eStatementFile_(?P<year>20\\d{2})(?P<statement_month>\\d{2})(?P<statement_day>\\d{2})",
+      "skip_descriptions": ["B/F BALANCE", "C/F BALANCE"],
+      "table_end_descriptions": ["C/F BALANCE"]
+    }
+  },
+  "skip_descriptions": [
+    "B/F BALANCE",
+    "C/F BALANCE",
+    "BALANCE B/F",
+    "BALANCE C/F"
+  ]
+}
