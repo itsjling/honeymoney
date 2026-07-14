@@ -121,6 +121,31 @@ class AgentCliTest(unittest.TestCase):
             self.assertNotIn("Pick a category", result.stdout)
             self.assertEqual(result.stdout.count("\n"), 1)
 
+    def test_interactive_import_explains_when_ollama_is_disabled(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._setup_workspace(tmp)
+            statement = root / "may.csv"
+            self._write_statement(statement)
+
+            result = self._run_cli(
+                [
+                    "import",
+                    str(statement),
+                    "--config",
+                    str(root / "config.json"),
+                ],
+                cwd=root,
+                input_text="q\n",
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn(
+                "Ollama fallback is disabled; set ollama.enabled to true in "
+                "config.json to enable it.",
+                result.stdout,
+            )
+            self.assertIn("1 imported records have no category.", result.stdout)
+
     def test_run_status_and_report_have_structured_json_modes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = self._setup_workspace(tmp)
@@ -481,7 +506,16 @@ class AgentCliTest(unittest.TestCase):
     def test_malformed_arguments_still_return_json_for_every_machine_command(
         self,
     ) -> None:
-        commands = ["setup", "run", "import", "status", "report", "pending", "correct"]
+        commands = [
+            "setup",
+            "run",
+            "import",
+            "status",
+            "report",
+            "pending",
+            "correct",
+            "config",
+        ]
 
         for command in commands:
             with self.subTest(command=command):

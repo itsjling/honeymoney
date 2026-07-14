@@ -36,6 +36,8 @@ honeymoney import /path/to/statement.csv --config ./money/config.json --json
 honeymoney status 2026-05 --config ./money/config.json --json
 honeymoney pending 2026-05 --config ./money/config.json --json
 honeymoney report 2026-05 --config ./money/config.json --json
+honeymoney config --config ./money/config.json --json
+honeymoney config edit ollama --config ./money/config.json --model qwen3.5:4b --json
 ```
 
 Every response is one JSON object with `schema_version`, `command`, `status`,

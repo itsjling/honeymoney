@@ -9,7 +9,10 @@ import json
 import logging
 import os
 import re
+import shlex
 import shutil
+import stat
+import subprocess
 import sys
 import tempfile
 import webbrowser
@@ -21,7 +24,11 @@ from importlib import resources
 from pathlib import Path
 from typing import Any
 
-from honeymoney.ollama import OllamaProgress, apply_ollama_fallback
+from honeymoney.ollama import (
+    OllamaProgress,
+    apply_ollama_fallback,
+    list_ollama_models,
+)
 from honeymoney.report import build_report_html
 from honeymoney.rules import apply_rules, load_rules
 from honeymoney.schema import (
@@ -148,6 +155,8 @@ def main(argv: list[str] | None = None) -> int:
         return _report_command(argv[1:])
     if argv and argv[0] == "review":
         return _review_command(argv[1:])
+    if argv and argv[0] == "config":
+        return _config_command(argv[1:])
     if argv and argv[0] == "run":
         argv = argv[1:]
     return _run_pipeline(argv)
@@ -307,6 +316,7 @@ Commands:
   honeymoney pending [MONTH]       List transactions that need review
   honeymoney correct --file FILE   Apply validated transaction corrections
   honeymoney report [MONTH]        Open a web report for a period
+  honeymoney config                View or edit config.json
   honeymoney help                  Show this help
 
 Common run options:
@@ -324,6 +334,209 @@ Common status/report options:
   --start 2026-06-01 --end 2026-06-30
   --no-open                        (report) Write the HTML without opening it
 """
+
+
+def _config_command(argv: list[str]) -> int:
+    parser = _command_parser(
+        argv,
+        prog="honeymoney config",
+        description="View or edit the Honeymoney configuration.",
+    )
+    parser.add_argument("action", nargs="?", choices=["edit"])
+    parser.add_argument("section", nargs="?", choices=["ollama"])
+    parser.add_argument("--config", dest="config_path")
+    parser.add_argument("--model")
+    enabled = parser.add_mutually_exclusive_group()
+    enabled.add_argument("--enable", action="store_true")
+    enabled.add_argument("--disable", action="store_true")
+    parser.add_argument("--json", action="store_true")
+    args = parser.parse_args(argv)
+
+    config_path = _existing_config_path(args.config_path)
+    config = _read_config_document(config_path)
+    artifacts = {"config_json": str(config_path)}
+
+    if args.action is None:
+        if args.section or args.model or args.enable or args.disable:
+            raise ValueError("Config changes require `honeymoney config edit`")
+        if args.json:
+            _emit_json(
+                "config",
+                "success",
+                data={"config": config},
+                artifacts=artifacts,
+            )
+        else:
+            print(json.dumps(config, indent=2, sort_keys=True))
+        return 0
+
+    if args.section is None:
+        if args.json:
+            raise ValueError("honeymoney config edit does not support --json")
+        if args.model or args.enable or args.disable:
+            raise ValueError("Ollama options require `honeymoney config edit ollama`")
+        _edit_config_in_editor(config_path)
+        print(f"Updated {config_path}")
+        return 0
+
+    ollama_config = config.setdefault("ollama", {})
+    if not isinstance(ollama_config, dict):
+        raise ValueError("Config field ollama must be a JSON object")
+    if args.disable and args.model:
+        raise ValueError("Use either --disable or --model, not both")
+
+    selected_model = args.model.strip() if args.model else None
+    if args.model is not None and not selected_model:
+        raise ValueError("--model must be a non-empty Ollama model name")
+    if not selected_model and not args.enable and not args.disable:
+        if args.json:
+            raise ValueError(
+                "honeymoney config edit ollama --json requires --model, "
+                "--enable, or --disable"
+            )
+        selected_model = _prompt_ollama_model(ollama_config)
+        if selected_model is None:
+            print("Config unchanged.")
+            return 0
+
+    if selected_model:
+        ollama_config["model"] = selected_model
+        ollama_config["enabled"] = True
+    elif args.enable:
+        _require_available_ollama_model(ollama_config)
+        ollama_config["enabled"] = True
+    elif args.disable:
+        ollama_config["enabled"] = False
+
+    _write_config_document(config_path, config)
+    if args.json:
+        _emit_json(
+            "config",
+            "success",
+            data={"ollama": ollama_config},
+            artifacts=artifacts,
+        )
+    elif ollama_config.get("enabled"):
+        print(f"Ollama enabled with model {ollama_config.get('model', '(not set)')}")
+    else:
+        print("Ollama disabled")
+    return 0
+
+
+def _existing_config_path(config_path: str | None) -> Path:
+    path = Path(config_path or "config.json").expanduser()
+    if not path.exists():
+        raise ValueError(
+            f"Config file does not exist: {path}. Run `honeymoney setup` first."
+        )
+    return path.resolve()
+
+
+def _read_config_document(path: Path) -> dict[str, Any]:
+    with path.open(encoding="utf-8") as fh:
+        config = json.load(fh)
+    if not isinstance(config, dict):
+        raise ValueError("Config must be a JSON object")
+    _validate_config_document(config)
+    return config
+
+
+def _validate_config_document(config: dict[str, Any]) -> None:
+    paths = config.get("paths")
+    if paths is not None and not isinstance(paths, dict):
+        raise ValueError("Config field paths must be a JSON object")
+    for path_field, path_value in (paths or {}).items():
+        if path_field not in {"input", "output"}:
+            continue
+        if not isinstance(path_value, str) or not path_value.strip():
+            raise ValueError(
+                f"Config field paths.{path_field} must be a non-empty string"
+            )
+
+    ollama = config.get("ollama")
+    if ollama is None:
+        return
+    if not isinstance(ollama, dict):
+        raise ValueError("Config field ollama must be a JSON object")
+    if "enabled" in ollama and not isinstance(ollama["enabled"], bool):
+        raise ValueError("Config field ollama.enabled must be a boolean")
+    for field in ("url", "model"):
+        if field in ollama and (
+            not isinstance(ollama[field], str) or not ollama[field].strip()
+        ):
+            raise ValueError(f"Config field ollama.{field} must be a non-empty string")
+
+
+def _write_config_document(path: Path, config: dict[str, Any]) -> None:
+    _atomic_write_text_files(
+        {path: f"{json.dumps(config, indent=2, sort_keys=True)}\n"}
+    )
+
+
+def _prompt_ollama_model(ollama_config: dict[str, Any]) -> str | None:
+    models = list_ollama_models(ollama_config)
+    if not models:
+        raise ValueError("No local Ollama models found; run `ollama pull MODEL` first")
+    print("Available Ollama models:")
+    for index, model in enumerate(models, start=1):
+        print(f"  {index}. {model}")
+    while True:
+        try:
+            choice = input(f"Select model [1-{len(models)}/q]: ").strip().casefold()
+        except EOFError as error:
+            raise ValueError("No Ollama model selected") from error
+        if choice == "q":
+            return None
+        try:
+            selected = int(choice)
+        except ValueError:
+            selected = 0
+        if 1 <= selected <= len(models):
+            return models[selected - 1]
+        print(f"Enter a number from 1 to {len(models)}, or q to cancel.")
+
+
+def _require_available_ollama_model(ollama_config: dict[str, Any]) -> None:
+    configured = str(ollama_config.get("model", "")).strip()
+    if not configured:
+        raise ValueError(
+            "Set an Ollama model with --model before enabling the fallback"
+        )
+    available = list_ollama_models(ollama_config)
+    aliases = {
+        alias for model in available for alias in (model, model.removesuffix(":latest"))
+    }
+    if configured not in aliases:
+        raise ValueError(
+            f"Configured Ollama model {configured!r} is not installed; "
+            "pass --model or run `honeymoney config edit ollama` to select one"
+        )
+
+
+def _edit_config_in_editor(config_path: Path) -> None:
+    editor = os.environ.get("VISUAL") or os.environ.get("EDITOR") or shutil.which("vi")
+    if not editor:
+        raise ValueError("Set $VISUAL or $EDITOR before running config edit")
+
+    descriptor, temporary_name = tempfile.mkstemp(
+        dir=config_path.parent,
+        prefix=f".{config_path.stem}.",
+        suffix=".json",
+    )
+    temporary_path = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as fh:
+            fh.write(config_path.read_text(encoding="utf-8"))
+        result = subprocess.run(
+            [*shlex.split(editor), str(temporary_path)],
+            check=False,
+        )
+        if result.returncode != 0:
+            raise ValueError(f"Editor exited with status {result.returncode}")
+        config = _read_config_document(temporary_path)
+        _write_config_document(config_path, config)
+    finally:
+        temporary_path.unlink(missing_ok=True)
 
 
 def _setup_command(argv: list[str]) -> int:
@@ -841,6 +1054,9 @@ def _atomic_write_text_files(files: dict[Path, str]) -> None:
     try:
         for target, content in files.items():
             target.parent.mkdir(parents=True, exist_ok=True)
+            existing_mode = (
+                stat.S_IMODE(target.stat().st_mode) if target.exists() else None
+            )
             descriptor, temporary_name = tempfile.mkstemp(
                 dir=target.parent,
                 prefix=f".{target.name}.",
@@ -851,6 +1067,8 @@ def _atomic_write_text_files(files: dict[Path, str]) -> None:
                 fh.write(content)
                 fh.flush()
                 os.fsync(fh.fileno())
+            if existing_mode is not None:
+                os.chmod(temporary_path, existing_mode)
             staged.append((temporary_path, target))
         for temporary_path, target in staged:
             os.replace(temporary_path, target)
@@ -977,6 +1195,11 @@ def _prompt_uncategorized(
     transactions: list[dict[str, str]], config: dict[str, Any]
 ) -> list[dict[str, str]]:
     pending = [row for row in transactions if not _is_categorized(row)]
+    if pending and not config.get("ollama", {}).get("enabled", False):
+        print(
+            "\nOllama fallback is disabled; set ollama.enabled to true in "
+            "config.json to enable it."
+        )
     return _prompt_category_assignments(
         pending,
         config,
@@ -1239,21 +1462,7 @@ def _load_config(config_path: str | None) -> dict[str, Any]:
         else:
             return {"paths": {"input": "./input", "output": "./output/categorized.csv"}}
 
-    with Path(config_path).open(encoding="utf-8") as fh:
-        config = json.load(fh)
-
-    if not isinstance(config, dict):
-        raise ValueError("Config must be a JSON object")
-    paths = config.get("paths")
-    if paths is not None and not isinstance(paths, dict):
-        raise ValueError("Config field paths must be a JSON object")
-    for path_field, path_value in (paths or {}).items():
-        if path_field not in {"input", "output"}:
-            continue
-        if not isinstance(path_value, str) or not path_value.strip():
-            raise ValueError(
-                f"Config field paths.{path_field} must be a non-empty string"
-            )
+    config = _read_config_document(Path(config_path))
 
     config.setdefault("paths", {})
     config["paths"].setdefault("input", "./input")

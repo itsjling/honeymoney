@@ -7,6 +7,7 @@ import urllib.error
 import urllib.request
 from decimal import Decimal, InvalidOperation
 from typing import Any, Callable, NamedTuple
+from urllib.parse import urlsplit, urlunsplit
 
 from honeymoney.schema import allowed_categories, allowed_owners
 
@@ -20,6 +21,34 @@ class OllamaProgress(NamedTuple):
     end_index: int
     total: int
     elapsed_seconds: float
+
+
+def list_ollama_models(ollama_config: dict[str, Any]) -> list[str]:
+    """Return model names installed at the configured Ollama endpoint."""
+    generate_url = str(ollama_config.get("url", "http://localhost:11434/api/generate"))
+    parsed = urlsplit(generate_url)
+    path = parsed.path.rstrip("/")
+    if path.endswith("/generate"):
+        path = f"{path.rsplit('/', 1)[0]}/tags"
+    else:
+        path = f"{path}/api/tags" if path else "/api/tags"
+    tags_url = urlunsplit((parsed.scheme, parsed.netloc, path, "", ""))
+
+    with urllib.request.urlopen(
+        tags_url, timeout=min(_timeout_seconds(ollama_config), 10.0)
+    ) as response:
+        payload = json.loads(response.read().decode("utf-8"))
+    if not isinstance(payload, dict) or not isinstance(payload.get("models"), list):
+        raise ValueError("Ollama model list response did not contain a models array")
+
+    names = []
+    for model in payload["models"]:
+        if not isinstance(model, dict):
+            continue
+        name = model.get("name") or model.get("model")
+        if isinstance(name, str) and name.strip():
+            names.append(name.strip())
+    return sorted(set(names), key=str.casefold)
 
 
 def apply_ollama_fallback(

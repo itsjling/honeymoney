@@ -61,6 +61,7 @@ class CliBootstrapTest(unittest.TestCase):
                 self.assertIn("honeymoney setup", result.stdout)
                 self.assertIn("honeymoney run", result.stdout)
                 self.assertIn("honeymoney import", result.stdout)
+                self.assertIn("honeymoney config", result.stdout)
                 self.assertIn("honeymoney help", result.stdout)
 
     def test_setup_command_creates_starter_workspace(self) -> None:

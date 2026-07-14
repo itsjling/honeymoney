@@ -103,9 +103,20 @@ honeymoney review
 
 Interactively categorizes transactions already marked as needing review in `categorized.csv`. It uses the same category prompt as import, saves your choices to `corrections.csv`, updates `categorized.csv`, and rewrites `review_needed.csv`.
 
+```bash
+honeymoney config
+honeymoney config edit
+honeymoney config edit ollama
+honeymoney config edit ollama --model qwen3.5:4b
+honeymoney config edit ollama --enable
+honeymoney config edit ollama --disable
+```
+
+Prints or edits the active `config.json`; pass `--config PATH` to target another file. `config edit` validates a temporary editor copy before replacing the original and uses `$VISUAL`, then `$EDITOR`, then `vi`. With no Ollama edit option, the guided editor lists models installed at the configured local endpoint. Selecting or passing a model also enables the Ollama fallback; `--enable` verifies that the configured model is installed before enabling it. Direct `--model`, `--enable`, and `--disable` edits can use `--json`.
+
 ## Structured agent commands
 
-`setup`, `run`, `import`, `status`, and `report` accept `--json`. JSON mode
+`setup`, `run`, `import`, `status`, `report`, and `config` accept `--json`. JSON mode
 prints exactly one versioned document to stdout, never prompts, and never opens
 a browser. Exit code `0` is success, `1` is strict partial success, and `2` is
 an input, configuration, or validation error.
@@ -114,6 +125,8 @@ an input, configuration, or validation error.
 honeymoney import ./statement.csv --config ./money/config.json --json
 honeymoney status 2026-05 --config ./money/config.json --json
 honeymoney pending 2026-05 --config ./money/config.json --json
+honeymoney config --config ./money/config.json --json
+honeymoney config edit ollama --config ./money/config.json --model qwen3.5:4b --json
 ```
 
 `pending` returns transactions requiring review. Apply reviewed corrections as
@@ -190,6 +203,7 @@ Set `ollama.enabled` to `true` to categorize remaining unknown transactions with
 - `think`: allow thinking models to reason before answering (default `false`; slower and unnecessary since responses are schema-constrained).
 
 Requests constrain the response to the allowed categories and owners. The status line shows which batch is in flight (`batch 2/20 (transactions 6-10 of 98, 4s)`) and ticks up every second while waiting, so a slow local model doesn't look stuck. If Ollama is unreachable, the model is missing, or a categorization is rejected, the import prints a warning explaining why and the affected rows stay uncategorized for interactive or manual review.
+When an interactive import reaches uncategorized rows while the fallback is disabled, the prompt explains that `ollama.enabled` must be set to `true` in `config.json`.
 
 The repo also includes fuller examples:
 
