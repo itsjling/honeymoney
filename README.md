@@ -101,11 +101,35 @@ Import refuses to process a file whose `source_file` is already present in `cate
 honeymoney review
 honeymoney review --category Other
 honeymoney review --category Other --category Shopping
+honeymoney review --flow unresolved --direction inflow --month 2026-05
+honeymoney review --transaction TRANSACTION_ID --as income
 ```
 
 With no filter, interactively categorizes only transactions already marked as needing review in `categorized.csv`. Pass `--category CATEGORY` to revisit all ledger rows currently in that category even when they are not marked for review. Repeat the option to review the union of multiple categories. Category names must match the configured category vocabulary exactly.
 
-Review uses the same category prompt as import, saves choices to `corrections.csv`, updates `categorized.csv`, and rewrites `review_needed.csv`. Press Enter to leave a row unchanged or `q` to leave all remaining rows unchanged. An empty category selection exits successfully without changing files.
+The legacy no-filter and category-only forms keep the category prompt. Period
+forms (`MONTH`, `--month`, or `--start`/`--end`) compose with `--category`,
+`--flow`, and normalized `--direction inflow|outflow`. Filtered cash-flow review
+shows the base and posted amounts, account, description, category, and current
+flow. It offers income, refund, transfer/payment, investment transfer, expense,
+unresolved, skip, and quit decisions. An empty selection skips one row without
+writing it; quit cancels the filtered review without writing any decisions.
+
+`--transaction ID --as DECISION` is the non-interactive human seam. Add `--json`
+for the versioned JSON envelope. A confirmed income sets `category=Income`,
+`flow_type=income`, full confidence, and clears review. Refunds remain refunds;
+owned transfers, card payments, and investment transfers stay excluded from
+income. All review forms merge corrections by transaction ID, reconcile the
+cumulative ledger, and atomically replace `corrections.csv`, `categorized.csv`,
+and `review_needed.csv`. Repeating a review does not append duplicate correction
+rows.
+
+After interactive income confirmation, review can remember matching future
+inflows. For a fully explicit one-shot operation use `--remember --yes`. The
+saved local rule requires the same institution, account identity, exact
+normalized description, and inflow direction; it never matches by amount. The
+rule and correction are validated and persisted together, and deterministic
+rules run before the optional local Ollama fallback.
 
 ```bash
 honeymoney config
@@ -120,7 +144,8 @@ Prints or edits the active `config.json`; pass `--config PATH` to target another
 
 ## Structured agent commands
 
-`setup`, `run`, `import`, `status`, `report`, and `config` accept `--json`. JSON mode
+`setup`, `run`, `import`, `status`, `report`, `config`, and fully specified
+one-shot `review` accept `--json`. JSON mode
 prints exactly one versioned document to stdout, never prompts, and never opens
 a browser. Exit code `0` is success, `1` is strict partial success, and `2` is
 an input, configuration, or validation error.
@@ -207,7 +232,7 @@ Common edits:
 
 Profiles may set `account_type` to `bank`, `credit_card`, `investment`, or `unknown`; omission remains compatible and common payment methods are inferred. CSV/PDF column mappings may optionally expose `statement_opening_balance` and `statement_closing_balance`. Reconciliation reports an explicit `unavailable` balance status when the source does not supply both rather than inventing balances.
 
-Rules may assign `flow_type` as well as `category`. For institution-specific treatment, use `conditions` to combine exact, keyword, or regex matches on fields such as `institution`, `account_id`, `account_type`, and `original_description`. These deterministic rules run before local Ollama; Ollama can suggest merchant categories but does not set or replace `flow_type`.
+Rules may assign `flow_type` as well as `category`. For institution-specific treatment, use `conditions` to combine exact, keyword, or regex matches on fields such as `institution`, `account_id`, `account_type`, and `original_description`. The derived `direction` condition supports exact `inflow` or `outflow` matching without changing transaction identity. These deterministic rules run before local Ollama; Ollama can suggest merchant categories but does not set or replace `flow_type`.
 
 ### Ollama fallback
 
@@ -241,7 +266,7 @@ Current example profiles cover HSBC Hong Kong and Mox bank/card statement shapes
 ## Review Loop
 
 1. Run Honeymoney.
-2. Run `honeymoney review` to categorize transactions needing review interactively, or `honeymoney review --category Other` to revisit an existing category.
+2. Run `honeymoney review` to categorize transactions needing review, or use `honeymoney review --flow unresolved --direction inflow` for human cash-flow decisions.
 3. For manual review, open `review_needed.csv`.
 4. Fill correction fields such as `category`, `flow_type`, `owner`, `payment_method`, `confidence`, `reason`, or `notes`.
 5. Save those rows as `corrections.csv` or point config at the edited file.

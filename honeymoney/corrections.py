@@ -1,0 +1,407 @@
+from __future__ import annotations
+
+import csv
+import io
+import json
+import os
+import stat
+import tempfile
+from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
+from pathlib import Path
+from typing import Any
+
+from honeymoney.reconciliation import reconcile_ledger
+from honeymoney.rules import validate_rules
+from honeymoney.schema import (
+    ALLOWED_FLOW_TYPES,
+    CATEGORIZED_COLUMNS,
+    REVIEW_NEEDED_COLUMNS,
+    allowed_categories,
+    allowed_owners,
+    allowed_payment_methods,
+)
+
+CORRECTION_FIELDS = [
+    "category",
+    "flow_type",
+    "owner",
+    "payment_method",
+    "confidence",
+    "reason",
+    "notes",
+    "needs_review",
+]
+CORRECTION_COLUMNS = ["transaction_id", *CORRECTION_FIELDS]
+
+
+@dataclass(frozen=True)
+class CorrectionOperationResult:
+    applied_count: int
+    remaining_review_count: int
+    transaction_ids: list[str]
+    ledger_rows: list[dict[str, str]]
+    rules_added: int = 0
+
+
+def load_corrections(config: dict[str, Any]) -> dict[str, dict[str, str]]:
+    corrections_path = config.get("corrections")
+    if not corrections_path or not Path(corrections_path).exists():
+        return {}
+
+    corrections: dict[str, dict[str, str]] = {}
+    with Path(corrections_path).open(newline="", encoding="utf-8") as fh:
+        for row in csv.DictReader(fh):
+            transaction_id = (row.get("transaction_id") or "").strip()
+            if not transaction_id:
+                continue
+            meaningful = {
+                field: (row.get(field) or "").strip()
+                for field in CORRECTION_FIELDS
+                if (row.get(field) or "").strip()
+            }
+            if meaningful:
+                validate_correction(transaction_id, meaningful, config)
+                corrections[transaction_id] = meaningful
+    return corrections
+
+
+def validate_correction(
+    transaction_id: str, correction: dict[str, str], config: dict[str, Any]
+) -> None:
+    unknown = set(correction) - set(CORRECTION_FIELDS)
+    if unknown:
+        raise ValueError(
+            f"Unsupported correction fields for {transaction_id}: "
+            + ", ".join(sorted(unknown))
+        )
+    if correction.get("category") and correction["category"] not in allowed_categories(
+        config
+    ):
+        raise ValueError(
+            f"Unsupported category in correction {transaction_id}: "
+            f"{correction['category']}"
+        )
+    if (
+        correction.get("flow_type")
+        and correction["flow_type"] not in ALLOWED_FLOW_TYPES
+    ):
+        raise ValueError(
+            f"Unsupported flow_type in correction {transaction_id}: "
+            f"{correction['flow_type']}"
+        )
+    if correction.get("owner") and correction["owner"] not in allowed_owners(config):
+        raise ValueError(
+            f"Unsupported owner in correction {transaction_id}: {correction['owner']}"
+        )
+    if correction.get("payment_method") and correction[
+        "payment_method"
+    ] not in allowed_payment_methods(config):
+        raise ValueError(
+            "Unsupported payment_method in correction "
+            f"{transaction_id}: {correction['payment_method']}"
+        )
+    if correction.get("confidence"):
+        try:
+            confidence = Decimal(correction["confidence"])
+        except InvalidOperation as error:
+            raise ValueError(
+                f"Unsupported confidence in correction {transaction_id}: "
+                f"{correction['confidence']}"
+            ) from error
+        if (
+            not confidence.is_finite()
+            or confidence < Decimal("0")
+            or confidence > Decimal("1")
+        ):
+            raise ValueError(
+                f"Unsupported confidence in correction {transaction_id}: "
+                f"{correction['confidence']}"
+            )
+    if correction.get("needs_review") and correction["needs_review"].casefold() not in {
+        "true",
+        "false",
+    }:
+        raise ValueError(
+            f"Unsupported needs_review in correction {transaction_id}: "
+            f"{correction['needs_review']}"
+        )
+
+
+def apply_corrections(
+    transactions: list[dict[str, str]], corrections: dict[str, dict[str, str]]
+) -> None:
+    for transaction in transactions:
+        correction = corrections.get(transaction["transaction_id"])
+        if not correction:
+            continue
+
+        for field in [
+            "category",
+            "flow_type",
+            "owner",
+            "payment_method",
+            "confidence",
+            "reason",
+            "notes",
+        ]:
+            if field in correction:
+                transaction[field] = correction[field]
+
+        if "flow_type" in correction:
+            transaction["flow_source"] = "correction"
+
+        if "needs_review" in correction:
+            transaction["needs_review"] = correction["needs_review"].casefold()
+        transaction["flags"] = _append_flag(
+            transaction.get("flags", ""), "manual_correction"
+        )
+
+
+def merge_correction_patches(
+    config: dict[str, Any], correction_patches: dict[str, dict[str, str]]
+) -> None:
+    """Merge correction patches when their transactions are not in the ledger yet."""
+    corrections_value = config.get("corrections")
+    if not corrections_value:
+        raise ValueError("Config must define a corrections CSV path")
+    merged = load_corrections(config)
+    for transaction_id, patch in correction_patches.items():
+        validate_correction(transaction_id, patch, config)
+        merged[transaction_id] = {**merged.get(transaction_id, {}), **patch}
+    rows = [
+        {"transaction_id": transaction_id, **correction}
+        for transaction_id, correction in sorted(merged.items())
+    ]
+    _atomic_write_text_files(
+        {Path(corrections_value): _csv_document(CORRECTION_COLUMNS, rows)}
+    )
+
+
+def apply_correction_operation(
+    config: dict[str, Any],
+    categorized_path: Path,
+    correction_patches: dict[str, dict[str, str]],
+    *,
+    remembered_rules: list[dict[str, Any]] | None = None,
+) -> CorrectionOperationResult:
+    """Validate, merge, reconcile, and atomically persist one correction operation."""
+    corrections_value = config.get("corrections")
+    if not corrections_value:
+        raise ValueError("Config must define a corrections CSV path")
+    corrections_path = Path(corrections_value)
+    ledger_rows = read_ledger(categorized_path)
+    ledger_by_id = {
+        row["transaction_id"]: row for row in ledger_rows if row.get("transaction_id")
+    }
+
+    normalized_patches: dict[str, dict[str, str]] = {}
+    for transaction_id, patch in correction_patches.items():
+        if transaction_id not in ledger_by_id:
+            raise ValueError(f"Unknown transaction_id: {transaction_id}")
+        validate_correction(transaction_id, patch, config)
+        if not patch:
+            raise ValueError(
+                f"Correction for {transaction_id} must set at least one correction field"
+            )
+        normalized_patches[transaction_id] = dict(patch)
+
+    existing_corrections = load_corrections(config)
+    merged_corrections = dict(existing_corrections)
+    effective_batch: dict[str, dict[str, str]] = {}
+    for transaction_id, correction_patch in normalized_patches.items():
+        merged_correction = {
+            **existing_corrections.get(transaction_id, {}),
+            **correction_patch,
+        }
+        if "needs_review" not in merged_correction:
+            merged_correction["needs_review"] = ledger_by_id[transaction_id].get(
+                "needs_review", "true"
+            )
+        validate_correction(transaction_id, merged_correction, config)
+        effective_batch[transaction_id] = merged_correction
+        merged_corrections[transaction_id] = merged_correction
+
+    baseline_ledger = [dict(row) for row in ledger_rows]
+    reconcile_ledger(baseline_ledger, config)
+    corrected_ledger = [dict(row) for row in ledger_rows]
+    apply_corrections(corrected_ledger, effective_batch)
+    reconcile_ledger(corrected_ledger, config)
+    corrected_ids = set(normalized_patches)
+    for index, (original, baseline, corrected) in enumerate(
+        zip(ledger_rows, baseline_ledger, corrected_ledger)
+    ):
+        if (
+            corrected.get("transaction_id", "") not in corrected_ids
+            and corrected == baseline
+        ):
+            corrected_ledger[index] = original
+    review_rows = [
+        to_review_row(row)
+        for row in corrected_ledger
+        if row.get("needs_review") == "true"
+    ]
+    correction_rows = [
+        {"transaction_id": transaction_id, **correction}
+        for transaction_id, correction in sorted(merged_corrections.items())
+    ]
+
+    files = {
+        corrections_path: _csv_document(CORRECTION_COLUMNS, correction_rows),
+        categorized_path: _csv_document(CATEGORIZED_COLUMNS, corrected_ledger),
+        categorized_path.parent / "review_needed.csv": _csv_document(
+            REVIEW_NEEDED_COLUMNS, review_rows
+        ),
+    }
+    rules_added = 0
+    if remembered_rules:
+        rules_path_value = config.get("rules")
+        if not rules_path_value:
+            raise ValueError("Config must define a rules JSON path to remember a rule")
+        rules_path = Path(rules_path_value)
+        if not rules_path.exists():
+            raise ValueError(f"Rules file does not exist: {rules_path}")
+        with rules_path.open(encoding="utf-8") as fh:
+            rules_document = json.load(fh)
+        existing_rules = rules_document.get("rules", [])
+        if not isinstance(existing_rules, list):
+            raise ValueError("Rules document field rules must be a list")
+        by_id = {str(rule.get("id", "")): rule for rule in existing_rules}
+        for rule in remembered_rules:
+            rule_id = str(rule.get("id", ""))
+            prior = by_id.get(rule_id)
+            if prior is None:
+                existing_rules.append(rule)
+                by_id[rule_id] = rule
+                rules_added += 1
+            elif prior != rule:
+                raise ValueError(
+                    f"Remembered rule id conflicts with existing rule: {rule_id}"
+                )
+        validate_rules(existing_rules, config)
+        rules_document["rules"] = existing_rules
+        files[rules_path] = json.dumps(rules_document, indent=2, sort_keys=True) + "\n"
+
+    _atomic_write_text_files(files)
+    return CorrectionOperationResult(
+        applied_count=len(normalized_patches),
+        remaining_review_count=len(review_rows),
+        transaction_ids=sorted(normalized_patches),
+        ledger_rows=corrected_ledger,
+        rules_added=rules_added,
+    )
+
+
+def read_ledger(path: Path) -> list[dict[str, str]]:
+    if not path.exists():
+        return []
+    with path.open(newline="", encoding="utf-8") as fh:
+        rows = [
+            {column: row.get(column) or "" for column in CATEGORIZED_COLUMNS}
+            for row in csv.DictReader(fh)
+        ]
+    for row in rows:
+        if not row["account_type"]:
+            row["account_type"] = {
+                "Bank Account": "bank",
+                "Credit Card": "credit_card",
+                "Brokerage": "investment",
+            }.get(row.get("payment_method", ""), "unknown")
+    return rows
+
+
+def to_review_row(row: dict[str, str]) -> dict[str, str]:
+    review_row = {column: row.get(column, "") for column in REVIEW_NEEDED_COLUMNS}
+    review_row["suggested_category"] = row.get("category", "")
+    review_row["suggested_flow_type"] = row.get("flow_type", "")
+    review_row["suggested_owner"] = row.get("owner", "")
+    review_row["suggested_payment_method"] = row.get("payment_method", "")
+    review_row["category"] = ""
+    review_row["flow_type"] = ""
+    review_row["owner"] = ""
+    review_row["payment_method"] = ""
+    return review_row
+
+
+def _csv_document(columns: list[str], rows: list[dict[str, str]]) -> str:
+    buffer = io.StringIO(newline="")
+    writer = csv.DictWriter(buffer, fieldnames=columns, extrasaction="ignore")
+    writer.writeheader()
+    writer.writerows(rows)
+    return buffer.getvalue()
+
+
+def _atomic_write_text_files(files: dict[Path, str]) -> None:
+    staged: list[tuple[Path, Path]] = []
+    backups: dict[Path, Path | None] = {}
+    completed = False
+    try:
+        for target, content in files.items():
+            target.parent.mkdir(parents=True, exist_ok=True)
+            existing_mode = (
+                stat.S_IMODE(target.stat().st_mode) if target.exists() else None
+            )
+            descriptor, temporary_name = tempfile.mkstemp(
+                dir=target.parent,
+                prefix=f".{target.name}.",
+                suffix=".tmp",
+            )
+            temporary_path = Path(temporary_name)
+            with os.fdopen(descriptor, "w", encoding="utf-8", newline="") as fh:
+                fh.write(content)
+                fh.flush()
+                os.fsync(fh.fileno())
+            if existing_mode is not None:
+                os.chmod(temporary_path, existing_mode)
+            staged.append((temporary_path, target))
+        for temporary_path, target in staged:
+            backup_path = None
+            if target.exists():
+                backup_descriptor, backup_name = tempfile.mkstemp(
+                    dir=target.parent,
+                    prefix=f".{target.name}.",
+                    suffix=".bak",
+                )
+                os.close(backup_descriptor)
+                backup_path = Path(backup_name)
+                backup_path.unlink()
+                os.replace(target, backup_path)
+            backups[target] = backup_path
+            os.replace(temporary_path, target)
+        completed = True
+    except Exception as write_error:
+        rollback_errors = []
+        for target in reversed(backups):
+            backup_path = backups.get(target)
+            try:
+                target.unlink(missing_ok=True)
+                if backup_path is not None:
+                    os.replace(backup_path, target)
+                    backups[target] = None
+            except Exception as rollback_error:
+                rollback_errors.append((target, rollback_error))
+        if rollback_errors:
+            retained = ", ".join(
+                str(backups[target])
+                for target, _ in rollback_errors
+                if backups.get(target) is not None
+            )
+            raise OSError(
+                "Correction write failed and rollback was incomplete; "
+                f"retained backups: {retained or '(none)'}"
+            ) from write_error
+        raise
+    finally:
+        for temporary_path, _ in staged:
+            temporary_path.unlink(missing_ok=True)
+        if completed:
+            for backup_path in backups.values():
+                if backup_path is not None:
+                    backup_path.unlink(missing_ok=True)
+
+
+def _append_flag(existing: str, flag: str) -> str:
+    flags = [item for item in existing.split(";") if item]
+    if flag not in flags:
+        flags.append(flag)
+    return ";".join(flags)

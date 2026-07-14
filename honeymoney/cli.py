@@ -4,7 +4,6 @@ import argparse
 import calendar
 import csv
 import hashlib
-import io
 import json
 import logging
 import os
@@ -24,12 +23,26 @@ from importlib import resources
 from pathlib import Path
 from typing import Any
 
+from honeymoney.corrections import (
+    CORRECTION_FIELDS,
+    apply_correction_operation,
+    apply_corrections,
+    load_corrections,
+    merge_correction_patches,
+    read_ledger,
+    to_review_row,
+    validate_correction,
+)
 from honeymoney.ollama import (
     OllamaProgress,
     apply_ollama_fallback,
     list_ollama_models,
 )
-from honeymoney.reconciliation import reconcile_ledger, reconciliation_date_window
+from honeymoney.reconciliation import (
+    reconcile_ledger,
+    reconciliation_date_window,
+    transaction_direction,
+)
 from honeymoney.report import build_report_html
 from honeymoney.rules import apply_rules, load_rules
 from honeymoney.schema import (
@@ -43,17 +56,6 @@ from honeymoney.schema import (
 )
 
 JSON_SCHEMA_VERSION = 1
-CORRECTION_FIELDS = [
-    "category",
-    "flow_type",
-    "owner",
-    "payment_method",
-    "confidence",
-    "reason",
-    "notes",
-    "needs_review",
-]
-CORRECTION_COLUMNS = ["transaction_id", *CORRECTION_FIELDS]
 
 
 def _emit_json(
@@ -204,7 +206,7 @@ def _run_pipeline(
     source_files = {
         _relative_source(input_file, input_path) for input_file in input_files
     }
-    existing_ledger_rows = _read_ledger(categorized_path)
+    existing_ledger_rows = read_ledger(categorized_path)
     existing_source_files = _processed_source_files(existing_ledger_rows, source_files)
     if existing_source_files and not (args.replace or args.reset):
         source_list = ", ".join(sorted(existing_source_files))
@@ -244,8 +246,8 @@ def _run_pipeline(
         for warning in ollama_warnings:
             print(f"Warning: {warning}", file=sys.stderr)
     _status.update("Applying corrections...")
-    corrections = _load_corrections(config)
-    _apply_corrections(transactions, corrections)
+    corrections = load_corrections(config)
+    apply_corrections(transactions, corrections)
     _status.clear()
     if interactive:
         categorized_interactively = _prompt_uncategorized(transactions, config)
@@ -321,6 +323,9 @@ Commands:
   honeymoney import [PATH]         Import a pasted CSV/PDF path
   honeymoney review [--category CATEGORY]
                                    Review queued or category-matched transactions
+  honeymoney review [FILTERS]      Review filtered accounting flow decisions
+  honeymoney review --transaction ID --as income
+                                   Apply one human accounting decision
   honeymoney status [MONTH]        Show processed/categorized counts for a period
   honeymoney pending [MONTH]       List transactions that need review
   honeymoney correct --file FILE   Apply validated transaction corrections
@@ -343,6 +348,13 @@ Common status/report options:
   --month june | --month 2026-06
   --start 2026-06-01 --end 2026-06-30
   --no-open                        (report) Write the HTML without opening it
+
+Review filters and decisions:
+  --category CATEGORY              Compose with period, flow, and direction filters
+  --flow unresolved --direction inflow
+  --transaction ID --as DECISION  Non-interactive one-shot review
+  --remember --yes                 Save an exact, directional income rule
+  --json                           Valid only for a fully specified one-shot review
 """
 
 
@@ -674,11 +686,12 @@ def _review_command(argv: list[str]) -> int:
     parser = _command_parser(
         argv,
         prog="honeymoney review",
-        description=(
-            "Interactively categorize transactions needing review or rows in selected "
-            "categories."
-        ),
+        description="Review category and accounting flow decisions.",
     )
+    parser.add_argument("period", nargs="?", help="Month name or YYYY-MM")
+    parser.add_argument("--month")
+    parser.add_argument("--start")
+    parser.add_argument("--end")
     parser.add_argument("--config", dest="config_path")
     parser.add_argument("--output", dest="output_path")
     parser.add_argument(
@@ -691,7 +704,43 @@ def _review_command(argv: list[str]) -> int:
             "repeat to select multiple categories"
         ),
     )
+    parser.add_argument(
+        "--flow",
+        action="append",
+        dest="flows",
+        choices=sorted(ALLOWED_FLOW_TYPES),
+        help="Review rows with this accounting flow; repeat to select more than one",
+    )
+    parser.add_argument("--direction", choices=["inflow", "outflow"])
+    parser.add_argument("--transaction", dest="transaction_id")
+    parser.add_argument("--as", dest="decision")
+    parser.add_argument("--remember", action="store_true")
+    parser.add_argument("--yes", action="store_true")
+    parser.add_argument("--json", action="store_true")
     args = parser.parse_args(argv)
+
+    has_period = bool(args.month or args.period or args.start or args.end)
+    has_filters = bool(args.categories or args.flows or args.direction or has_period)
+    one_shot = bool(args.transaction_id or args.decision or args.remember or args.yes)
+    if args.json and not (args.transaction_id and args.decision):
+        raise ValueError(
+            "honeymoney review --json requires --transaction ID and --as DECISION; "
+            "JSON mode cannot prompt"
+        )
+    if bool(args.transaction_id) != bool(args.decision):
+        raise ValueError(
+            "One-shot review requires both --transaction ID and --as DECISION"
+        )
+    if one_shot and not args.transaction_id:
+        raise ValueError(
+            "--remember and --yes require one-shot --transaction ID and --as DECISION"
+        )
+    if one_shot and has_filters:
+        raise ValueError("One-shot review cannot be combined with review filters")
+    if args.yes and not args.remember:
+        raise ValueError("--yes is valid only with --remember")
+    if args.remember and not args.yes:
+        raise ValueError("One-shot --remember requires --yes")
 
     config = _load_config(args.config_path)
     category_filters = args.categories or []
@@ -701,51 +750,429 @@ def _review_command(argv: list[str]) -> int:
             "Unsupported review category: " + ", ".join(unsupported_categories)
         )
     categorized_path = Path(args.output_path or config["paths"]["output"])
-    ledger_rows = _read_ledger(categorized_path)
+    ledger_rows = read_ledger(categorized_path)
     if not ledger_rows:
+        if args.transaction_id:
+            raise ValueError(f"Unknown transaction_id: {args.transaction_id}")
         print(f"No processed records found at {categorized_path}")
         print("Run `honeymoney import` or `honeymoney run` first.")
         return 0
 
-    original_ledger_rows = [dict(row) for row in ledger_rows]
-    reviewed = _prompt_review_transactions(ledger_rows, config, category_filters)
-    _save_interactive_corrections(reviewed, config)
-    if reviewed:
-        _reconcile_review_updates(ledger_rows, original_ledger_rows, reviewed, config)
-        _write_ledger_outputs(categorized_path, ledger_rows)
+    if args.transaction_id:
+        return _one_shot_review(
+            args,
+            config,
+            categorized_path,
+            ledger_rows,
+        )
 
-    remaining = sum(1 for row in ledger_rows if row.get("needs_review") == "true")
+    if args.flows or args.direction or has_period:
+        filter_period = (
+            (args.month or args.period, args.start, args.end) if has_period else None
+        )
+        selected = _filtered_review_rows(
+            ledger_rows,
+            category_filters=category_filters,
+            flow_filters=args.flows or [],
+            direction=args.direction,
+            period=filter_period,
+        )
+        if not selected:
+            print(
+                "No transactions matched the selected review filters; no changes written."
+            )
+            print(_review_filter_summary(args))
+            return 0
+        patches, remembered_rules = _prompt_accounting_decisions(selected, ledger_rows)
+        if patches:
+            result = apply_correction_operation(
+                config,
+                categorized_path,
+                patches,
+                remembered_rules=list(remembered_rules.values()),
+            )
+            resulting_rows = result.ledger_rows
+        else:
+            resulting_rows = ledger_rows
+        remaining_matches = _filtered_review_rows(
+            resulting_rows,
+            category_filters=category_filters,
+            flow_filters=args.flows or [],
+            direction=args.direction,
+            period=filter_period,
+        )
+        review_queue_count = sum(
+            1 for row in resulting_rows if row.get("needs_review") == "true"
+        )
+        print(
+            f"Review complete: {len(patches)} updated from {len(selected)} matched; "
+            f"{len(remaining_matches)} still match these filters; "
+            f"{review_queue_count} in review queue"
+        )
+        return 0
+
+    reviewed = _prompt_review_transactions(ledger_rows, config, category_filters)
+    patches = {
+        row["transaction_id"]: {
+            "category": row["category"],
+            "confidence": "1.00",
+            "reason": "Categorized interactively",
+            "needs_review": "false",
+        }
+        for row in reviewed
+    }
+    if patches:
+        result = apply_correction_operation(config, categorized_path, patches)
+        remaining = result.remaining_review_count
+    else:
+        remaining = sum(1 for row in ledger_rows if row.get("needs_review") == "true")
     if category_filters:
         print(
-            f"Review complete: {len(reviewed)} updated from selected categories, "
+            f"Review complete: {len(patches)} updated from selected categories, "
             f"{remaining} still need review"
         )
     else:
-        print(
-            f"Review complete: {len(reviewed)} updated, {remaining} still need review"
-        )
+        print(f"Review complete: {len(patches)} updated, {remaining} still need review")
     return 0
 
 
-def _reconcile_review_updates(
-    ledger_rows: list[dict[str, str]],
-    original_ledger_rows: list[dict[str, str]],
-    reviewed: list[dict[str, str]],
+def _one_shot_review(
+    args: argparse.Namespace,
     config: dict[str, Any],
-) -> None:
-    baseline_rows = [dict(row) for row in original_ledger_rows]
-    reconcile_ledger(baseline_rows, config)
-    reconcile_ledger(ledger_rows, config)
+    categorized_path: Path,
+    ledger_rows: list[dict[str, str]],
+) -> int:
+    transaction = next(
+        (
+            row
+            for row in ledger_rows
+            if row.get("transaction_id") == args.transaction_id
+        ),
+        None,
+    )
+    if transaction is None:
+        raise ValueError(f"Unknown transaction_id: {args.transaction_id}")
+    decision = _normalize_review_decision(args.decision)
+    patch = _accounting_decision_patch(
+        transaction, decision, "Accounting flow confirmed by one-shot review"
+    )
+    remembered_rules: list[dict[str, Any]] = []
+    rule_matches = 0
+    if args.remember:
+        if decision != "income":
+            raise ValueError("--remember is supported only with --as income")
+        rule = _remembered_income_rule(transaction)
+        rule_matches = _remembered_rule_match_count(ledger_rows, transaction)
+        remembered_rules.append(rule)
 
-    reviewed_ids = {row.get("transaction_id", "") for row in reviewed}
-    for index, (original, baseline, updated) in enumerate(
-        zip(original_ledger_rows, baseline_rows, ledger_rows)
-    ):
-        if (
-            updated.get("transaction_id", "") not in reviewed_ids
-            and updated == baseline
-        ):
-            ledger_rows[index] = original
+    result = apply_correction_operation(
+        config,
+        categorized_path,
+        {args.transaction_id: patch},
+        remembered_rules=remembered_rules,
+    )
+    data = {
+        "applied_count": result.applied_count,
+        "remaining_review_count": result.remaining_review_count,
+        "transaction_ids": result.transaction_ids,
+        "decision": decision,
+        "rules_added": result.rules_added,
+        "rule_matches": rule_matches,
+    }
+    artifacts = _correction_artifacts(config, categorized_path)
+    if args.remember:
+        artifacts["rules_json"] = str(Path(config["rules"]).resolve())
+    if args.json:
+        _emit_json("review", "success", data=data, artifacts=artifacts)
+    else:
+        suffix = (
+            f" and remembered an exact inflow rule matching {rule_matches} current rows"
+            if args.remember
+            else ""
+        )
+        print(f"Reviewed {args.transaction_id} as {decision}{suffix}.")
+    return 0
+
+
+def _filtered_review_rows(
+    rows: list[dict[str, str]],
+    *,
+    category_filters: list[str],
+    flow_filters: list[str],
+    direction: str | None,
+    period: tuple[str | None, str | None, str | None] | None,
+) -> list[dict[str, str]]:
+    selected = list(rows)
+    if period is not None:
+        month, start, end = period
+        period_start, period_end = _resolve_period(month, start, end)
+        selected = _rows_in_period(selected, period_start, period_end)
+    if category_filters:
+        categories = set(category_filters)
+        selected = [row for row in selected if row.get("category") in categories]
+    if flow_filters:
+        flows = set(flow_filters)
+        selected = [row for row in selected if row.get("flow_type") in flows]
+    if direction:
+        selected = [row for row in selected if transaction_direction(row) == direction]
+    return selected
+
+
+def _prompt_accounting_decisions(
+    selected: list[dict[str, str]], ledger_rows: list[dict[str, str]]
+) -> tuple[dict[str, dict[str, str]], dict[str, dict[str, Any]]]:
+    print(f"\n{len(selected)} transactions matched the selected review filters.")
+    print(
+        "Choose [i]ncome, [r]efund, internal [t]ransfer, [c]ard payment, "
+        "in[v]estment transfer, [e]xpense, [u]nresolved, [s]kip, or [q]uit."
+    )
+    choices = {
+        "i": "income",
+        "income": "income",
+        "r": "refund",
+        "refund": "refund",
+        "t": "internal-transfer",
+        "internal-transfer": "internal-transfer",
+        "c": "credit-card-payment",
+        "credit-card-payment": "credit-card-payment",
+        "v": "investment-transfer",
+        "investment-transfer": "investment-transfer",
+        "e": "expense",
+        "expense": "expense",
+        "u": "unresolved",
+        "unresolved": "unresolved",
+    }
+    patches: dict[str, dict[str, str]] = {}
+    remembered: dict[str, dict[str, Any]] = {}
+    for position, transaction in enumerate(selected, start=1):
+        print(f"\n[{position}/{len(selected)}] {_accounting_review_line(transaction)}")
+        while True:
+            try:
+                raw_choice = (
+                    input("Decision [i/r/t/c/v/e/u/Enter/q]: ").strip().casefold()
+                )
+            except EOFError:
+                return patches, remembered
+            if raw_choice in {"", "s", "skip"}:
+                break
+            if raw_choice in {"q", "quit"}:
+                return {}, {}
+            decision = choices.get(raw_choice)
+            if decision is None:
+                print("Enter i, r, t, c, v, e, u, Enter to skip, or q to quit.")
+                continue
+            try:
+                patch = _accounting_decision_patch(
+                    transaction,
+                    decision,
+                    "Accounting flow confirmed interactively",
+                )
+            except ValueError as error:
+                print(str(error))
+                continue
+            patches[transaction["transaction_id"]] = patch
+            if decision == "income" and _can_remember_income(transaction):
+                match_count = _remembered_rule_match_count(ledger_rows, transaction)
+                print(
+                    "Rule preview: exact institution, account, and description; "
+                    f"inflow direction only; {match_count} current row(s) match."
+                )
+                try:
+                    remember = (
+                        input("Remember matching future inflows as income? [y/N]: ")
+                        .strip()
+                        .casefold()
+                    )
+                except EOFError:
+                    remember = ""
+                if remember in {"y", "yes"}:
+                    rule = _remembered_income_rule(transaction)
+                    remembered[rule["id"]] = rule
+            break
+    return patches, remembered
+
+
+def _normalize_review_decision(value: str) -> str:
+    normalized = value.strip().casefold().replace("_", "-")
+    aliases = {
+        "leave-unresolved": "unresolved",
+        "internal-transfer": "internal-transfer",
+    }
+    normalized = aliases.get(normalized, normalized)
+    supported = {
+        "income",
+        "refund",
+        "internal-transfer",
+        "credit-card-payment",
+        "investment-transfer",
+        "expense",
+        "unresolved",
+    }
+    if normalized not in supported:
+        raise ValueError(
+            "Unsupported review decision: "
+            f"{value}. Choose income, refund, internal-transfer, credit-card-payment, "
+            "investment-transfer, expense, or unresolved"
+        )
+    return normalized
+
+
+def _accounting_decision_patch(
+    transaction: dict[str, str], decision: str, reason: str
+) -> dict[str, str]:
+    if decision == "income" and transaction_direction(transaction) != "inflow":
+        raise ValueError("Income can be confirmed only for a normalized inflow")
+    patch = {
+        "confidence": "1.00",
+        "reason": reason,
+        "needs_review": "false",
+    }
+    mappings = {
+        "income": {"category": "Income", "flow_type": "income"},
+        "refund": {"flow_type": "refund"},
+        "internal-transfer": {
+            "category": "Internal Transfer",
+            "flow_type": "internal_transfer",
+        },
+        "credit-card-payment": {
+            "category": "Credit Card Payment",
+            "flow_type": "credit_card_payment",
+        },
+        "investment-transfer": {
+            "category": "Investments",
+            "flow_type": "investment_transfer",
+        },
+        "expense": {"flow_type": "expense"},
+        "unresolved": {"flow_type": "unresolved", "needs_review": "true"},
+    }
+    patch.update(mappings[decision])
+    return patch
+
+
+def _accounting_review_line(transaction: dict[str, str]) -> str:
+    amount = transaction.get("amount_hkd", "")
+    posted = " ".join(
+        part
+        for part in [
+            transaction.get("posted_amount", ""),
+            transaction.get("posted_currency", ""),
+        ]
+        if part
+    )
+    base_currency = "HKD"
+    amount_label = f"{amount} {base_currency}"
+    if posted and posted != amount_label:
+        amount_label = f"{posted} ({amount_label})"
+    merchant = transaction.get("merchant", "") or "(no merchant)"
+    description = transaction.get("original_description", "")
+    merchant_label = merchant
+    if description and description != merchant:
+        merchant_label += f" / {description}"
+    return "  ".join(
+        [
+            transaction.get("date", ""),
+            amount_label,
+            transaction.get("account", "") or transaction.get("account_id", ""),
+            merchant_label,
+            f"category={transaction.get('category', '')}",
+            f"flow={transaction.get('flow_type', '')}",
+        ]
+    )
+
+
+def _can_remember_income(transaction: dict[str, str]) -> bool:
+    return bool(
+        transaction.get("institution", "").strip()
+        and transaction.get("account_id", "").strip()
+        and transaction.get("original_description", "").strip()
+        and transaction_direction(transaction) == "inflow"
+    )
+
+
+def _remembered_income_rule(transaction: dict[str, str]) -> dict[str, Any]:
+    if not _can_remember_income(transaction):
+        raise ValueError(
+            "Cannot remember income without institution, account_id, exact description, "
+            "and inflow direction"
+        )
+    identity_values = [
+        transaction[field].strip().casefold()
+        for field in ["institution", "account_id", "original_description"]
+    ]
+    identity = "|".join(identity_values)
+    digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:16]
+    return {
+        "id": f"review_income_{digest}",
+        "enabled": True,
+        "priority": 100,
+        "conditions": [
+            {
+                "field": "institution",
+                "match_type": "exact",
+                "patterns": [identity_values[0]],
+            },
+            {
+                "field": "account_id",
+                "match_type": "exact",
+                "patterns": [identity_values[1]],
+            },
+            {
+                "field": "original_description",
+                "match_type": "exact",
+                "patterns": [identity_values[2]],
+            },
+            {"field": "direction", "match_type": "exact", "patterns": ["inflow"]},
+        ],
+        "category": "Income",
+        "flow_type": "income",
+        "confidence": 1.0,
+        "notes": "Confirmed in human cash-flow review",
+    }
+
+
+def _remembered_rule_match_count(
+    rows: list[dict[str, str]], transaction: dict[str, str]
+) -> int:
+    return sum(
+        1
+        for row in rows
+        if row.get("institution", "").strip().casefold()
+        == transaction.get("institution", "").strip().casefold()
+        and row.get("account_id", "").strip().casefold()
+        == transaction.get("account_id", "").strip().casefold()
+        and row.get("original_description", "").strip().casefold()
+        == transaction.get("original_description", "").strip().casefold()
+        and transaction_direction(row) == "inflow"
+    )
+
+
+def _review_filter_summary(args: argparse.Namespace) -> str:
+    parts = []
+    if args.month or args.period:
+        parts.append(f"period={args.month or args.period}")
+    if args.start:
+        parts.append(f"start={args.start}")
+    if args.end:
+        parts.append(f"end={args.end}")
+    if args.categories:
+        parts.append("category=" + ",".join(args.categories))
+    if args.flows:
+        parts.append("flow=" + ",".join(args.flows))
+    if args.direction:
+        parts.append(f"direction={args.direction}")
+    return "Matched filters: " + "; ".join(parts)
+
+
+def _correction_artifacts(
+    config: dict[str, Any], categorized_path: Path
+) -> dict[str, str]:
+    return {
+        "corrections_csv": str(Path(config["corrections"]).resolve()),
+        "categorized_csv": str(categorized_path.resolve()),
+        "review_needed_csv": str(
+            (categorized_path.parent / "review_needed.csv").resolve()
+        ),
+    }
 
 
 def _unsuccessful_record_count(file_reports: list[dict[str, str]]) -> int:
@@ -780,7 +1207,7 @@ def _status_command(argv: list[str]) -> int:
     start, end = _resolve_period(args.month or args.period, args.start, args.end)
     config = _load_config(args.config_path)
     categorized_path = Path(config["paths"]["output"])
-    ledger_rows = _read_ledger(categorized_path)
+    ledger_rows = read_ledger(categorized_path)
     if not ledger_rows:
         if args.json:
             _emit_json(
@@ -793,6 +1220,8 @@ def _status_command(argv: list[str]) -> int:
                     "categorized": 0,
                     "uncategorized": 0,
                     "needs_review": 0,
+                    "unresolved_inflows": 0,
+                    "unresolved_outflows": 0,
                     "ledger": {
                         "total_records": 0,
                         "outside_period": 0,
@@ -810,6 +1239,18 @@ def _status_command(argv: list[str]) -> int:
     categorized = [row for row in rows if _is_categorized(row)]
     statements = {row.get("source_file", "") for row in rows if row.get("source_file")}
     review = [row for row in rows if row.get("needs_review") == "true"]
+    unresolved_inflows = sum(
+        1
+        for row in rows
+        if row.get("flow_type") == "unresolved"
+        and transaction_direction(row) == "inflow"
+    )
+    unresolved_outflows = sum(
+        1
+        for row in rows
+        if row.get("flow_type") == "unresolved"
+        and transaction_direction(row) == "outflow"
+    )
     undated = sum(
         1 for row in ledger_rows if _parse_iso_date(row.get("date", "")) is None
     )
@@ -826,6 +1267,8 @@ def _status_command(argv: list[str]) -> int:
                 "categorized": len(categorized),
                 "uncategorized": len(rows) - len(categorized),
                 "needs_review": len(review),
+                "unresolved_inflows": unresolved_inflows,
+                "unresolved_outflows": unresolved_outflows,
                 "ledger": {
                     "total_records": len(ledger_rows),
                     "outside_period": outside,
@@ -842,6 +1285,11 @@ def _status_command(argv: list[str]) -> int:
     print(f"  Categorized:          {len(categorized)}")
     print(f"  Uncategorized:        {len(rows) - len(categorized)}")
     print(f"  Needs review:         {len(review)}")
+    print(f"  Unresolved inflows:   {unresolved_inflows}")
+    print(f"  Unresolved outflows:  {unresolved_outflows}")
+    print(
+        "  Review inflows:       honeymoney review --flow unresolved --direction inflow"
+    )
     print(
         f"Ledger total: {len(ledger_rows)} records "
         f"({outside} outside this period, {undated} with unparseable dates)"
@@ -867,7 +1315,7 @@ def _report_command(argv: list[str]) -> int:
 
     config = _load_config(args.config_path)
     categorized_path = Path(config["paths"]["output"])
-    ledger_rows = _read_ledger(categorized_path)
+    ledger_rows = read_ledger(categorized_path)
     reconcile_ledger(ledger_rows, config)
 
     start, end = _resolve_period(args.month or args.period, args.start, args.end)
@@ -908,7 +1356,7 @@ def _reconcile_command(argv: list[str]) -> int:
 
     config = _load_config(args.config_path)
     categorized_path = Path(args.output_path or config["paths"]["output"])
-    rows = _read_ledger(categorized_path)
+    rows = read_ledger(categorized_path)
     summary = reconcile_ledger(rows, config)
     if not args.dry_run:
         _write_ledger_outputs(categorized_path, rows)
@@ -950,9 +1398,9 @@ def _pending_command(argv: list[str]) -> int:
     start, end = _resolve_period(args.month or args.period, args.start, args.end)
     config = _load_config(args.config_path)
     categorized_path = Path(config["paths"]["output"])
-    ledger_rows = _read_ledger(categorized_path)
+    ledger_rows = read_ledger(categorized_path)
     pending_rows = [
-        _to_review_row(row)
+        to_review_row(row)
         for row in _rows_in_period(ledger_rows, start, end)
         if row.get("needs_review") == "true"
     ]
@@ -1000,74 +1448,27 @@ def _correct_command(argv: list[str]) -> int:
 
     config = _load_config(args.config_path)
     categorized_path = Path(args.output_path or config["paths"]["output"])
-    corrections_value = config.get("corrections")
-    if not corrections_value:
-        raise ValueError("Config must define a corrections CSV path")
-    corrections_path = Path(corrections_value)
-    ledger_rows = _read_ledger(categorized_path)
+    ledger_rows = read_ledger(categorized_path)
     ledger_ids = {
         row["transaction_id"] for row in ledger_rows if row.get("transaction_id")
     }
     correction_batch = _load_json_correction_batch(
         args.correction_file, config, ledger_ids
     )
-
-    existing_corrections = _load_corrections(config)
-    merged_corrections = dict(existing_corrections)
-    ledger_by_id = {
-        row["transaction_id"]: row for row in ledger_rows if row.get("transaction_id")
-    }
-    effective_batch: dict[str, dict[str, str]] = {}
-    for transaction_id, correction_patch in correction_batch.items():
-        merged_correction = {
-            **existing_corrections.get(transaction_id, {}),
-            **correction_patch,
-        }
-        if "needs_review" not in merged_correction:
-            merged_correction["needs_review"] = ledger_by_id[transaction_id].get(
-                "needs_review", "true"
-            )
-        effective_batch[transaction_id] = merged_correction
-        merged_corrections[transaction_id] = merged_correction
-
-    corrected_ledger = [dict(row) for row in ledger_rows]
-    _apply_corrections(corrected_ledger, effective_batch)
-    reconcile_ledger(corrected_ledger, config)
-    review_rows = [
-        _to_review_row(row)
-        for row in corrected_ledger
-        if row.get("needs_review") == "true"
-    ]
-    correction_rows = [
-        {"transaction_id": transaction_id, **correction}
-        for transaction_id, correction in sorted(merged_corrections.items())
-    ]
-
-    review_needed_path = categorized_path.parent / "review_needed.csv"
-    _atomic_write_text_files(
-        {
-            corrections_path: _csv_document(CORRECTION_COLUMNS, correction_rows),
-            categorized_path: _csv_document(CATEGORIZED_COLUMNS, corrected_ledger),
-            review_needed_path: _csv_document(REVIEW_NEEDED_COLUMNS, review_rows),
-        }
-    )
+    result = apply_correction_operation(config, categorized_path, correction_batch)
 
     data = {
-        "applied_count": len(correction_batch),
-        "remaining_review_count": len(review_rows),
-        "transaction_ids": sorted(correction_batch),
+        "applied_count": result.applied_count,
+        "remaining_review_count": result.remaining_review_count,
+        "transaction_ids": result.transaction_ids,
     }
-    artifacts = {
-        "corrections_csv": str(corrections_path.resolve()),
-        "categorized_csv": str(categorized_path.resolve()),
-        "review_needed_csv": str(review_needed_path.resolve()),
-    }
+    artifacts = _correction_artifacts(config, categorized_path)
     if args.json:
         _emit_json("correct", "success", data=data, artifacts=artifacts)
     else:
         print(
-            f"Applied {len(correction_batch)} corrections; "
-            f"{len(review_rows)} transactions still need review"
+            f"Applied {result.applied_count} corrections; "
+            f"{result.remaining_review_count} transactions still need review"
         )
     return 0
 
@@ -1113,7 +1514,7 @@ def _load_json_correction_batch(
             raise ValueError(
                 f"Correction for {transaction_id} must set at least one correction field"
             )
-        _validate_correction(transaction_id, correction, config)
+        validate_correction(transaction_id, correction, config)
         corrections[transaction_id] = correction
     return corrections
 
@@ -1147,14 +1548,6 @@ def _normalize_json_correction(index: int, item: dict[str, Any]) -> dict[str, st
             )
         correction[field] = value.strip()
     return correction
-
-
-def _csv_document(columns: list[str], rows: list[dict[str, str]]) -> str:
-    buffer = io.StringIO(newline="")
-    writer = csv.DictWriter(buffer, fieldnames=columns, extrasaction="ignore")
-    writer.writeheader()
-    writer.writerows(rows)
-    return buffer.getvalue()
 
 
 def _atomic_write_text_files(files: dict[Path, str]) -> None:
@@ -1228,22 +1621,6 @@ def _month_period(value: str, today: date) -> tuple[date, date]:
     return date(year, month, 1), date(year, month, last_day)
 
 
-def _read_ledger(categorized_path: Path) -> list[dict[str, str]]:
-    if not categorized_path.exists():
-        return []
-    with categorized_path.open(newline="", encoding="utf-8") as fh:
-        rows = [
-            {column: row.get(column) or "" for column in CATEGORIZED_COLUMNS}
-            for row in csv.DictReader(fh)
-        ]
-    for row in rows:
-        if not row["account_type"]:
-            row["account_type"] = _account_type_for_payment_method(
-                row.get("payment_method", "")
-            )
-    return rows
-
-
 def _rows_in_period(
     rows: list[dict[str, str]], start: date, end: date
 ) -> list[dict[str, str]]:
@@ -1280,7 +1657,7 @@ def _merge_into_ledger(
 ) -> list[dict[str, str]]:
     merged = {
         row["transaction_id"]: row
-        for row in _read_ledger(categorized_path)
+        for row in read_ledger(categorized_path)
         if row.get("transaction_id")
         and (replace_sources is None or row.get("source_file") not in replace_sources)
     }
@@ -1298,7 +1675,7 @@ def _write_ledger_outputs(
         review_needed_path,
         REVIEW_NEEDED_COLUMNS,
         [
-            _to_review_row(row)
+            to_review_row(row)
             for row in ledger_rows
             if row.get("needs_review") == "true"
         ],
@@ -1428,40 +1805,20 @@ def _apply_interactive_category(transaction: dict[str, str], category: str) -> N
 def _save_interactive_corrections(
     categorized: list[dict[str, str]], config: dict[str, Any]
 ) -> None:
-    corrections_path = config.get("corrections")
-    if not corrections_path or not categorized:
+    if not categorized or not config.get("corrections"):
         return
-    path = Path(corrections_path)
-    fieldnames = [
-        "transaction_id",
-        "category",
-        "owner",
-        "payment_method",
-        "confidence",
-        "reason",
-        "notes",
-    ]
-    exists = path.exists()
-    if exists:
-        with path.open(newline="", encoding="utf-8") as fh:
-            header = next(csv.reader(fh), None)
-        if header:
-            fieldnames = header
-    else:
-        path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", newline="", encoding="utf-8") as fh:
-        writer = csv.DictWriter(fh, fieldnames=fieldnames, extrasaction="ignore")
-        if not exists:
-            writer.writeheader()
-        for transaction in categorized:
-            writer.writerow(
-                {
-                    "transaction_id": transaction["transaction_id"],
-                    "category": transaction["category"],
-                    "confidence": "1.00",
-                    "reason": "Categorized interactively",
-                }
-            )
+    merge_correction_patches(
+        config,
+        {
+            transaction["transaction_id"]: {
+                "category": transaction["category"],
+                "confidence": "1.00",
+                "reason": "Categorized interactively",
+                "needs_review": "false",
+            }
+            for transaction in categorized
+        },
+    )
 
 
 def _remove_corrections(config: dict[str, Any], transaction_ids: set[str]) -> None:
@@ -1681,92 +2038,6 @@ def _load_profile_mappings(config: dict[str, Any]) -> dict[str, Any]:
         return {}
     with Path(mapping_path).open(encoding="utf-8") as fh:
         return json.load(fh)
-
-
-def _load_corrections(config: dict[str, Any]) -> dict[str, dict[str, str]]:
-    corrections_path = config.get("corrections")
-    if not corrections_path:
-        return {}
-
-    corrections: dict[str, dict[str, str]] = {}
-    with Path(corrections_path).open(newline="", encoding="utf-8") as fh:
-        for row in csv.DictReader(fh):
-            transaction_id = (row.get("transaction_id") or "").strip()
-            if not transaction_id:
-                continue
-            meaningful = {
-                field: (row.get(field) or "").strip()
-                for field in [
-                    "category",
-                    "flow_type",
-                    "owner",
-                    "payment_method",
-                    "confidence",
-                    "reason",
-                    "notes",
-                    "needs_review",
-                ]
-                if (row.get(field) or "").strip()
-            }
-            if meaningful:
-                _validate_correction(transaction_id, meaningful, config)
-                corrections[transaction_id] = meaningful
-    return corrections
-
-
-def _validate_correction(
-    transaction_id: str, correction: dict[str, str], config: dict[str, Any]
-) -> None:
-    if correction.get("category") and correction["category"] not in allowed_categories(
-        config
-    ):
-        raise ValueError(
-            f"Unsupported category in correction {transaction_id}: {correction['category']}"
-        )
-    if (
-        correction.get("flow_type")
-        and correction["flow_type"] not in ALLOWED_FLOW_TYPES
-    ):
-        raise ValueError(
-            f"Unsupported flow_type in correction {transaction_id}: "
-            f"{correction['flow_type']}"
-        )
-    if correction.get("owner") and correction["owner"] not in allowed_owners(config):
-        raise ValueError(
-            f"Unsupported owner in correction {transaction_id}: {correction['owner']}"
-        )
-    if correction.get("payment_method") and correction[
-        "payment_method"
-    ] not in allowed_payment_methods(config):
-        raise ValueError(
-            "Unsupported payment_method in correction "
-            f"{transaction_id}: {correction['payment_method']}"
-        )
-    if correction.get("confidence"):
-        try:
-            confidence = Decimal(correction["confidence"])
-        except InvalidOperation:
-            raise ValueError(
-                f"Unsupported confidence in correction {transaction_id}: "
-                f"{correction['confidence']}"
-            )
-        if (
-            not confidence.is_finite()
-            or confidence < Decimal("0")
-            or confidence > Decimal("1")
-        ):
-            raise ValueError(
-                f"Unsupported confidence in correction {transaction_id}: "
-                f"{correction['confidence']}"
-            )
-    if correction.get("needs_review") and correction["needs_review"].casefold() not in {
-        "true",
-        "false",
-    }:
-        raise ValueError(
-            f"Unsupported needs_review in correction {transaction_id}: "
-            f"{correction['needs_review']}"
-        )
 
 
 def _discover_input_files(input_path: Path) -> list[Path]:
@@ -3017,46 +3288,6 @@ def _relative_source(path: Path, input_root: Path) -> str:
         return str(path.relative_to(root))
     except ValueError:
         return path.name
-
-
-def _to_review_row(row: dict[str, str]) -> dict[str, str]:
-    review_row = {column: row.get(column, "") for column in REVIEW_NEEDED_COLUMNS}
-    review_row["suggested_category"] = row.get("category", "")
-    review_row["suggested_flow_type"] = row.get("flow_type", "")
-    review_row["suggested_owner"] = row.get("owner", "")
-    review_row["suggested_payment_method"] = row.get("payment_method", "")
-    review_row["category"] = ""
-    review_row["flow_type"] = ""
-    review_row["owner"] = ""
-    review_row["payment_method"] = ""
-    return review_row
-
-
-def _apply_corrections(
-    transactions: list[dict[str, str]], corrections: dict[str, dict[str, str]]
-) -> None:
-    for transaction in transactions:
-        correction = corrections.get(transaction["transaction_id"])
-        if not correction:
-            continue
-
-        for field in [
-            "category",
-            "flow_type",
-            "owner",
-            "payment_method",
-            "confidence",
-            "reason",
-            "notes",
-        ]:
-            if field in correction:
-                transaction[field] = correction[field]
-
-        if "flow_type" in correction:
-            transaction["flow_source"] = "correction"
-
-        transaction["needs_review"] = correction.get("needs_review", "false").casefold()
-        transaction["flags"] = _append_flag(transaction["flags"], "manual_correction")
 
 
 def _annotate_duplicate_suspicions(transactions: list[dict[str, str]]) -> None:

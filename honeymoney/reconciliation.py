@@ -110,6 +110,13 @@ def reconciliation_date_window(config: dict[str, Any]) -> int:
     return value
 
 
+def transaction_direction(row: dict[str, str]) -> str | None:
+    amount = _amount(row)
+    if amount is None or amount == 0:
+        return None
+    return "inflow" if amount > 0 else "outflow"
+
+
 def _reset_reconciliation(row: dict[str, str]) -> None:
     flags = row.get("flags", "")
     if AMBIGUITY_FLAG in _tokens(flags):
@@ -145,7 +152,17 @@ def _derive_flow_type(row: dict[str, str]) -> None:
         account_type = "unknown"
 
     if category == "Income":
-        flow_type = "income"
+        flags = _tokens(row.get("flags", ""))
+        explicitly_confirmed = "manual_correction" in flags or any(
+            flag.startswith("matched_rule:") for flag in flags
+        )
+        # Legacy ledgers may have an explicit Income category without provenance.
+        # Preserve that contract, while preventing Ollama alone from establishing flow.
+        flow_type = (
+            "unresolved"
+            if "ollama_categorized" in flags and not explicitly_confirmed
+            else "income"
+        )
     elif category == "Credit Card Payment":
         flow_type = "credit_card_payment"
     elif category == "Internal Transfer":

@@ -6,6 +6,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
+from honeymoney.reconciliation import transaction_direction
 from honeymoney.schema import (
     ALLOWED_FLOW_TYPES,
     allowed_categories,
@@ -45,6 +46,7 @@ def validate_rules(
         "currency",
         "original_currency",
         "posted_currency",
+        "direction",
     }
     for rule in rules:
         rule_id = str(rule.get("id", ""))
@@ -185,7 +187,7 @@ def _rule_matches(transaction: dict[str, str], rule: dict[str, Any]) -> bool:
     if conditions:
         return all(
             _field_matches(
-                transaction.get(str(condition.get("field", "")), ""),
+                _rule_field_value(transaction, str(condition.get("field", ""))),
                 condition.get("patterns", []),
                 condition.get("match_type", "keyword"),
                 bool(condition.get("case_sensitive", False)),
@@ -196,7 +198,7 @@ def _rule_matches(transaction: dict[str, str], rule: dict[str, Any]) -> bool:
     field_logic = rule.get("field_logic", "any")
     field_results = [
         _field_matches(
-            transaction.get(field, ""),
+            _rule_field_value(transaction, field),
             rule.get("patterns", []),
             rule.get("match_type", "keyword"),
             bool(rule.get("case_sensitive", False)),
@@ -206,6 +208,12 @@ def _rule_matches(transaction: dict[str, str], rule: dict[str, Any]) -> bool:
     if field_logic == "all":
         return all(field_results)
     return any(field_results)
+
+
+def _rule_field_value(transaction: dict[str, str], field: str) -> str:
+    if field != "direction":
+        return transaction.get(field, "")
+    return transaction_direction(transaction) or ""
 
 
 def _field_matches(

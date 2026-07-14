@@ -47,7 +47,9 @@ provides an explicit inspect/rewrite seam.
 ## Source map
 
 - `honeymoney/cli.py`: command routing, workspace setup, imports, profile
-  selection, normalization, ledger management, corrections, and JSON output.
+  selection, normalization, ledger management, review filtering, and JSON output.
+- `honeymoney/corrections.py`: correction validation, merge-by-transaction-ID,
+  cumulative reconciliation, and atomic correction/ledger/review/rule writes.
 - `honeymoney/rules.py`: deterministic rule validation and application.
 - `honeymoney/ollama.py`: optional local-only categorization fallback.
 - `honeymoney/schema.py`: public ledger/review columns and allowed values.
@@ -65,9 +67,21 @@ contracts. JSON commands emit one document on stdout; progress belongs on
 stderr. Exit `0` means success, `1` means strict partial success, and `2` means
 usage, configuration, or validation failure.
 
-`pending` exposes review rows. `correct` validates a complete JSON batch before
-writing and then replaces the corrections and derived ledger files through
-temporary files. Interactive `review` remains the human counterpart.
+`pending` exposes review rows. `correct` remains the structured machine/agent
+seam. `review` is the human seam: period/category/flow/direction filters feed
+interactive accounting decisions, while `--transaction ID --as DECISION` is a
+fully specified one-shot form. Both call the same correction operation, which
+validates the complete patch/rule set, merges saved corrections by transaction
+ID, reconciles the cumulative ledger, and replaces all derived files through
+temporary files. JSON review is accepted only for the non-prompting one-shot
+form.
+
+Remembered income rules are deterministic exact matches on institution,
+account identity, normalized description, and the virtual inflow direction.
+Direction is derived from `amount_hkd` and is not part of transaction identity.
+Only a human correction or deterministic rule may establish `flow_type=income`;
+refunds and owned-account flows remain distinct, and Ollama cannot set flow
+treatment.
 
 ## Privacy boundary
 

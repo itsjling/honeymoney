@@ -38,6 +38,7 @@ honeymoney pending 2026-05 --config ./money/config.json --json
 honeymoney report 2026-05 --config ./money/config.json --json
 honeymoney config --config ./money/config.json --json
 honeymoney config edit ollama --config ./money/config.json --model qwen3.5:4b --json
+honeymoney review --transaction TRANSACTION_ID --as income --config ./money/config.json --json
 ```
 
 Every response is one JSON object with `schema_version`, `command`, `status`,
@@ -70,3 +71,10 @@ Use `--file -` to read the array from stdin. The entire batch is rejected before
 any files change if an ID, field, or value is invalid. Corrections are field-wise
 patches: omitted fields keep their saved values, and omitting `needs_review`
 preserves the transaction's current review state.
+
+Human one-shot review uses the same validated correction merge and atomic
+ledger/review rewrite as `correct`. `--remember --yes` is valid for safe income
+decisions and atomically adds a local exact-match rule constrained by
+institution, account identity, normalized description, and inflow direction.
+Interactive review does not support JSON because prompting and a single JSON
+stdout document are incompatible.
