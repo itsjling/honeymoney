@@ -16,6 +16,7 @@ EXPECTED_CATEGORIZED_COLUMNS = [
     "posting_date",
     "account_id",
     "account",
+    "account_type",
     "institution",
     "country",
     "original_amount",
@@ -23,9 +24,17 @@ EXPECTED_CATEGORIZED_COLUMNS = [
     "posted_amount",
     "posted_currency",
     "amount_hkd",
+    "statement_opening_balance",
+    "statement_closing_balance",
     "merchant",
     "original_description",
     "category",
+    "flow_type",
+    "flow_source",
+    "transfer_group_id",
+    "paired_transaction_id",
+    "reconciliation_status",
+    "reconciliation_confidence",
     "owner",
     "payment_method",
     "confidence",
@@ -91,6 +100,16 @@ class CliBootstrapTest(unittest.TestCase):
             self.assertTrue((root / "output").is_dir())
             self.assertTrue((root / "profiles" / "starter_csv.json").exists())
             self.assertTrue((root / "rules.json").exists())
+            starter_rules = json.loads(
+                (root / "rules.json").read_text(encoding="utf-8")
+            )["rules"]
+            self.assertTrue(
+                any(
+                    rule.get("id") == "mox-credit-card-payment"
+                    and rule.get("flow_type") == "credit_card_payment"
+                    for rule in starter_rules
+                )
+            )
             self.assertTrue((root / "corrections.csv").exists())
             self.assertTrue((root / "profile_mappings.json").exists())
 

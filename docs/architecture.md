@@ -22,6 +22,9 @@ deterministic rules -> duplicate checks -> optional local Ollama
 validated corrections
                  |
                  v
+deterministic flow treatment + cumulative-ledger transfer reconciliation
+                 |
+                 v
 categorized.csv + review_needed.csv + import_report.json
                  |
                  v
@@ -33,6 +36,14 @@ provides statement-level replacement and reset behavior. Corrections are
 persistent overrides keyed by `transaction_id`; rules and Ollama suggestions
 run before corrections, so reviewed choices win.
 
+`category` is the merchant/budget classification. `flow_type` is the accounting
+treatment used by cash-flow totals. After rules, local Ollama, and corrections,
+the cumulative ledger is reconciled across owned accounts. Unique opposite-sign,
+equal-base-currency candidates within the configured date window receive stable
+transfer links derived from their existing transaction IDs. Ambiguous candidates
+are never auto-paired. Reports derive old ledgers in memory, and `reconcile`
+provides an explicit inspect/rewrite seam.
+
 ## Source map
 
 - `honeymoney/cli.py`: command routing, workspace setup, imports, profile
@@ -41,6 +52,8 @@ run before corrections, so reviewed choices win.
 - `honeymoney/ollama.py`: optional local-only categorization fallback.
 - `honeymoney/schema.py`: public ledger/review columns and allowed values.
 - `honeymoney/report.py`: offline HTML report generation.
+- `honeymoney/reconciliation.py`: deterministic flow derivation, transfer pairing,
+  and optional statement balance checks.
 - `honeymoney/data/profiles/`: bundled institution profiles copied by setup.
 - `tests/fixtures/`: synthetic golden inputs and expected behavior.
 

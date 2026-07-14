@@ -2,6 +2,7 @@
   "id": "hsbc_hk_bank_pdf",
   "account_id": "hsbc_hk_checking",
   "account": "HSBC HK Checking",
+  "account_type": "bank",
   "institution": "HSBC HK",
   "country": "HK",
   "account_currency": "HKD",

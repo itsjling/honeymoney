@@ -22,6 +22,7 @@
       "patterns": ["SALARY", "PAYROLL"],
       "fields": ["merchant", "original_description"],
       "category": "Income",
+      "flow_type": "income",
       "owner": "Household",
       "confidence": 0.98,
       "notes": "Income-like deposit"
@@ -34,9 +35,32 @@
       "patterns": ["CREDIT\\s+CARD\\s+PAYMENT", "CARD\\s+PAYMENT", "PAYMENT\\s+THANK\\s+YOU"],
       "fields": ["merchant", "original_description"],
       "category": "Credit Card Payment",
+      "flow_type": "credit_card_payment",
       "owner": "Household",
       "confidence": 0.95,
       "notes": "Do not count as spending"
+    },
+    {
+      "id": "mox-credit-card-payment",
+      "enabled": true,
+      "priority": 20,
+      "conditions": [
+        {
+          "field": "institution",
+          "match_type": "exact",
+          "patterns": ["Mox"]
+        },
+        {
+          "field": "original_description",
+          "match_type": "regex",
+          "patterns": ["^(?:PAYMENT TO MOX CREDIT CARD|MOX CREDIT CARD PAYMENT)$"]
+        }
+      ],
+      "category": "Credit Card Payment",
+      "flow_type": "credit_card_payment",
+      "owner": "Household",
+      "confidence": 0.99,
+      "notes": "Institution-specific payment treatment runs before Ollama"
     }
   ]
 }

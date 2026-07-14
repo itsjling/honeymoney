@@ -29,9 +29,12 @@ from honeymoney.ollama import (
     apply_ollama_fallback,
     list_ollama_models,
 )
+from honeymoney.reconciliation import reconcile_ledger, reconciliation_date_window
 from honeymoney.report import build_report_html
 from honeymoney.rules import apply_rules, load_rules
 from honeymoney.schema import (
+    ALLOWED_ACCOUNT_TYPES,
+    ALLOWED_FLOW_TYPES,
     CATEGORIZED_COLUMNS,
     REVIEW_NEEDED_COLUMNS,
     allowed_categories,
@@ -42,6 +45,7 @@ from honeymoney.schema import (
 JSON_SCHEMA_VERSION = 1
 CORRECTION_FIELDS = [
     "category",
+    "flow_type",
     "owner",
     "payment_method",
     "confidence",
@@ -153,6 +157,8 @@ def main(argv: list[str] | None = None) -> int:
         return _correct_command(argv[1:])
     if argv and argv[0] == "report":
         return _report_command(argv[1:])
+    if argv and argv[0] == "reconcile":
+        return _reconcile_command(argv[1:])
     if argv and argv[0] == "review":
         return _review_command(argv[1:])
     if argv and argv[0] == "config":
@@ -249,6 +255,7 @@ def _run_pipeline(
     _status.update("Writing output files...")
     replace_sources = source_files if args.replace or args.reset else None
     ledger_rows = _merge_into_ledger(categorized_path, transactions, replace_sources)
+    reconciliation = reconcile_ledger(ledger_rows, config)
     _write_ledger_outputs(categorized_path, ledger_rows)
     report = {
         "status": "partial_success" if import_warnings else "success",
@@ -281,6 +288,7 @@ def _run_pipeline(
         "warnings": import_warnings + ollama_warnings,
         "errors": [],
         "ollama": ollama_report,
+        "reconciliation": reconciliation,
     }
     _write_report(import_report_path, report)
     _status.clear()
@@ -316,6 +324,7 @@ Commands:
   honeymoney pending [MONTH]       List transactions that need review
   honeymoney correct --file FILE   Apply validated transaction corrections
   honeymoney report [MONTH]        Open a web report for a period
+  honeymoney reconcile             Recompute and inspect ledger transfers
   honeymoney config                View or edit config.json
   honeymoney help                  Show this help
 
@@ -454,17 +463,24 @@ def _validate_config_document(config: dict[str, Any]) -> None:
             )
 
     ollama = config.get("ollama")
-    if ollama is None:
-        return
-    if not isinstance(ollama, dict):
-        raise ValueError("Config field ollama must be a JSON object")
-    if "enabled" in ollama and not isinstance(ollama["enabled"], bool):
-        raise ValueError("Config field ollama.enabled must be a boolean")
-    for field in ("url", "model"):
-        if field in ollama and (
-            not isinstance(ollama[field], str) or not ollama[field].strip()
-        ):
-            raise ValueError(f"Config field ollama.{field} must be a non-empty string")
+    if ollama is not None:
+        if not isinstance(ollama, dict):
+            raise ValueError("Config field ollama must be a JSON object")
+        if "enabled" in ollama and not isinstance(ollama["enabled"], bool):
+            raise ValueError("Config field ollama.enabled must be a boolean")
+        for field in ("url", "model"):
+            if field in ollama and (
+                not isinstance(ollama[field], str) or not ollama[field].strip()
+            ):
+                raise ValueError(
+                    f"Config field ollama.{field} must be a non-empty string"
+                )
+
+    reconciliation = config.get("reconciliation")
+    if reconciliation is not None:
+        if not isinstance(reconciliation, dict):
+            raise ValueError("Config field reconciliation must be a JSON object")
+        reconciliation_date_window(config)
 
 
 def _write_config_document(path: Path, config: dict[str, Any]) -> None:
@@ -801,6 +817,7 @@ def _report_command(argv: list[str]) -> int:
     config = _load_config(args.config_path)
     categorized_path = Path(config["paths"]["output"])
     ledger_rows = _read_ledger(categorized_path)
+    reconcile_ledger(ledger_rows, config)
 
     start, end = _resolve_period(args.month or args.period, args.start, args.end)
     rows = _rows_in_period(ledger_rows, start, end)
@@ -823,6 +840,45 @@ def _report_command(argv: list[str]) -> int:
     print(f"Report written to {report_path} ({len(rows)} transactions)")
     if not args.no_open:
         webbrowser.open(report_path.resolve().as_uri())
+    return 0
+
+
+def _reconcile_command(argv: list[str]) -> int:
+    parser = _command_parser(
+        argv,
+        prog="honeymoney reconcile",
+        description="Recompute and inspect cash-flow and transfer reconciliation.",
+    )
+    parser.add_argument("--config", dest="config_path")
+    parser.add_argument("--output", dest="output_path")
+    parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--json", action="store_true")
+    args = parser.parse_args(argv)
+
+    config = _load_config(args.config_path)
+    categorized_path = Path(args.output_path or config["paths"]["output"])
+    rows = _read_ledger(categorized_path)
+    summary = reconcile_ledger(rows, config)
+    if not args.dry_run:
+        _write_ledger_outputs(categorized_path, rows)
+
+    artifacts = {"categorized_csv": str(categorized_path.resolve())}
+    if args.json:
+        _emit_json(
+            "reconcile",
+            "success",
+            data={**summary, "dry_run": args.dry_run},
+            artifacts=artifacts,
+        )
+        return 0
+    mode = "Inspected" if args.dry_run else "Reconciled"
+    print(
+        f"{mode} {summary['transaction_count']} transactions: "
+        f"{summary['paired_groups']} paired groups, "
+        f"{summary['ambiguous_transactions']} ambiguous, "
+        f"{summary['unmatched_transactions']} unmatched, "
+        f"{summary['unresolved_transactions']} unresolved"
+    )
     return 0
 
 
@@ -925,6 +981,7 @@ def _correct_command(argv: list[str]) -> int:
 
     corrected_ledger = [dict(row) for row in ledger_rows]
     _apply_corrections(corrected_ledger, effective_batch)
+    reconcile_ledger(corrected_ledger, config)
     review_rows = [
         _to_review_row(row)
         for row in corrected_ledger
@@ -1124,10 +1181,16 @@ def _read_ledger(categorized_path: Path) -> list[dict[str, str]]:
     if not categorized_path.exists():
         return []
     with categorized_path.open(newline="", encoding="utf-8") as fh:
-        return [
+        rows = [
             {column: row.get(column) or "" for column in CATEGORIZED_COLUMNS}
             for row in csv.DictReader(fh)
         ]
+    for row in rows:
+        if not row["account_type"]:
+            row["account_type"] = _account_type_for_payment_method(
+                row.get("payment_method", "")
+            )
+    return rows
 
 
 def _rows_in_period(
@@ -1377,6 +1440,7 @@ def _write_starter_workspace(root: Path, force: bool) -> None:
             "id": "starter_csv",
             "account_id": "starter_csv",
             "account": "Starter CSV",
+            "account_type": "bank",
             "institution": "Local",
             "country": "HK",
             "account_currency": "HKD",
@@ -1396,10 +1460,10 @@ def _write_starter_workspace(root: Path, force: bool) -> None:
     )
     starter_profile_paths = _copy_starter_profiles(profiles_dir, force)
     _write_json_file(profile_mappings_path, {"filename_patterns": []}, force)
-    _write_json_file(rules_path, {"version": 1, "rules": []}, force)
+    _write_json_file(rules_path, _starter_rules(), force)
     _write_text_file(
         corrections_path,
-        "transaction_id,category,owner,payment_method,confidence,reason,notes\n",
+        "transaction_id,category,flow_type,owner,payment_method,confidence,reason,notes\n",
         force,
     )
     _write_json_file(
@@ -1408,6 +1472,7 @@ def _write_starter_workspace(root: Path, force: bool) -> None:
             "base_currency": "HKD",
             "exchange_rates": {"HKD": 1.0, "USD": 7.8},
             "review_confidence_threshold": 0.8,
+            "reconciliation": {"date_window_days": 3},
             "profiles": [str(profile_path)]
             + [str(path) for path in starter_profile_paths],
             "profile_mappings": str(profile_mappings_path),
@@ -1440,6 +1505,38 @@ def _copy_starter_profiles(profiles_dir: Path, force: bool) -> list[Path]:
         _write_text_file(destination, resource.read_text(encoding="utf-8"), force)
         copied.append(destination)
     return copied
+
+
+def _starter_rules() -> dict[str, Any]:
+    return {
+        "version": 1,
+        "rules": [
+            {
+                "id": "mox-credit-card-payment",
+                "enabled": True,
+                "priority": 20,
+                "conditions": [
+                    {
+                        "field": "institution",
+                        "match_type": "exact",
+                        "patterns": ["Mox"],
+                    },
+                    {
+                        "field": "original_description",
+                        "match_type": "regex",
+                        "patterns": [
+                            "^(?:PAYMENT TO MOX CREDIT CARD|MOX CREDIT CARD PAYMENT)$"
+                        ],
+                    },
+                ],
+                "category": "Credit Card Payment",
+                "flow_type": "credit_card_payment",
+                "owner": "Household",
+                "confidence": 0.99,
+                "notes": "Institution-specific payment treatment runs before Ollama",
+            }
+        ],
+    }
 
 
 def _write_json_file(path: Path, data: dict[str, Any], force: bool) -> None:
@@ -1499,6 +1596,14 @@ def _validate_profile(
             f"Unsupported payment_method in profile {profile_id}: "
             f"{profile['payment_method']}"
         )
+    if (
+        profile.get("account_type")
+        and profile["account_type"] not in ALLOWED_ACCOUNT_TYPES
+    ):
+        raise ValueError(
+            f"Unsupported account_type in profile {profile_id}: "
+            f"{profile['account_type']}"
+        )
 
 
 def _load_profile_mappings(config: dict[str, Any]) -> dict[str, Any]:
@@ -1526,6 +1631,7 @@ def _load_corrections(config: dict[str, Any]) -> dict[str, dict[str, str]]:
                 field: (row.get(field) or "").strip()
                 for field in [
                     "category",
+                    "flow_type",
                     "owner",
                     "payment_method",
                     "confidence",
@@ -1549,6 +1655,14 @@ def _validate_correction(
     ):
         raise ValueError(
             f"Unsupported category in correction {transaction_id}: {correction['category']}"
+        )
+    if (
+        correction.get("flow_type")
+        and correction["flow_type"] not in ALLOWED_FLOW_TYPES
+    ):
+        raise ValueError(
+            f"Unsupported flow_type in correction {transaction_id}: "
+            f"{correction['flow_type']}"
         )
     if correction.get("owner") and correction["owner"] not in allowed_owners(config):
         raise ValueError(
@@ -2517,6 +2631,12 @@ def _normalized_row(
     amount_hkd, amount_flags, amount_reason = _amount_hkd(
         posted_amount, posted_currency, config
     )
+    statement_opening_balance = _optional_decimal_value(
+        source_row, columns.get("statement_opening_balance")
+    )
+    statement_closing_balance = _optional_decimal_value(
+        source_row, columns.get("statement_closing_balance")
+    )
 
     flags = ["uncategorized"]
     if amount_flags:
@@ -2537,6 +2657,10 @@ def _normalized_row(
         or str(profile.get("account_id", "")),
         "account": _value(source_row, columns.get("account"))
         or str(profile.get("account", "")),
+        "account_type": str(
+            profile.get("account_type")
+            or _account_type_for_payment_method(str(profile.get("payment_method", "")))
+        ),
         "institution": str(profile.get("institution", "")),
         "country": str(profile.get("country", "")),
         "original_amount": _format_decimal(original_amount),
@@ -2544,9 +2668,17 @@ def _normalized_row(
         "posted_amount": _format_decimal(posted_amount),
         "posted_currency": posted_currency,
         "amount_hkd": _format_decimal(amount_hkd) if amount_hkd is not None else "",
+        "statement_opening_balance": statement_opening_balance,
+        "statement_closing_balance": statement_closing_balance,
         "merchant": merchant,
         "original_description": description,
         "category": "Unknown",
+        "flow_type": "unresolved",
+        "flow_source": "deterministic",
+        "transfer_group_id": "",
+        "paired_transaction_id": "",
+        "reconciliation_status": "not_applicable",
+        "reconciliation_confidence": "",
         "owner": str(profile.get("owner", "Household")),
         "payment_method": str(profile.get("payment_method", "Unknown")),
         "confidence": "0.00",
@@ -2646,6 +2778,7 @@ def _default_profile() -> dict[str, Any]:
     return {
         "account_id": "",
         "account": "",
+        "account_type": "unknown",
         "institution": "",
         "country": "",
         "account_currency": "",
@@ -2654,10 +2787,29 @@ def _default_profile() -> dict[str, Any]:
     }
 
 
+def _account_type_for_payment_method(payment_method: str) -> str:
+    return {
+        "Bank Account": "bank",
+        "Credit Card": "credit_card",
+        "Brokerage": "investment",
+    }.get(payment_method, "unknown")
+
+
 def _value(row: dict[str, str], column: str | None) -> str:
     if column is None or column == "":
         return ""
     return _clean_text(row.get(str(column)))
+
+
+def _optional_decimal_value(row: dict[str, str], column: str | None) -> str:
+    value = _value(row, column)
+    if not value:
+        return ""
+    try:
+        parsed = Decimal(value.replace(",", ""))
+    except InvalidOperation:
+        return ""
+    return _format_decimal(parsed) if parsed.is_finite() else ""
 
 
 def _clean_text(value: Any) -> str:
@@ -2803,9 +2955,11 @@ def _relative_source(path: Path, input_root: Path) -> str:
 def _to_review_row(row: dict[str, str]) -> dict[str, str]:
     review_row = {column: row.get(column, "") for column in REVIEW_NEEDED_COLUMNS}
     review_row["suggested_category"] = row.get("category", "")
+    review_row["suggested_flow_type"] = row.get("flow_type", "")
     review_row["suggested_owner"] = row.get("owner", "")
     review_row["suggested_payment_method"] = row.get("payment_method", "")
     review_row["category"] = ""
+    review_row["flow_type"] = ""
     review_row["owner"] = ""
     review_row["payment_method"] = ""
     return review_row
@@ -2821,6 +2975,7 @@ def _apply_corrections(
 
         for field in [
             "category",
+            "flow_type",
             "owner",
             "payment_method",
             "confidence",
@@ -2829,6 +2984,9 @@ def _apply_corrections(
         ]:
             if field in correction:
                 transaction[field] = correction[field]
+
+        if "flow_type" in correction:
+            transaction["flow_source"] = "correction"
 
         transaction["needs_review"] = correction.get("needs_review", "false").casefold()
         transaction["flags"] = _append_flag(transaction["flags"], "manual_correction")

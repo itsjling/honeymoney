@@ -115,7 +115,7 @@ _PAGE_TEMPLATE = """<!doctype html>
 
   .stats {
     display: grid;
-    grid-template-columns: repeat(4, 1fr);
+    grid-template-columns: repeat(3, 1fr);
     gap: 0;
     border: 1px solid var(--line);
     border-radius: 14px;
@@ -128,7 +128,8 @@ _PAGE_TEMPLATE = """<!doctype html>
     padding: 1.1rem 1.25rem 1.2rem;
     border-left: 1px solid var(--line);
   }
-  .stat:first-child { border-left: 0; }
+  .stat:first-child, .stat:nth-child(4) { border-left: 0; }
+  .stat:nth-child(n+4) { border-top: 1px solid var(--line); }
   .stat .label {
     font-size: 0.72rem;
     letter-spacing: 0.06em;
@@ -286,10 +287,12 @@ _PAGE_TEMPLATE = """<!doctype html>
   </header>
 
   <section class="stats rise d1" aria-label="Summary">
-    <div class="stat"><div class="label">Spending</div><div class="value neg num" id="tile-spending"></div></div>
-    <div class="stat"><div class="label">Income</div><div class="value pos num" id="tile-income"></div></div>
-    <div class="stat"><div class="label">Net</div><div class="value num" id="tile-net"></div></div>
-    <div class="stat"><div class="label">Uncategorized</div><div class="value num" id="tile-uncategorized"></div></div>
+    <div class="stat"><div class="label">Spending, net of refunds</div><div class="value neg num" id="tile-spending">__SPENDING__</div></div>
+    <div class="stat"><div class="label">Confirmed income</div><div class="value pos num" id="tile-income">__INCOME__</div></div>
+    <div class="stat"><div class="label">Confirmed net</div><div class="value num" id="tile-net">__NET__</div></div>
+    <div class="stat"><div class="label">Unresolved inflow</div><div class="value pos num" id="tile-unresolved-inflow">__UNRESOLVED_INFLOW__</div></div>
+    <div class="stat"><div class="label">Unresolved outflow</div><div class="value neg num" id="tile-unresolved-outflow">__UNRESOLVED_OUTFLOW__</div></div>
+    <div class="stat"><div class="label">Uncategorized</div><div class="value num" id="tile-uncategorized">__UNCATEGORIZED__</div></div>
   </section>
 
   <section class="panel rise d2">
@@ -298,7 +301,7 @@ _PAGE_TEMPLATE = """<!doctype html>
       <label class="switch">
         <input type="checkbox" id="exclude-transfers" checked>
         <span class="track"></span>
-        <span>Exclude card payments and transfers</span>
+        <span>Show confirmed cash flow only</span>
       </label>
     </div>
     <div class="panel-body">
@@ -334,7 +337,7 @@ _PAGE_TEMPLATE = """<!doctype html>
 <script>
 (function () {
   var rows = JSON.parse(document.getElementById("data").textContent);
-  var TRANSFER = { "Credit Card Payment": true, "Internal Transfer": true };
+  var CONFIRMED = { "income": true, "expense": true, "refund": true };
   var PALETTE = [
     "#4c9a8f", "#d98b3f", "#b7554b", "#7c9a5a", "#5a7fa6", "#9a6f9c",
     "#c9a24b", "#8a8f4f", "#b06a8a", "#5f8a6b", "#a1725a", "#6b7f8f"
@@ -378,28 +381,18 @@ _PAGE_TEMPLATE = """<!doctype html>
   function colorFor(category) { return COLOR[category] || "var(--ink-faint)"; }
 
   function renderTiles() {
-    var spending = 0, income = 0, uncategorized = 0;
-    rows.forEach(function (row) {
-      if (row.category === "" || row.category === "Unknown") { uncategorized += 1; }
-      if (row.amount === null || TRANSFER[row.category]) { return; }
-      if (row.amount < 0) { spending += row.amount; } else { income += row.amount; }
-    });
     document.getElementById("txn-count").textContent = rows.length;
-    document.getElementById("tile-spending").textContent = fmt(spending);
-    document.getElementById("tile-income").textContent = fmt(income);
-    var net = spending + income;
     var netEl = document.getElementById("tile-net");
-    netEl.textContent = fmt(net);
+    var net = Number(netEl.textContent.replace(/,/g, ""));
     netEl.classList.toggle("pos", net >= 0);
     netEl.classList.toggle("neg", net < 0);
-    document.getElementById("tile-uncategorized").textContent = uncategorized;
   }
 
   function chartData(excludeTransfers) {
     var totals = {}, counts = {}, chartedCount = 0;
     rows.forEach(function (row) {
       if (row.amount === null) { return; }
-      if (excludeTransfers && TRANSFER[row.category]) { return; }
+      if (excludeTransfers && !CONFIRMED[row.flow_type]) { return; }
       var category = row.category || "Unknown";
       totals[category] = (totals[category] || 0) + row.amount;
       counts[category] = (counts[category] || 0) + 1;
@@ -544,7 +537,7 @@ _PAGE_TEMPLATE = """<!doctype html>
         var nm = document.createElement("span");
         nm.className = "name";
         nm.textContent = row.category;
-        nm.title = row.category;
+        nm.title = row.category + " · " + row.flow_type;
         wrap.appendChild(sw);
         wrap.appendChild(nm);
         if (row.needs_review) {
@@ -587,9 +580,21 @@ def build_report_html(rows: list[dict[str, str]], period_label: str) -> str:
     data = json.dumps(
         [_report_row(row) for row in rows], ensure_ascii=True, sort_keys=True
     ).replace("</", "<\\/")
-    return _PAGE_TEMPLATE.replace("__PERIOD__", html.escape(period_label)).replace(
-        "__DATA__", data
-    )
+    summary = _flow_summary(rows)
+    replacements = {
+        "__PERIOD__": html.escape(period_label),
+        "__DATA__": data,
+        "__SPENDING__": _format_amount(summary["spending"]),
+        "__INCOME__": _format_amount(summary["income"]),
+        "__NET__": _format_amount(summary["net"]),
+        "__UNRESOLVED_INFLOW__": _format_amount(summary["unresolved_inflow"]),
+        "__UNRESOLVED_OUTFLOW__": _format_amount(summary["unresolved_outflow"]),
+        "__UNCATEGORIZED__": str(summary["uncategorized"]),
+    }
+    document = _PAGE_TEMPLATE
+    for placeholder, value in replacements.items():
+        document = document.replace(placeholder, value)
+    return document
 
 
 def _report_row(row: dict[str, str]) -> dict[str, object]:
@@ -597,6 +602,7 @@ def _report_row(row: dict[str, str]) -> dict[str, object]:
         "date": row.get("date", ""),
         "merchant": row.get("merchant", ""),
         "category": row.get("category", ""),
+        "flow_type": row.get("flow_type", "unresolved"),
         "amount": _amount_value(row.get("amount_hkd", "")),
         "account": row.get("account", ""),
         "owner": row.get("owner", ""),
@@ -609,3 +615,41 @@ def _amount_value(value: str) -> float | None:
         return float(Decimal(value))
     except (InvalidOperation, ValueError):
         return None
+
+
+def _flow_summary(rows: list[dict[str, str]]) -> dict[str, Decimal | int]:
+    spending = Decimal("0")
+    income = Decimal("0")
+    unresolved_inflow = Decimal("0")
+    unresolved_outflow = Decimal("0")
+    uncategorized = 0
+    for row in rows:
+        if row.get("category", "") in {"", "Unknown"}:
+            uncategorized += 1
+        try:
+            amount = Decimal(row.get("amount_hkd", ""))
+        except (InvalidOperation, ValueError):
+            continue
+        if not amount.is_finite():
+            continue
+        flow_type = row.get("flow_type", "unresolved")
+        if flow_type in {"expense", "refund"}:
+            spending += amount
+        elif flow_type == "income":
+            income += amount
+        elif flow_type == "unresolved" and amount > 0:
+            unresolved_inflow += amount
+        elif flow_type == "unresolved" and amount < 0:
+            unresolved_outflow += amount
+    return {
+        "spending": spending,
+        "income": income,
+        "net": spending + income,
+        "unresolved_inflow": unresolved_inflow,
+        "unresolved_outflow": unresolved_outflow,
+        "uncategorized": uncategorized,
+    }
+
+
+def _format_amount(value: Decimal | int) -> str:
+    return f"{Decimal(value):,.2f}"

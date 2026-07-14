@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from honeymoney.schema import (
+    ALLOWED_FLOW_TYPES,
     allowed_categories,
     allowed_owners,
     allowed_payment_methods,
@@ -38,6 +39,7 @@ def validate_rules(
         "institution",
         "account",
         "account_id",
+        "account_type",
         "payment_method",
         "country",
         "currency",
@@ -65,6 +67,10 @@ def validate_rules(
             raise ValueError(
                 f"Unsupported payment_method in rule {rule_id}: {rule['payment_method']}"
             )
+        if rule.get("flow_type") and rule["flow_type"] not in ALLOWED_FLOW_TYPES:
+            raise ValueError(
+                f"Unsupported flow_type in rule {rule_id}: {rule['flow_type']}"
+            )
         if "confidence" in rule:
             try:
                 confidence = Decimal(str(rule["confidence"]))
@@ -89,6 +95,30 @@ def validate_rules(
             raise ValueError(
                 f"Unsupported fields in rule {rule_id}: {', '.join(sorted(unknown_fields))}"
             )
+        conditions = rule.get("conditions", [])
+        if not isinstance(conditions, list):
+            raise ValueError(f"Conditions in rule {rule_id} must be a list")
+        for condition in conditions:
+            if not isinstance(condition, dict):
+                raise ValueError(f"Conditions in rule {rule_id} must be objects")
+            field = condition.get("field")
+            if field not in allowed_fields:
+                raise ValueError(
+                    f"Unsupported condition field in rule {rule_id}: {field}"
+                )
+            match_type = condition.get("match_type", "keyword")
+            if match_type not in {"exact", "keyword", "regex"}:
+                raise ValueError(
+                    f"Unsupported condition match_type in rule {rule_id}: {match_type}"
+                )
+            if match_type == "regex":
+                for pattern in condition.get("patterns", []):
+                    try:
+                        re.compile(str(pattern))
+                    except re.error as error:
+                        raise ValueError(
+                            f"Invalid regex in rule {rule_id}: {pattern}"
+                        ) from error
         if rule.get("match_type") == "regex":
             for pattern in rule.get("patterns", []):
                 try:
@@ -119,14 +149,27 @@ def apply_rules(
                 continue
 
             confidence = Decimal(str(rule.get("confidence", 0.9)))
+            category_changed = "category" in rule
             transaction["category"] = str(rule.get("category", transaction["category"]))
             transaction["owner"] = str(rule.get("owner", transaction["owner"]))
             if "payment_method" in rule:
                 transaction["payment_method"] = str(rule["payment_method"])
+            if "flow_type" in rule:
+                transaction["flow_type"] = str(rule["flow_type"])
+                transaction["flow_source"] = "rule"
+                transaction["flags"] = _append_flag(
+                    transaction["flags"], f"matched_flow_rule:{rule.get('id', '')}"
+                )
             transaction["confidence"] = _format_decimal(confidence)
-            transaction["needs_review"] = "false" if confidence >= threshold else "true"
+            if category_changed:
+                transaction["needs_review"] = (
+                    "false" if confidence >= threshold else "true"
+                )
             transaction["reason"] = f"Matched rule {rule.get('id', '')}".strip()
-            transaction["flags"] = _remove_flag(transaction["flags"], "uncategorized")
+            if category_changed:
+                transaction["flags"] = _remove_flag(
+                    transaction["flags"], "uncategorized"
+                )
             transaction["flags"] = _append_flag(
                 transaction["flags"], f"matched_rule:{rule.get('id', '')}"
             )
@@ -138,6 +181,17 @@ def apply_rules(
 
 
 def _rule_matches(transaction: dict[str, str], rule: dict[str, Any]) -> bool:
+    conditions = rule.get("conditions", [])
+    if conditions:
+        return all(
+            _field_matches(
+                transaction.get(str(condition.get("field", "")), ""),
+                condition.get("patterns", []),
+                condition.get("match_type", "keyword"),
+                bool(condition.get("case_sensitive", False)),
+            )
+            for condition in conditions
+        )
     fields = rule.get("fields", ["merchant", "original_description"])
     field_logic = rule.get("field_logic", "any")
     field_results = [

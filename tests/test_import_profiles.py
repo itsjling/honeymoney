@@ -100,5 +100,21 @@ class MoxCreditCardPdfProfileTest(unittest.TestCase):
         )
 
 
+class AccountSemanticsTest(unittest.TestCase):
+    def test_bundled_bank_and_card_profiles_declare_account_types(self) -> None:
+        expected = {
+            "hsbc_one_pdf.json": "bank",
+            "hsbc_hk_credit_card_pdf.json": "credit_card",
+            "mox_bank_pdf.json": "bank",
+            "mox_credit_card.json": "credit_card",
+            "mox_credit_card_pdf.json": "credit_card",
+        }
+        for profile_name, account_type in expected.items():
+            with self.subTest(profile=profile_name):
+                self.assertEqual(
+                    load_profile(profile_name)["account_type"], account_type
+                )
+
+
 if __name__ == "__main__":
     unittest.main()

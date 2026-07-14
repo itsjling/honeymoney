@@ -77,6 +77,11 @@ Amount_HKD
 Merchant
 Original_Description
 Category
+Flow_Type
+Account_Type
+Transfer_Group_ID
+Paired_Transaction_ID
+Reconciliation_Status
 Owner
 Payment_Method
 Confidence
@@ -275,6 +280,12 @@ Example `rules.json`:
 
 ### 9. Special Handling
 
+`Category` describes merchant or budget purpose. `Flow_Type` independently
+describes accounting treatment using `income`, `expense`, `refund`,
+`internal_transfer`, `credit_card_payment`, `investment_transfer`, or
+`unresolved`. Only confirmed income and expenses net of refunds enter headline
+cash flow; unresolved inflows/outflows are shown separately.
+
 #### Credit Card Payments
 
 - Do not count credit card payments as expenses.
@@ -402,6 +413,8 @@ Use a simple config file for:
 - batch size
 - paths for input/output/rules
 - PDF parser options
+- reconciliation date window
+- profile account type (`bank`, `credit_card`, `investment`, or `unknown`)
 
 Example `config.json`:
 

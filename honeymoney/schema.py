@@ -7,6 +7,7 @@ CATEGORIZED_COLUMNS = [
     "posting_date",
     "account_id",
     "account",
+    "account_type",
     "institution",
     "country",
     "original_amount",
@@ -14,9 +15,17 @@ CATEGORIZED_COLUMNS = [
     "posted_amount",
     "posted_currency",
     "amount_hkd",
+    "statement_opening_balance",
+    "statement_closing_balance",
     "merchant",
     "original_description",
     "category",
+    "flow_type",
+    "flow_source",
+    "transfer_group_id",
+    "paired_transaction_id",
+    "reconciliation_status",
+    "reconciliation_confidence",
     "owner",
     "payment_method",
     "confidence",
@@ -37,6 +46,7 @@ REVIEW_NEEDED_COLUMNS = [
     "posting_date",
     "account_id",
     "account",
+    "account_type",
     "institution",
     "country",
     "original_amount",
@@ -44,12 +54,19 @@ REVIEW_NEEDED_COLUMNS = [
     "posted_amount",
     "posted_currency",
     "amount_hkd",
+    "statement_opening_balance",
+    "statement_closing_balance",
     "merchant",
     "original_description",
     "suggested_category",
+    "suggested_flow_type",
+    "transfer_group_id",
+    "paired_transaction_id",
+    "reconciliation_status",
     "suggested_owner",
     "suggested_payment_method",
     "category",
+    "flow_type",
     "owner",
     "payment_method",
     "confidence",
@@ -100,6 +117,20 @@ ALLOWED_PAYMENT_METHODS = {
     "Cash",
     "Brokerage",
     "Unknown",
+}
+
+
+ALLOWED_ACCOUNT_TYPES = {"bank", "credit_card", "investment", "unknown"}
+
+
+ALLOWED_FLOW_TYPES = {
+    "income",
+    "expense",
+    "refund",
+    "internal_transfer",
+    "credit_card_payment",
+    "investment_transfer",
+    "unresolved",
 }
 
 

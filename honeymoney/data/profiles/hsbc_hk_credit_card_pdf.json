@@ -2,6 +2,7 @@
   "id": "hsbc_hk_credit_card_pdf",
   "account_id": "hsbc_hk_credit_card",
   "account": "HSBC HK Credit Card",
+  "account_type": "credit_card",
   "institution": "HSBC HK",
   "country": "HK",
   "account_currency": "HKD",

@@ -150,6 +150,68 @@ class RulesTest(unittest.TestCase):
             transactions[0]["notes"], "Imported from PDF; Hong Kong supermarket"
         )
 
+    def test_rule_can_set_high_confidence_flow_type_using_account_fields(self) -> None:
+        transactions = [
+            {
+                "merchant": "AUTOMATIC PAYMENT",
+                "original_description": "AUTOMATIC PAYMENT",
+                "institution": "Example Bank",
+                "account_id": "example_card",
+                "account_type": "credit_card",
+                "category": "Unknown",
+                "flow_type": "unresolved",
+                "flow_source": "deterministic",
+                "owner": "Household",
+                "payment_method": "Credit Card",
+                "confidence": "0.00",
+                "needs_review": "true",
+                "reason": "",
+                "flags": "uncategorized",
+                "notes": "",
+            }
+        ]
+        rules = [
+            {
+                "id": "example-card-payment",
+                "conditions": [
+                    {
+                        "field": "institution",
+                        "match_type": "exact",
+                        "patterns": ["Example Bank"],
+                    },
+                    {
+                        "field": "original_description",
+                        "match_type": "regex",
+                        "patterns": ["^AUTOMATIC\\s+PAYMENT$"],
+                    },
+                ],
+                "flow_type": "credit_card_payment",
+                "confidence": 0.99,
+            }
+        ]
+
+        validate_rules(rules)
+        apply_rules(transactions, rules, {"review_confidence_threshold": 0.8})
+
+        self.assertEqual(transactions[0]["category"], "Unknown")
+        self.assertEqual(transactions[0]["flow_type"], "credit_card_payment")
+        self.assertEqual(transactions[0]["flow_source"], "rule")
+        self.assertIn(
+            "matched_flow_rule:example-card-payment", transactions[0]["flags"]
+        )
+
+    def test_invalid_rule_flow_type_fails_validation(self) -> None:
+        with self.assertRaisesRegex(ValueError, "Unsupported flow_type"):
+            validate_rules(
+                [
+                    {
+                        "id": "bad-flow",
+                        "patterns": ["PAYMENT"],
+                        "flow_type": "money-ish",
+                    }
+                ]
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -2,6 +2,7 @@
   "id": "mox_credit_card_pdf",
   "account_id": "mox_credit_card",
   "account": "Mox Credit Card",
+  "account_type": "credit_card",
   "institution": "Mox",
   "country": "HK",
   "account_currency": "HKD",

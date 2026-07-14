@@ -2,6 +2,7 @@
   "id": "hsbc_one_pdf",
   "account_id": "hsbc_one_hkd",
   "account": "HSBC One HKD",
+  "account_type": "bank",
   "institution": "HSBC HK",
   "country": "HK",
   "account_currency": "HKD",

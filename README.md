@@ -155,7 +155,15 @@ honeymoney report
 honeymoney report june --no-open
 ```
 
-Writes a self-contained `output/report.html` with transactions for the selected period and a pie chart of the category distribution with per-category sums, then opens it in your browser. Accepts the same period arguments and default as `status` (default: the current calendar month); `--no-open` writes the file without opening it. The page loads nothing from the network.
+Writes a self-contained `output/report.html` with transactions for the selected period and a pie chart of the category distribution with per-category sums, then opens it in your browser. Headline income includes only confirmed `income`; spending includes confirmed `expense` net of `refund`. Transfers, card payments, and investment movements are excluded, while unresolved inflows and outflows have separate visible tiles. Accepts the same period arguments and default as `status` (default: the current calendar month); `--no-open` writes the file without opening it. The page loads nothing from the network.
+
+```bash
+honeymoney reconcile
+honeymoney reconcile --dry-run
+honeymoney reconcile --json
+```
+
+Recomputes cash-flow treatment and transfer pairing across the entire cumulative ledger. Matching uses opposite signs, equal absolute base-currency amounts, distinct owned `account_id` values, account types, and `reconciliation.date_window_days` (default `3`). Only a unique mutual best match is paired; ambiguous candidates remain reviewable. `--dry-run` inspects without rewriting the ledger.
 
 Useful run options:
 
@@ -170,11 +178,11 @@ honeymoney run --input ./samples --output ./output/categorized.csv
 
 Each run writes three files next to the configured categorized CSV:
 
-- `categorized.csv`: normalized transactions with categories, owners, payment methods, confidence, flags, and source traceability. This file is a cumulative ledger: each import merges into it by `transaction_id`, so `status` and `report` see everything imported so far.
+- `categorized.csv`: normalized transactions with categories, accounting flow treatment, transfer links, owners, payment methods, confidence, flags, and source traceability. This file is a cumulative ledger: each import merges into it by `transaction_id`, so reconciliation, `status`, and `report` see everything imported so far. Older ledgers without the newer columns are hydrated and safely rewritten; transaction IDs do not depend on the new fields.
 - `review_needed.csv`: only ledger rows that need review, with editable correction columns.
 - `import_report.json`: processed files, selected profiles, warnings, duplicate counts, review counts, ledger totals, and Ollama status.
 
-Spending summaries should use `amount_hkd` and usually exclude `Credit Card Payment` and `Internal Transfer`.
+`category` describes merchant or budget purpose. `flow_type` separately controls accounting treatment and is one of `income`, `expense`, `refund`, `internal_transfer`, `credit_card_payment`, `investment_transfer`, or `unresolved`. Reports never infer income from a positive sign alone.
 
 Cashflow signs use the household perspective:
 
@@ -192,6 +200,10 @@ Common edits:
 - Feed reviewed rows back through `corrections.csv`.
 - Set `ollama.enabled` to `true` only when you want local Ollama fallback.
 - Add filename mappings in `profile_mappings.json` when automatic detection is ambiguous.
+
+Profiles may set `account_type` to `bank`, `credit_card`, `investment`, or `unknown`; omission remains compatible and common payment methods are inferred. CSV/PDF column mappings may optionally expose `statement_opening_balance` and `statement_closing_balance`. Reconciliation reports an explicit `unavailable` balance status when the source does not supply both rather than inventing balances.
+
+Rules may assign `flow_type` as well as `category`. For institution-specific treatment, use `conditions` to combine exact, keyword, or regex matches on fields such as `institution`, `account_id`, `account_type`, and `original_description`. These deterministic rules run before local Ollama; Ollama can suggest merchant categories but does not set or replace `flow_type`.
 
 ### Ollama fallback
 
@@ -227,7 +239,7 @@ Current example profiles cover HSBC Hong Kong and Mox bank/card statement shapes
 1. Run Honeymoney.
 2. Run `honeymoney review` to categorize transactions needing review interactively.
 3. For manual review, open `review_needed.csv`.
-4. Fill correction fields such as `category`, `owner`, `payment_method`, `confidence`, `reason`, or `notes`.
+4. Fill correction fields such as `category`, `flow_type`, `owner`, `payment_method`, `confidence`, `reason`, or `notes`.
 5. Save those rows as `corrections.csv` or point config at the edited file.
 6. Run Honeymoney again.
 

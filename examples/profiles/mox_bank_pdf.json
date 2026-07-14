@@ -2,6 +2,7 @@
   "id": "mox_bank_pdf",
   "account_id": "mox_bank_main",
   "account": "Mox Main",
+  "account_type": "bank",
   "institution": "Mox",
   "country": "HK",
   "account_currency": "HKD",
