@@ -99,9 +99,13 @@ Import refuses to process a file whose `source_file` is already present in `cate
 
 ```bash
 honeymoney review
+honeymoney review --category Other
+honeymoney review --category Other --category Shopping
 ```
 
-Interactively categorizes transactions already marked as needing review in `categorized.csv`. It uses the same category prompt as import, saves your choices to `corrections.csv`, updates `categorized.csv`, and rewrites `review_needed.csv`.
+With no filter, interactively categorizes only transactions already marked as needing review in `categorized.csv`. Pass `--category CATEGORY` to revisit all ledger rows currently in that category even when they are not marked for review. Repeat the option to review the union of multiple categories. Category names must match the configured category vocabulary exactly.
+
+Review uses the same category prompt as import, saves choices to `corrections.csv`, updates `categorized.csv`, and rewrites `review_needed.csv`. Press Enter to leave a row unchanged or `q` to leave all remaining rows unchanged. An empty category selection exits successfully without changing files.
 
 ```bash
 honeymoney config
@@ -237,7 +241,7 @@ Current example profiles cover HSBC Hong Kong and Mox bank/card statement shapes
 ## Review Loop
 
 1. Run Honeymoney.
-2. Run `honeymoney review` to categorize transactions needing review interactively.
+2. Run `honeymoney review` to categorize transactions needing review interactively, or `honeymoney review --category Other` to revisit an existing category.
 3. For manual review, open `review_needed.csv`.
 4. Fill correction fields such as `category`, `flow_type`, `owner`, `payment_method`, `confidence`, `reason`, or `notes`.
 5. Save those rows as `corrections.csv` or point config at the edited file.

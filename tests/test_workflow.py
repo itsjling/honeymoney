@@ -62,6 +62,16 @@ class WorkflowTest(unittest.TestCase):
             encoding="utf-8",
         )
 
+    def _review_artifact_bytes(self, root: Path) -> dict[str, bytes]:
+        return {
+            relative_path: (root / relative_path).read_bytes()
+            for relative_path in [
+                "output/categorized.csv",
+                "output/review_needed.csv",
+                "corrections.csv",
+            ]
+        }
+
     def test_import_prompts_to_categorize_and_saves_correction(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = self._setup_workspace(tmp)
@@ -293,6 +303,343 @@ class WorkflowTest(unittest.TestCase):
             self.assertIn(
                 "Review complete: 0 updated, 0 still need review", review_result.stdout
             )
+
+    def test_review_category_revisits_matching_rows_without_adding_pending_rows(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._setup_workspace(tmp)
+            statement = root / "may.csv"
+            self._write_statement(
+                statement,
+                [
+                    "2026-05-04,GENERAL STORE,-120.50,HKD",
+                    "2026-05-05,UNSORTED PURCHASE,-8.00,HKD",
+                ],
+            )
+            import_result = self._run_cli(
+                ["import", str(statement)],
+                cwd=root,
+                input_text=f"{_category_number('Other')}\n\n",
+            )
+            self.assertEqual(import_result.returncode, 0, import_result.stderr)
+
+            review_result = self._run_cli(
+                ["review", "--category", "Other"],
+                cwd=root,
+                input_text=f"{_category_number('Groceries')}\n",
+            )
+
+            self.assertEqual(review_result.returncode, 0, review_result.stderr)
+            self.assertIn("1 records in selected categories", review_result.stdout)
+            self.assertIn("GENERAL STORE", review_result.stdout)
+            self.assertNotIn("UNSORTED PURCHASE", review_result.stdout)
+            self.assertIn(
+                "Review complete: 1 updated from selected categories, "
+                "1 still need review",
+                review_result.stdout,
+            )
+            with (root / "output" / "categorized.csv").open(
+                newline="", encoding="utf-8"
+            ) as fh:
+                rows = {row["merchant"]: row for row in csv.DictReader(fh)}
+            self.assertEqual(rows["GENERAL STORE"]["category"], "Groceries")
+            self.assertEqual(rows["GENERAL STORE"]["needs_review"], "false")
+            self.assertEqual(rows["GENERAL STORE"]["flow_type"], "expense")
+            self.assertEqual(rows["GENERAL STORE"]["flow_source"], "deterministic")
+            self.assertEqual(rows["UNSORTED PURCHASE"]["category"], "Unknown")
+            self.assertEqual(rows["UNSORTED PURCHASE"]["needs_review"], "true")
+
+            with (root / "corrections.csv").open(newline="", encoding="utf-8") as fh:
+                corrections = list(csv.DictReader(fh))
+            self.assertEqual(
+                corrections[-1]["transaction_id"],
+                rows["GENERAL STORE"]["transaction_id"],
+            )
+            self.assertEqual(corrections[-1]["category"], "Groceries")
+
+    def test_bare_review_ignores_rows_that_do_not_need_review(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._setup_workspace(tmp)
+            statement = root / "may.csv"
+            self._write_statement(
+                statement,
+                [
+                    "2026-05-04,REVIEWED PURCHASE,-120.50,HKD",
+                    "2026-05-05,PENDING PURCHASE,-8.00,HKD",
+                ],
+            )
+            import_result = self._run_cli(
+                ["import", str(statement)],
+                cwd=root,
+                input_text=f"{_category_number('Other')}\n\n",
+            )
+            self.assertEqual(import_result.returncode, 0, import_result.stderr)
+
+            review_result = self._run_cli(
+                ["review"],
+                cwd=root,
+                input_text=f"{_category_number('Groceries')}\n",
+            )
+
+            self.assertEqual(review_result.returncode, 0, review_result.stderr)
+            self.assertIn("1 records need review", review_result.stdout)
+            self.assertIn("PENDING PURCHASE", review_result.stdout)
+            self.assertNotIn("REVIEWED PURCHASE", review_result.stdout)
+            with (root / "output" / "categorized.csv").open(
+                newline="", encoding="utf-8"
+            ) as fh:
+                rows = {row["merchant"]: row for row in csv.DictReader(fh)}
+            self.assertEqual(rows["REVIEWED PURCHASE"]["category"], "Other")
+            self.assertEqual(rows["PENDING PURCHASE"]["category"], "Groceries")
+
+    def test_repeated_review_categories_select_the_union_without_duplicates(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._setup_workspace(tmp)
+            statement = root / "may.csv"
+            merchants = ["FIRST PURCHASE", "SECOND PURCHASE", "THIRD PURCHASE"]
+            self._write_statement(
+                statement,
+                [
+                    f"2026-05-04,{merchants[0]},-10.00,HKD",
+                    f"2026-05-05,{merchants[1]},-20.00,HKD",
+                    f"2026-05-06,{merchants[2]},-30.00,HKD",
+                ],
+            )
+            import_result = self._run_cli(
+                ["import", str(statement)],
+                cwd=root,
+                input_text=(
+                    f"{_category_number('Other')}\n"
+                    f"{_category_number('Groceries')}\n"
+                    f"{_category_number('Other')}\n"
+                ),
+            )
+            self.assertEqual(import_result.returncode, 0, import_result.stderr)
+
+            review_result = self._run_cli(
+                [
+                    "review",
+                    "--category",
+                    "Other",
+                    "--category",
+                    "Other",
+                    "--category",
+                    "Groceries",
+                ],
+                cwd=root,
+                input_text="\n\n\n",
+            )
+
+            self.assertEqual(review_result.returncode, 0, review_result.stderr)
+            self.assertIn("3 records in selected categories", review_result.stdout)
+            self.assertIn("[3/3]", review_result.stdout)
+            for merchant in merchants:
+                self.assertEqual(review_result.stdout.count(merchant), 1)
+
+    def test_filtered_review_skip_and_quit_do_not_mutate_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._setup_workspace(tmp)
+            statement = root / "may.csv"
+            self._write_statement(
+                statement,
+                [
+                    "2026-05-04,FIRST OTHER,-10.00,HKD",
+                    "2026-05-05,SECOND OTHER,-20.00,HKD",
+                    "2026-05-06,THIRD OTHER,-30.00,HKD",
+                ],
+            )
+            import_result = self._run_cli(
+                ["import", str(statement)],
+                cwd=root,
+                input_text=(f"{_category_number('Other')}\n" * 3),
+            )
+            self.assertEqual(import_result.returncode, 0, import_result.stderr)
+            before = self._review_artifact_bytes(root)
+
+            review_result = self._run_cli(
+                ["review", "--category", "Other"], cwd=root, input_text="\nq\n"
+            )
+
+            self.assertEqual(review_result.returncode, 0, review_result.stderr)
+            self.assertIn("FIRST OTHER", review_result.stdout)
+            self.assertIn("SECOND OTHER", review_result.stdout)
+            self.assertNotIn("THIRD OTHER", review_result.stdout)
+            self.assertEqual(self._review_artifact_bytes(root), before)
+
+    def test_filtered_review_choice_then_quit_updates_only_affected_pair_fields(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._setup_workspace(tmp)
+            statement = root / "may.csv"
+            self._write_statement(
+                statement,
+                [
+                    "2026-05-04,INCOMING TRANSFER,100.00,HKD",
+                    "2026-05-04,OUTGOING TRANSFER,-100.00,HKD",
+                    "2026-05-05,UNRELATED PURCHASE,-30.00,HKD",
+                ],
+            )
+            import_result = self._run_cli(
+                ["import", str(statement)],
+                cwd=root,
+                input_text=(
+                    f"{_category_number('Other')}\n"
+                    f"{_category_number('Groceries')}\n"
+                    f"{_category_number('Shopping')}\n"
+                ),
+            )
+            self.assertEqual(import_result.returncode, 0, import_result.stderr)
+            ledger_path = root / "output" / "categorized.csv"
+            with ledger_path.open(newline="", encoding="utf-8") as fh:
+                rows = list(csv.DictReader(fh))
+                fieldnames = list(rows[0])
+            rows[1]["account_id"] = "secondary_bank"
+            rows[1]["account"] = "Secondary Bank"
+            with ledger_path.open("w", newline="", encoding="utf-8") as fh:
+                writer = csv.DictWriter(fh, fieldnames=fieldnames)
+                writer.writeheader()
+                writer.writerows(rows)
+            reconcile_result = self._run_cli(["reconcile"], cwd=root)
+            self.assertEqual(reconcile_result.returncode, 0, reconcile_result.stderr)
+            with ledger_path.open(newline="", encoding="utf-8") as fh:
+                rows = list(csv.DictReader(fh))
+                fieldnames = list(rows[0])
+            rows[2]["flow_type"] = "unresolved"
+            rows[2]["flow_source"] = ""
+            with ledger_path.open("w", newline="", encoding="utf-8") as fh:
+                writer = csv.DictWriter(fh, fieldnames=fieldnames)
+                writer.writeheader()
+                writer.writerows(rows)
+            before = {row["merchant"]: row for row in rows}
+            self.assertEqual(
+                before["OUTGOING TRANSFER"]["flow_type"], "internal_transfer"
+            )
+            self.assertEqual(
+                before["OUTGOING TRANSFER"]["reconciliation_status"], "paired"
+            )
+
+            review_result = self._run_cli(
+                [
+                    "review",
+                    "--category",
+                    "Other",
+                    "--category",
+                    "Groceries",
+                ],
+                cwd=root,
+                input_text=f"{_category_number('Income')}\nq\n",
+            )
+
+            self.assertEqual(review_result.returncode, 0, review_result.stderr)
+            with ledger_path.open(newline="", encoding="utf-8") as fh:
+                after = {row["merchant"]: row for row in csv.DictReader(fh)}
+            self.assertEqual(after["INCOMING TRANSFER"]["category"], "Income")
+            self.assertEqual(after["INCOMING TRANSFER"]["flow_type"], "income")
+            self.assertEqual(
+                after["OUTGOING TRANSFER"]["category"],
+                before["OUTGOING TRANSFER"]["category"],
+            )
+            self.assertEqual(
+                after["OUTGOING TRANSFER"]["needs_review"],
+                before["OUTGOING TRANSFER"]["needs_review"],
+            )
+            self.assertEqual(after["OUTGOING TRANSFER"]["flow_type"], "expense")
+            self.assertEqual(
+                after["OUTGOING TRANSFER"]["reconciliation_status"],
+                "not_applicable",
+            )
+            self.assertEqual(after["OUTGOING TRANSFER"]["paired_transaction_id"], "")
+            self.assertEqual(after["UNRELATED PURCHASE"], before["UNRELATED PURCHASE"])
+            with (root / "corrections.csv").open(newline="", encoding="utf-8") as fh:
+                corrections = list(csv.DictReader(fh))
+            outgoing_id = after["OUTGOING TRANSFER"]["transaction_id"]
+            self.assertEqual(
+                sum(
+                    correction["transaction_id"] == outgoing_id
+                    for correction in corrections
+                ),
+                1,
+            )
+
+    def test_filtered_review_empty_selection_is_a_no_op(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._setup_workspace(tmp)
+            statement = root / "may.csv"
+            self._write_statement(statement, ["2026-05-04,GENERAL STORE,-10.00,HKD"])
+            import_result = self._run_cli(
+                ["import", str(statement)],
+                cwd=root,
+                input_text=f"{_category_number('Other')}\n",
+            )
+            self.assertEqual(import_result.returncode, 0, import_result.stderr)
+            before = self._review_artifact_bytes(root)
+
+            review_result = self._run_cli(["review", "--category", "Travel"], cwd=root)
+
+            self.assertEqual(review_result.returncode, 0, review_result.stderr)
+            self.assertIn(
+                "No transactions found in selected categories: Travel",
+                review_result.stdout,
+            )
+            self.assertIn(
+                "Review complete: 0 updated from selected categories, "
+                "0 still need review",
+                review_result.stdout,
+            )
+            self.assertEqual(self._review_artifact_bytes(root), before)
+
+    def test_filtered_review_rejects_invalid_or_malformed_categories_atomically(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._setup_workspace(tmp)
+            statement = root / "may.csv"
+            self._write_statement(statement, ["2026-05-04,PENDING PURCHASE,-10.00,HKD"])
+            import_result = self._run_cli(
+                ["import", str(statement), "--no-interactive"], cwd=root
+            )
+            self.assertEqual(import_result.returncode, 0, import_result.stderr)
+            config_path = root / "config.json"
+            config = json.loads(config_path.read_text(encoding="utf-8"))
+            config["categories"] = ["Groceries", "Unknown"]
+            config_path.write_text(json.dumps(config), encoding="utf-8")
+            before = self._review_artifact_bytes(root)
+
+            invalid_result = self._run_cli(["review", "--category", "Other"], cwd=root)
+
+            self.assertEqual(invalid_result.returncode, 2)
+            self.assertIn("Unsupported review category: Other", invalid_result.stderr)
+            self.assertNotIn("Category [number/Enter/q]", invalid_result.stdout)
+            self.assertEqual(self._review_artifact_bytes(root), before)
+
+            malformed_result = self._run_cli(["review", "--category"], cwd=root)
+
+            self.assertEqual(malformed_result.returncode, 2)
+            self.assertIn(
+                "argument --category: expected one argument", malformed_result.stderr
+            )
+            self.assertEqual(self._review_artifact_bytes(root), before)
+
+    def test_review_help_and_readme_document_category_filters(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+
+            help_result = self._run_cli(["help"], cwd=root)
+            review_help_result = self._run_cli(["review", "--help"], cwd=root)
+
+            self.assertEqual(help_result.returncode, 0, help_result.stderr)
+            self.assertIn("honeymoney review [--category CATEGORY]", help_result.stdout)
+            self.assertEqual(
+                review_help_result.returncode, 0, review_help_result.stderr
+            )
+            self.assertIn("--category CATEGORY", review_help_result.stdout)
+            self.assertIn("repeat to select multiple", review_help_result.stdout)
+            readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+            self.assertIn("honeymoney review --category Other", readme)
 
     def test_hsbc_bank_profile_skips_previous_balance_line(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

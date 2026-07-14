@@ -319,7 +319,8 @@ Commands:
   honeymoney setup                 Create a local starter workspace
   honeymoney run                   Process configured CSV/PDF exports
   honeymoney import [PATH]         Import a pasted CSV/PDF path
-  honeymoney review                Categorize transactions needing review
+  honeymoney review [--category CATEGORY]
+                                   Review queued or category-matched transactions
   honeymoney status [MONTH]        Show processed/categorized counts for a period
   honeymoney pending [MONTH]       List transactions that need review
   honeymoney correct --file FILE   Apply validated transaction corrections
@@ -673,13 +674,32 @@ def _review_command(argv: list[str]) -> int:
     parser = _command_parser(
         argv,
         prog="honeymoney review",
-        description="Interactively categorize transactions marked as needing review.",
+        description=(
+            "Interactively categorize transactions needing review or rows in selected "
+            "categories."
+        ),
     )
     parser.add_argument("--config", dest="config_path")
     parser.add_argument("--output", dest="output_path")
+    parser.add_argument(
+        "--category",
+        action="append",
+        dest="categories",
+        metavar="CATEGORY",
+        help=(
+            "Review rows currently in CATEGORY regardless of review state; "
+            "repeat to select multiple categories"
+        ),
+    )
     args = parser.parse_args(argv)
 
     config = _load_config(args.config_path)
+    category_filters = args.categories or []
+    unsupported_categories = sorted(set(category_filters) - allowed_categories(config))
+    if unsupported_categories:
+        raise ValueError(
+            "Unsupported review category: " + ", ".join(unsupported_categories)
+        )
     categorized_path = Path(args.output_path or config["paths"]["output"])
     ledger_rows = _read_ledger(categorized_path)
     if not ledger_rows:
@@ -687,14 +707,45 @@ def _review_command(argv: list[str]) -> int:
         print("Run `honeymoney import` or `honeymoney run` first.")
         return 0
 
-    reviewed = _prompt_review_transactions(ledger_rows, config)
+    original_ledger_rows = [dict(row) for row in ledger_rows]
+    reviewed = _prompt_review_transactions(ledger_rows, config, category_filters)
     _save_interactive_corrections(reviewed, config)
     if reviewed:
+        _reconcile_review_updates(ledger_rows, original_ledger_rows, reviewed, config)
         _write_ledger_outputs(categorized_path, ledger_rows)
 
     remaining = sum(1 for row in ledger_rows if row.get("needs_review") == "true")
-    print(f"Review complete: {len(reviewed)} updated, {remaining} still need review")
+    if category_filters:
+        print(
+            f"Review complete: {len(reviewed)} updated from selected categories, "
+            f"{remaining} still need review"
+        )
+    else:
+        print(
+            f"Review complete: {len(reviewed)} updated, {remaining} still need review"
+        )
     return 0
+
+
+def _reconcile_review_updates(
+    ledger_rows: list[dict[str, str]],
+    original_ledger_rows: list[dict[str, str]],
+    reviewed: list[dict[str, str]],
+    config: dict[str, Any],
+) -> None:
+    baseline_rows = [dict(row) for row in original_ledger_rows]
+    reconcile_ledger(baseline_rows, config)
+    reconcile_ledger(ledger_rows, config)
+
+    reviewed_ids = {row.get("transaction_id", "") for row in reviewed}
+    for index, (original, baseline, updated) in enumerate(
+        zip(original_ledger_rows, baseline_rows, ledger_rows)
+    ):
+        if (
+            updated.get("transaction_id", "") not in reviewed_ids
+            and updated == baseline
+        ):
+            ledger_rows[index] = original
 
 
 def _unsuccessful_record_count(file_reports: list[dict[str, str]]) -> int:
@@ -1271,8 +1322,24 @@ def _prompt_uncategorized(
 
 
 def _prompt_review_transactions(
-    transactions: list[dict[str, str]], config: dict[str, Any]
+    transactions: list[dict[str, str]],
+    config: dict[str, Any],
+    category_filters: list[str] | None = None,
 ) -> list[dict[str, str]]:
+    if category_filters:
+        selected_categories = set(category_filters)
+        selected_rows = [
+            row for row in transactions if row.get("category") in selected_categories
+        ]
+        category_label = ", ".join(sorted(selected_categories))
+        return _prompt_category_assignments(
+            selected_rows,
+            config,
+            f"\n{len(selected_rows)} records in selected categories ({category_label}).",
+            empty_message=(
+                "No transactions found in selected categories: " + category_label
+            ),
+        )
     pending = [row for row in transactions if row.get("needs_review") == "true"]
     return _prompt_category_assignments(
         pending,
