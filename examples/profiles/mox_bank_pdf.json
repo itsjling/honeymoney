@@ -13,7 +13,7 @@
   "pdf": {
     "parser": "pdfplumber",
     "has_header": false,
-    "row_regex": "^(?P<transaction_date>\\d{1,2} [A-Za-z]{3})\\s+(?P<posting_date>\\d{1,2} [A-Za-z]{3})\\s+(?P<description>.*?)\\s+(?P<amount>-?\\d[\\d,]*\\.\\d{2})$",
+    "row_regex": "^(?P<transaction_date>\\d{1,2} [A-Za-z]{3})\\s+(?P<posting_date>\\d{1,2} [A-Za-z]{3})\\s+(?P<description>.*?)\\s+(?P<amount>[+-]?\\d[\\d,]*\\.\\d{2})$",
     "columns": {
       "transaction_date": "transaction_date",
       "posting_date": "posting_date",

@@ -90,6 +90,25 @@ class MoxBankPdfProfileTest(unittest.TestCase):
             "headerless_regex_rows",
         )
 
+    def test_headerless_regex_row_transaction_ids_are_stable(self) -> None:
+        profile = load_profile("mox_bank_pdf.json")
+        case_dir = (
+            FIXTURE_DIR / "import_profiles" / "mox_bank_pdf" / "headerless_regex_rows"
+        )
+
+        first_rows, _ = import_profile_case(profile, case_dir)
+        second_rows, _ = import_profile_case(profile, case_dir)
+        first_ids = [
+            row["transaction_id"] for row in _assign_transaction_ids(first_rows)
+        ]
+        second_ids = [
+            row["transaction_id"] for row in _assign_transaction_ids(second_rows)
+        ]
+
+        self.assertEqual(len(first_ids), 5)
+        self.assertEqual(first_ids, second_ids)
+        self.assertEqual(len(set(first_ids)), len(first_ids))
+
 
 class MoxCreditCardPdfProfileTest(unittest.TestCase):
     def test_multiline_regex_percent(self) -> None:
