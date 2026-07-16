@@ -9,13 +9,12 @@
       {"text": "Amount", "top": 10, "x0": 495},
       {"text": "PREVIOUS", "top": 20, "x0": 137},
       {"text": "BALANCE", "top": 20, "x0": 180},
-      {"text": "5,632.88", "top": 20, "x0": 518},
+      {"text": "5,000.00", "top": 20, "x0": 518},
       {"text": "02JUN", "top": 30, "x0": 64},
       {"text": "01JUN", "top": 30, "x0": 99},
       {"text": "24/7", "top": 30, "x0": 137},
-      {"text": "FITNESS", "top": 30, "x0": 161},
-      {"text": "HONG", "top": 30, "x0": 262},
-      {"text": "KONG", "top": 30, "x0": 286},
+      {"text": "SYNTHETIC", "top": 30, "x0": 161},
+      {"text": "GYM", "top": 30, "x0": 220},
       {"text": "HK", "top": 30, "x0": 334},
       {"text": "498.00", "top": 30, "x0": 527},
       {"text": "04JUN", "top": 40, "x0": 64},
@@ -24,6 +23,10 @@
       {"text": "FEE-NON-HK", "top": 40, "x0": 156},
       {"text": "MERCHANT", "top": 40, "x0": 209},
       {"text": "0.08", "top": 40, "x0": 537}
+    ],
+    [
+      {"text": "Supplemental", "top": 10, "x0": 60},
+      {"text": "information", "top": 10, "x0": 130}
     ]
   ]
 }

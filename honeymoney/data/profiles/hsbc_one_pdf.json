@@ -18,20 +18,28 @@
       "debit": "Withdrawal",
       "credit": "Deposit",
       "account_id": "Account ID",
-      "account": "Account"
+      "account": "Account",
+      "original_currency": "Currency"
     },
     "sectioned_word_rows": {
       "accounts": {
         "HKD Savings": {
           "account_id": "hsbc_one_hkd_savings",
-          "account": "HSBC One HKD Savings"
+          "account": "HSBC One HKD Savings",
+          "currency": "HKD"
         },
         "HKD Current": {
           "account_id": "hsbc_one_hkd_current",
-          "account": "HSBC One HKD Current"
+          "account": "HSBC One HKD Current",
+          "currency": "HKD"
+        },
+        "Foreign Currency Savings": {
+          "account_id": "hsbc_one_fcy_savings",
+          "account": "HSBC One Foreign Currency Savings",
+          "currency_from_row": true
         }
       },
-      "section_end_markers": ["Foreign Currency"],
+      "section_end_markers": [],
       "header_markers": [
         "Date",
         "Transaction",
@@ -41,11 +49,13 @@
         "Balance"
       ],
       "columns": {
+        "currency": [50, 81],
         "description": [95, 330],
         "deposit": [330, 414],
         "withdrawal": [414, 480]
       },
-      "date_regex": "^(?P<day>\\d{1,2})\\s+(?P<month>[A-Za-z]{3})\\b",
+      "date_regex": "^(?:(?P<currency>[A-Z]{3})\\s+)?(?P<day>\\d{1,2})\\s+(?P<month>[A-Za-z]{3})\\b",
+      "currency_regex": "^[A-Z]{3}$",
       "statement_year_regex": "\\b(?P<statement_day>\\d{1,2})\\s+(?P<statement_month>[A-Za-z]{3,9})\\s+(?P<year>20\\d{2})\\b",
       "statement_year_filename_regex": "eStatementFile_(?P<year>20\\d{2})(?P<statement_month>\\d{2})(?P<statement_day>\\d{2})",
       "skip_descriptions": ["B/F BALANCE", "C/F BALANCE"],

@@ -1,0 +1,73 @@
+{
+  "warnings": [],
+  "rows": [
+    {
+      "date": "2025-12-31",
+      "transaction_date": "2025-12-31",
+      "merchant": "SYNTHETIC INCOME REFERENCE",
+      "original_description": "SYNTHETIC INCOME REFERENCE",
+      "original_amount": "1000.00",
+      "original_currency": "HKD",
+      "amount_hkd": "1000.00",
+      "account_id": "hsbc_one_hkd_savings",
+      "account": "HSBC One HKD Savings",
+      "source_page": "1"
+    },
+    {
+      "date": "2025-12-31",
+      "merchant": "HOUSEHOLD PURCHASE",
+      "original_amount": "-25.00",
+      "original_currency": "HKD",
+      "account_id": "hsbc_one_hkd_savings",
+      "source_page": "1"
+    },
+    {
+      "date": "2025-12-31",
+      "merchant": "HOUSEHOLD PURCHASE",
+      "original_amount": "-25.00",
+      "original_currency": "HKD",
+      "account_id": "hsbc_one_hkd_current",
+      "account": "HSBC One HKD Current",
+      "source_page": "1"
+    },
+    {
+      "date": "2026-01-02",
+      "merchant": "SYNTHETIC TRANSFER",
+      "original_amount": "200.00",
+      "original_currency": "HKD",
+      "account_id": "hsbc_one_hkd_current",
+      "source_page": "1"
+    },
+    {
+      "date": "2025-12-31",
+      "merchant": "SYNTHETIC AUD DEBIT",
+      "original_amount": "-5.00",
+      "original_currency": "AUD",
+      "amount_hkd": "",
+      "account_id": "hsbc_one_fcy_savings",
+      "account": "HSBC One Foreign Currency Savings",
+      "source_page": "2",
+      "_flags_contains": ["missing_exchange_rate"]
+    },
+    {
+      "date": "2026-01-02",
+      "merchant": "SYNTHETIC EUR CREDIT",
+      "original_amount": "10.00",
+      "original_currency": "EUR",
+      "amount_hkd": "",
+      "account_id": "hsbc_one_fcy_savings",
+      "source_page": "2",
+      "_flags_contains": ["missing_exchange_rate"]
+    },
+    {
+      "date": "2026-01-02",
+      "merchant": "SERVICE FEE",
+      "original_amount": "-1.00",
+      "original_currency": "EUR",
+      "amount_hkd": "",
+      "account_id": "hsbc_one_fcy_savings",
+      "source_page": "3",
+      "_flags_contains": ["missing_exchange_rate"]
+    }
+  ]
+}

@@ -53,7 +53,7 @@ string is not the point of the test:
 2. Create a short, descriptive case folder:
 
    ```bash
-   mkdir -p tests/fixtures/import_profiles/mox_credit_card_pdf/foreign_currency_suffix
+   mkdir -p tests/fixtures/import_profiles/mox_credit_card_pdf/accepted_statement
    ```
 
 3. Add one synthetic input fixture:
@@ -82,6 +82,11 @@ Good import goldens are tiny. Prefer one behavior per case:
 - word-coordinate PDF extraction
 - amount/merchant alignment regressions, such as `24/7 FITNESS` with `498.00`
 - source metadata: `source_file`, `source_page`, `source_row`
+
+For a profile backed by a manually reviewed private acceptance statement, use
+one `accepted_statement` case containing the smallest synthetic set of rows
+that covers the accepted layout's important branches. Keep the private PDF and
+accepted CSV only in the ignored local acceptance corpus.
 
 ## Adding a Categorization Golden
 
@@ -166,3 +171,83 @@ HONEYMONEY_OLLAMA_MODEL=qwen2.5:7b-instruct \
 
 The live smoke command is intentionally outside default test discovery because
 it depends on the local Ollama service and installed model.
+
+## Checking Real PDFs Locally
+
+The committed goldens model `pdfplumber` table and word extraction with
+synthetic JSON. To also catch regressions in extraction from real PDF bytes,
+keep a separate acceptance corpus under the gitignored `private_samples/`
+directory. Nothing in this workflow is committed or sent to Ollama.
+
+Initialize the local workspace:
+
+```bash
+python3 scripts/check_private_pdfs.py init
+```
+
+Copy a statement into `private_samples/pdf_acceptance/statements/`, then
+register it with its parser profile:
+
+```bash
+python3 scripts/check_private_pdfs.py add \
+  private_samples/pdf_acceptance/statements/bank-statement-2026-05.pdf \
+  --profile hsbc_hk_bank_pdf
+```
+
+This adds the corresponding entry to
+`private_samples/pdf_acceptance/cases.json`:
+
+```json
+{
+  "version": 1,
+  "cases": [
+    {
+      "name": "bank-statement-2026-05",
+      "pdf": "statements/bank-statement-2026-05.pdf",
+      "profile": "hsbc_hk_bank_pdf"
+    }
+  ]
+}
+```
+
+List the PDF profile IDs available in the local workspace config when needed:
+
+```bash
+python3 scripts/check_private_pdfs.py profiles
+```
+
+The bundled example config is the default. Pass `--config` to `profiles`,
+`add`, `prepare`, `accept`, or `check` when validating locally modified profiles
+or exchange rates. Use the same config throughout one prepare/accept/check
+cycle.
+
+Prepare a parser-only CSV for manual comparison with the statement:
+
+```bash
+python3 scripts/check_private_pdfs.py prepare
+```
+
+Inspect the generated CSV under `private_samples/pdf_acceptance/actual/`.
+Confirm the row count, dates, descriptions, signs, currencies, amounts,
+accounts, and source page/row locations. Categorization, transaction IDs,
+review state, and Ollama output are intentionally excluded.
+
+Only after completing that manual check, accept one case as its private local
+baseline:
+
+```bash
+python3 scripts/check_private_pdfs.py accept --case bank-statement-2026-05
+```
+
+Acceptance refuses a stale candidate if its PDF, parser profile, config, or
+prepared CSV changed after `prepare`.
+
+Re-run every accepted case after parser or dependency changes:
+
+```bash
+python3 scripts/check_private_pdfs.py check
+```
+
+The check reports case names, row numbers, and changed field names without
+printing the private before/after values. Parser warnings fail both preparation
+and verification, and a warning-producing candidate cannot be accepted.

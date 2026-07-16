@@ -1,0 +1,35 @@
+{
+  "warnings": [],
+  "rows": [
+    {
+      "date": "2026-05-17",
+      "transaction_date": "2026-05-17",
+      "posting_date": "2026-05-18",
+      "merchant": "SYNTHETIC SUBSCRIPTION 1.95% markup",
+      "original_description": "SYNTHETIC SUBSCRIPTION 1.95% markup",
+      "original_amount": "-10.00",
+      "original_currency": "USD",
+      "posted_amount": "-79.00",
+      "posted_currency": "HKD",
+      "amount_hkd": "-79.00",
+      "account_id": "mox_credit_card",
+      "source_page": "1",
+      "source_row": "2"
+    },
+    {
+      "date": "2026-05-22",
+      "transaction_date": "2026-05-22",
+      "posting_date": "2026-05-23",
+      "merchant": "SYNTHETIC REWARD COFFEE PURCHASE 5%",
+      "original_description": "SYNTHETIC REWARD COFFEE PURCHASE 5%",
+      "original_amount": "-99.90",
+      "original_currency": "HKD",
+      "posted_amount": "-99.90",
+      "posted_currency": "HKD",
+      "amount_hkd": "-99.90",
+      "account_id": "mox_credit_card",
+      "source_page": "1",
+      "source_row": "3"
+    }
+  ]
+}

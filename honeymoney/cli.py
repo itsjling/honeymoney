@@ -2424,6 +2424,11 @@ def _import_pdf(
                         rows.append(normalized)
                     continue
 
+                if pdf_settings.get("word_rows_only", False) and hasattr(
+                    page, "extract_words"
+                ):
+                    continue
+
                 tables = _pdf_tables(page)
                 if not tables:
                     warnings.append(
@@ -2483,6 +2488,8 @@ def _import_pdf(
                             if _row_is_skipped(normalized, skip_patterns):
                                 continue
                             rows.append(normalized)
+    if pdf_settings.get("word_rows_only", False) and not rows:
+        warnings.append(f"No word transaction table found in {pdf_path.name}")
     return rows, warnings
 
 
@@ -2508,13 +2515,16 @@ def _pdf_sectioned_word_source_rows(
     rows: list[tuple[dict[str, str], int, int]] = []
     current_date = ""
     account_dates: dict[str, str] = {}
-    current_account: dict[str, str] | None = None
+    current_currency = ""
+    account_currencies: dict[str, str] = {}
+    current_account: dict[str, Any] | None = None
     description_parts: list[str] = []
     in_table = False
     date_pattern = re.compile(str(settings.get("date_regex", "")))
     amount_pattern = re.compile(
         str(settings.get("amount_regex", r"^-?\d[\d,]*\.\d{2}$"))
     )
+    currency_pattern = re.compile(str(settings.get("currency_regex", r"^[A-Z]{3}$")))
     columns = settings.get("columns", {})
     if not isinstance(columns, dict):
         raise ValueError("PDF sectioned word columns must be an object")
@@ -2546,14 +2556,22 @@ def _pdf_sectioned_word_source_rows(
                 current_account = {
                     "account_id": str(matched_account.get("account_id", "")),
                     "account": str(matched_account.get("account", "")),
+                    "currency": str(matched_account.get("currency", "")),
+                    "currency_from_row": bool(
+                        matched_account.get("currency_from_row", False)
+                    ),
                 }
                 current_date = account_dates.get(current_account["account_id"], "")
+                current_currency = account_currencies.get(
+                    current_account["account_id"], current_account["currency"]
+                )
                 in_table = False
                 description_parts = []
                 continue
 
             if _pdf_line_has_marker(folded, settings.get("section_end_markers", [])):
                 current_account = None
+                current_currency = ""
                 in_table = False
                 description_parts = []
                 continue
@@ -2566,6 +2584,15 @@ def _pdf_sectioned_word_source_rows(
                 continue
             if not in_table:
                 continue
+
+            currencies = [
+                currency.upper()
+                for currency in _pdf_word_texts_in_bounds(line, columns.get("currency"))
+                if currency_pattern.fullmatch(currency)
+            ]
+            if currencies:
+                current_currency = currencies[0]
+                account_currencies[current_account["account_id"]] = current_currency
 
             date_match = date_pattern.match(text)
             if date_match is not None:
@@ -2607,6 +2634,11 @@ def _pdf_sectioned_word_source_rows(
                     "Amount found before a transaction date on "
                     f"{pdf_path.name} page {page_number} row {line_number}"
                 )
+            if current_account["currency_from_row"] and not current_currency:
+                raise ValueError(
+                    "Amount found before a transaction currency on "
+                    f"{pdf_path.name} page {page_number} row {line_number}"
+                )
 
             rows.append(
                 (
@@ -2617,6 +2649,7 @@ def _pdf_sectioned_word_source_rows(
                         "Withdrawal": withdrawals[0] if withdrawals else "",
                         "Account ID": current_account["account_id"],
                         "Account": current_account["account"],
+                        "Currency": current_currency,
                     },
                     page_number,
                     line_number,

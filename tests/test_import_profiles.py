@@ -43,20 +43,17 @@ class HsbcBankPdfProfileTest(unittest.TestCase):
 
 
 class HsbcOnePdfProfileTest(unittest.TestCase):
-    def test_sectioned_accounts_multiline_rows_summaries_and_artifacts(self) -> None:
+    def test_accepted_statement(self) -> None:
         assert_import_case(
             self,
             load_profile("hsbc_one_pdf.json"),
-            "sectioned_multiline_transactions",
+            "accepted_statement",
         )
 
     def test_account_identity_produces_stable_transaction_ids(self) -> None:
         profile = load_profile("hsbc_one_pdf.json")
         case_dir = (
-            FIXTURE_DIR
-            / "import_profiles"
-            / "hsbc_one_pdf"
-            / "sectioned_multiline_transactions"
+            FIXTURE_DIR / "import_profiles" / "hsbc_one_pdf" / "accepted_statement"
         )
         first_rows, _ = import_profile_case(profile, case_dir)
         second_rows, _ = import_profile_case(profile, case_dir)
@@ -74,26 +71,26 @@ class HsbcOnePdfProfileTest(unittest.TestCase):
 
 
 class HsbcCreditCardPdfProfileTest(unittest.TestCase):
-    def test_word_rows_keep_24_7_fitness_amount_with_merchant(self) -> None:
+    def test_accepted_statement(self) -> None:
         assert_import_case(
             self,
             load_profile("hsbc_hk_credit_card_pdf.json"),
-            "word_rows_24_7_fitness",
+            "accepted_statement",
         )
 
 
 class MoxBankPdfProfileTest(unittest.TestCase):
-    def test_headerless_regex_rows(self) -> None:
+    def test_accepted_statement(self) -> None:
         assert_import_case(
             self,
             load_profile("mox_bank_pdf.json"),
-            "headerless_regex_rows",
+            "accepted_statement",
         )
 
-    def test_headerless_regex_row_transaction_ids_are_stable(self) -> None:
+    def test_accepted_statement_transaction_ids_are_stable(self) -> None:
         profile = load_profile("mox_bank_pdf.json")
         case_dir = (
-            FIXTURE_DIR / "import_profiles" / "mox_bank_pdf" / "headerless_regex_rows"
+            FIXTURE_DIR / "import_profiles" / "mox_bank_pdf" / "accepted_statement"
         )
 
         first_rows, _ = import_profile_case(profile, case_dir)
@@ -111,18 +108,11 @@ class MoxBankPdfProfileTest(unittest.TestCase):
 
 
 class MoxCreditCardPdfProfileTest(unittest.TestCase):
-    def test_foreign_currency_suffix(self) -> None:
+    def test_accepted_statement(self) -> None:
         assert_import_case(
             self,
             load_profile("mox_credit_card_pdf.json"),
-            "foreign_currency_suffix",
-        )
-
-    def test_multiline_regex_percent(self) -> None:
-        assert_import_case(
-            self,
-            load_profile("mox_credit_card_pdf.json"),
-            "multiline_regex_percent",
+            "accepted_statement",
         )
 
 
