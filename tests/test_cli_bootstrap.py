@@ -125,8 +125,6 @@ class CliBootstrapTest(unittest.TestCase):
                 + [
                     str(resolved_root / "profiles" / name)
                     for name in [
-                        "hsbc_hk_bank.json",
-                        "hsbc_hk_bank_pdf.json",
                         "hsbc_hk_credit_card_pdf.json",
                         "hsbc_one_pdf.json",
                         "mox_bank_pdf.json",
@@ -450,11 +448,11 @@ class CliBootstrapTest(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            profile_path = profiles_dir / "hsbc_bank.json"
+            profile_path = profiles_dir / "synthetic_bank.json"
             profile_path.write_text(
                 json.dumps(
                     {
-                        "id": "hsbc_hk_bank",
+                        "id": "synthetic_bank_csv",
                         "account_id": "hsbc_hk_checking",
                         "account": "HSBC HK Checking",
                         "institution": "HSBC HK",
@@ -3869,7 +3867,7 @@ def open(path):
             profile_path.write_text(
                 json.dumps(
                     {
-                        "id": "hsbc_hk_bank_pdf",
+                        "id": "synthetic_bank_pdf",
                         "account_id": "hsbc_hk_checking",
                         "account": "HSBC HK Checking",
                         "institution": "HSBC HK",
@@ -4000,7 +3998,7 @@ def open(path):
             )
             profiles = []
             for profile_id, account_id, account in [
-                ("hsbc_hk_bank_pdf", "hsbc_hk_checking", "HSBC HK Checking"),
+                ("synthetic_bank_pdf", "hsbc_hk_checking", "HSBC HK Checking"),
                 ("mox_bank_pdf", "mox_bank_main", "Mox Bank Main"),
             ]:
                 profile_path = root / f"{profile_id}.json"
@@ -4654,36 +4652,12 @@ def open(path):
             self.assertEqual(row["transaction_date"], "2026-05-22")
             self.assertEqual(row["amount_hkd"], "-99.90")
 
-    def test_committed_synthetic_pdf_table_fixtures_cover_bank_and_card_shapes(
+    def test_committed_synthetic_pdf_table_fixtures_cover_current_profile_shapes(
         self,
     ) -> None:
         fixtures_dir = Path(__file__).resolve().parent / "fixtures" / "pdf_tables"
         profiles_dir = Path(__file__).resolve().parents[1] / "examples" / "profiles"
         cases = [
-            (
-                "hsbc_hk_bank_pdf.json",
-                json.loads(
-                    (profiles_dir / "hsbc_hk_bank_pdf.json").read_text(encoding="utf-8")
-                ),
-                [
-                    {
-                        "merchant": "PARKNSHOP",
-                        "transaction_date": "2026-05-01",
-                        "amount_hkd": "-120.50",
-                        "original_currency": "HKD",
-                        "source_page": "1",
-                        "source_row": "2",
-                    },
-                    {
-                        "merchant": "SALARY",
-                        "transaction_date": "2026-05-02",
-                        "amount_hkd": "20000.00",
-                        "original_currency": "HKD",
-                        "source_page": "1",
-                        "source_row": "3",
-                    },
-                ],
-            ),
             (
                 "hsbc_hk_credit_card_pdf.json",
                 json.loads(
@@ -4885,7 +4859,6 @@ def open(path):
         self.assertEqual(
             profile_ids,
             {
-                "hsbc_hk_bank_pdf",
                 "hsbc_hk_credit_card_pdf",
                 "hsbc_one_pdf",
                 "mox_bank_pdf",
@@ -4970,7 +4943,7 @@ def open(path):
             profile_path.write_text(
                 json.dumps(
                     {
-                        "id": "hsbc_hk_bank_pdf",
+                        "id": "synthetic_bank_pdf",
                         "account_id": "hsbc_hk_checking",
                         "account": "HSBC HK Checking",
                         "institution": "HSBC HK",
@@ -5102,7 +5075,7 @@ def open(path):
             profile_path.write_text(
                 json.dumps(
                     {
-                        "id": "hsbc_hk_bank_pdf",
+                        "id": "synthetic_bank_pdf",
                         "account_id": "hsbc_hk_checking",
                         "account": "HSBC HK Checking",
                         "institution": "HSBC HK",
@@ -5260,7 +5233,7 @@ def open(path):
             profile_path.write_text(
                 json.dumps(
                     {
-                        "id": "hsbc_hk_bank_pdf",
+                        "id": "synthetic_bank_pdf",
                         "account_id": "hsbc_hk_checking",
                         "account": "HSBC HK Checking",
                         "institution": "HSBC HK",
@@ -5400,7 +5373,7 @@ def open(path):
                 / "tests"
                 / "fixtures"
                 / "pdf_tables"
-                / "hsbc_hk_bank_pdf.json"
+                / "synthetic_bank_pdf.json"
             )
             fake_modules = root / "fake_modules"
             input_dir = root / "input"
@@ -5466,15 +5439,15 @@ def open(path):
                 fixture_path.read_text(encoding="utf-8"),
                 encoding="utf-8",
             )
-            csv_profile = profiles_dir / "hsbc_hk_bank.json"
-            pdf_profile = profiles_dir / "hsbc_hk_bank_pdf.json"
+            csv_profile = profiles_dir / "synthetic_bank_csv.json"
+            pdf_profile = profiles_dir / "synthetic_bank_pdf.json"
             csv_profile.write_text(
                 json.dumps(
                     {
-                        "id": "hsbc_hk_bank",
-                        "account_id": "hsbc_hk_checking",
-                        "account": "HSBC HK Checking",
-                        "institution": "HSBC HK",
+                        "id": "synthetic_bank_csv",
+                        "account_id": "synthetic_bank",
+                        "account": "Synthetic Bank",
+                        "institution": "Synthetic",
                         "country": "HK",
                         "account_currency": "HKD",
                         "owner": "Household",
@@ -5494,10 +5467,10 @@ def open(path):
             pdf_profile.write_text(
                 json.dumps(
                     {
-                        "id": "hsbc_hk_bank_pdf",
-                        "account_id": "hsbc_hk_checking",
-                        "account": "HSBC HK Checking",
-                        "institution": "HSBC HK",
+                        "id": "synthetic_bank_pdf",
+                        "account_id": "synthetic_bank",
+                        "account": "Synthetic Bank",
+                        "institution": "Synthetic",
                         "country": "HK",
                         "account_currency": "HKD",
                         "owner": "Household",
@@ -5548,8 +5521,14 @@ def open(path):
                 json.dumps(
                     {
                         "filename_patterns": [
-                            {"pattern": "transactions.csv", "profile": "hsbc_hk_bank"},
-                            {"pattern": "statement.pdf", "profile": "hsbc_hk_bank_pdf"},
+                            {
+                                "pattern": "transactions.csv",
+                                "profile": "synthetic_bank_csv",
+                            },
+                            {
+                                "pattern": "statement.pdf",
+                                "profile": "synthetic_bank_pdf",
+                            },
                         ]
                     }
                 ),

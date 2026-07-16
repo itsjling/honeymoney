@@ -15,30 +15,12 @@ class StarterCsvProfileTest(unittest.TestCase):
         assert_import_case(self, starter_profile(), "balances_ignored")
 
 
-class HsbcBankCsvProfileTest(unittest.TestCase):
-    def test_debit_credit_and_previous_balance(self) -> None:
-        assert_import_case(
-            self,
-            load_profile("hsbc_hk_bank.json"),
-            "debit_credit_and_previous_balance",
-        )
-
-
 class MoxCreditCardCsvProfileTest(unittest.TestCase):
     def test_credit_debit_indicator(self) -> None:
         assert_import_case(
             self,
             load_profile("mox_credit_card.json"),
             "credit_debit_indicator",
-        )
-
-
-class HsbcBankPdfProfileTest(unittest.TestCase):
-    def test_table_balances_ignored(self) -> None:
-        assert_import_case(
-            self,
-            load_profile("hsbc_hk_bank_pdf.json"),
-            "table_balances_ignored",
         )
 
 

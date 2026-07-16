@@ -14,7 +14,12 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from unittest.mock import patch
 
-from honeymoney.cli import _report_command, _resolve_period, _StatusLine
+from honeymoney.cli import (
+    _report_command,
+    _resolve_period,
+    _starter_csv_profile,
+    _StatusLine,
+)
 from honeymoney.schema import ALLOWED_CATEGORIES
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -641,17 +646,17 @@ class WorkflowTest(unittest.TestCase):
             readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
             self.assertIn("honeymoney review --category Other", readme)
 
-    def test_hsbc_bank_profile_skips_previous_balance_line(self) -> None:
+    def test_starter_profile_skips_previous_balance_line(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = self._setup_workspace(tmp)
-            statement = root / "hsbc.csv"
+            statement = root / "starter.csv"
             statement.write_text(
                 "\n".join(
                     [
-                        "Date,Description,Debit,Credit,Currency",
-                        "2026-05-18,PREVIOUS BALANCE,5632.88,,HKD",
-                        "2026-05-19,PARKNSHOP,120.50,,HKD",
-                        "2026-05-20,SALARY,,20000,HKD",
+                        "Date,Description,Amount,Currency",
+                        "2026-05-18,PREVIOUS BALANCE,-5632.88,HKD",
+                        "2026-05-19,PARKNSHOP,-120.50,HKD",
+                        "2026-05-20,SALARY,20000,HKD",
                     ]
                 ),
                 encoding="utf-8",
@@ -901,8 +906,15 @@ def open(path):
         packaged_dir = REPO_ROOT / "honeymoney" / "data" / "profiles"
         examples_dir = REPO_ROOT / "examples" / "profiles"
         packaged = sorted(path.name for path in packaged_dir.glob("*.json"))
+        example_profiles = sorted(
+            path.name
+            for path in examples_dir.glob("*.json")
+            if path.name != "starter_csv.json"
+        )
+        self.assertEqual(packaged, example_profiles)
         self.assertEqual(
-            packaged, sorted(path.name for path in examples_dir.glob("*.json"))
+            json.loads((examples_dir / "starter_csv.json").read_text(encoding="utf-8")),
+            _starter_csv_profile(),
         )
         self.assertIn("hsbc_one_pdf.json", packaged)
         self.assertIn("mox_credit_card_pdf.json", packaged)
@@ -912,6 +924,47 @@ def open(path):
                 json.loads((examples_dir / name).read_text(encoding="utf-8")),
                 f"{name} differs between honeymoney/data/profiles and examples/profiles",
             )
+
+    def test_checked_in_example_outputs_match_current_pipeline(self) -> None:
+        examples_dir = REPO_ROOT / "examples"
+        expected_dir = examples_dir / "expected-output"
+        with tempfile.TemporaryDirectory() as tmp:
+            output_dir = Path(tmp)
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "honeymoney.cli",
+                    "--input",
+                    str(examples_dir / "input"),
+                    "--output",
+                    str(output_dir / "categorized.csv"),
+                    "--config",
+                    str(examples_dir / "config.json"),
+                    "--no-interactive",
+                ],
+                cwd=REPO_ROOT,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            for name in ("categorized.csv", "review_needed.csv"):
+                self.assertEqual(
+                    (output_dir / name).read_text(encoding="utf-8").splitlines(),
+                    (expected_dir / name).read_text(encoding="utf-8").splitlines(),
+                )
+
+            actual_report = json.loads(
+                (output_dir / "import_report.json").read_text(encoding="utf-8")
+            )
+            expected_report = json.loads(
+                (expected_dir / "import_report.json").read_text(encoding="utf-8")
+            )
+            actual_report["output"] = expected_report["output"]
+            self.assertEqual(actual_report, expected_report)
 
     def test_status_command_reports_period_counts(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

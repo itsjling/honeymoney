@@ -68,7 +68,7 @@ string is not the point of the test:
 
    ```bash
    python3 -m unittest tests.test_import_profiles
-   python3 -m unittest
+   ./scripts/check.sh
    ```
 
 Good import goldens are tiny. Prefer one behavior per case:
@@ -87,6 +87,11 @@ For a profile backed by a manually reviewed private acceptance statement, use
 one `accepted_statement` case containing the smallest synthetic set of rows
 that covers the accepted layout's important branches. Keep the private PDF and
 accepted CSV only in the ignored local acceptance corpus.
+
+The canonical PDF import goldens currently cover `hsbc_one_pdf`,
+`hsbc_hk_credit_card_pdf`, `mox_bank_pdf`, and `mox_credit_card_pdf`. HSBC One
+is the only HSBC bank-statement profile; do not add goldens for the retired
+`hsbc_hk_bank` or `hsbc_hk_bank_pdf` profiles.
 
 ## Adding a Categorization Golden
 
@@ -113,7 +118,7 @@ Run:
 
 ```bash
 python3 -m unittest tests.test_transaction_categorization
-python3 -m unittest
+./scripts/check.sh
 ```
 
 ## Privacy Rules
@@ -156,10 +161,10 @@ Run categorization goldens:
 python3 -m unittest tests.test_transaction_categorization
 ```
 
-Run everything:
+Run full formatting, lint, tests, and package verification:
 
 ```bash
-python3 -m unittest
+./scripts/check.sh
 ```
 
 Run live Ollama smoke separately:
@@ -191,7 +196,7 @@ register it with its parser profile:
 ```bash
 python3 scripts/check_private_pdfs.py add \
   private_samples/pdf_acceptance/statements/bank-statement-2026-05.pdf \
-  --profile hsbc_hk_bank_pdf
+  --profile hsbc_one_pdf
 ```
 
 This adds the corresponding entry to
@@ -204,7 +209,7 @@ This adds the corresponding entry to
     {
       "name": "bank-statement-2026-05",
       "pdf": "statements/bank-statement-2026-05.pdf",
-      "profile": "hsbc_hk_bank_pdf"
+      "profile": "hsbc_one_pdf"
     }
   ]
 }

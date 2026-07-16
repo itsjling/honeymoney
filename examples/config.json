@@ -44,9 +44,8 @@
     "Unknown"
   ],
   "profiles": [
-    "./examples/profiles/hsbc_hk_bank.json",
+    "./examples/profiles/starter_csv.json",
     "./examples/profiles/mox_credit_card.json",
-    "./examples/profiles/hsbc_hk_bank_pdf.json",
     "./examples/profiles/hsbc_hk_credit_card_pdf.json",
     "./examples/profiles/hsbc_one_pdf.json",
     "./examples/profiles/mox_bank_pdf.json",

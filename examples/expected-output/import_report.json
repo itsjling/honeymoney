@@ -3,7 +3,7 @@
   "errors": [],
   "files": [
     {
-      "profile_id": "hsbc_hk_bank",
+      "profile_id": "starter_csv",
       "source_file": "transactions.csv",
       "status": "processed",
       "transaction_count": "3"
@@ -11,6 +11,11 @@
   ],
   "input_count": 1,
   "interactive": false,
+  "ledger": {
+    "review_count": 1,
+    "transaction_count": 3,
+    "uncategorized_count": 1
+  },
   "ollama": {
     "status": "disabled"
   },
@@ -19,40 +24,65 @@
     "import_report_json": "examples/expected-output/import_report.json",
     "review_needed_csv": "examples/expected-output/review_needed.csv"
   },
+  "reconciliation": {
+    "ambiguous_transactions": 0,
+    "balance_reconciliation": {
+      "starter_csv": {
+        "statements": [
+          {
+            "source_file": "transactions.csv",
+            "status": "unavailable"
+          }
+        ],
+        "status": "unavailable"
+      }
+    },
+    "paired_groups": 0,
+    "paired_transactions": 0,
+    "transaction_count": 3,
+    "unmatched_transactions": 0,
+    "unresolved_transactions": 1
+  },
+  "replace": false,
+  "reset": false,
   "review_count": 1,
   "status": "success",
   "strict": false,
+  "successful_record_count": 3,
   "transaction_count": 3,
   "transaction_diagnostics": {
-    "txn_b952289a4400f635": {
+    "txn_6a86206bd03997dd": {
       "category": "Income",
       "needs_review": false,
       "owner": "Household",
       "reason": "Matched rule salary-income"
     },
-    "txn_d54555cb783a4134": {
-      "category": "Unknown",
-      "needs_review": true,
-      "owner": "Household",
-      "reason": "No categorization rules have been applied"
-    },
-    "txn_ff8b51d4202807e1": {
+    "txn_d52e75d5634ea2c9": {
       "category": "Groceries",
       "needs_review": false,
       "owner": "Household",
       "reason": "Matched rule parksnshop-groceries"
+    },
+    "txn_e2ad405fad1c1285": {
+      "category": "Unknown",
+      "needs_review": true,
+      "owner": "Household",
+      "reason": "No categorization rules have been applied"
     }
   },
   "transaction_flags": {
-    "txn_b952289a4400f635": [
+    "txn_6a86206bd03997dd": [
+      "matched_flow_rule:salary-income",
       "matched_rule:salary-income"
     ],
-    "txn_d54555cb783a4134": [
-      "uncategorized"
-    ],
-    "txn_ff8b51d4202807e1": [
+    "txn_d52e75d5634ea2c9": [
       "matched_rule:parksnshop-groceries"
+    ],
+    "txn_e2ad405fad1c1285": [
+      "uncategorized"
     ]
   },
+  "uncategorized_count": 1,
+  "unsuccessful_record_count": 0,
   "warnings": []
 }

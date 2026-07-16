@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from honeymoney.cli import _import_csv, _import_pdf
+from honeymoney.cli import _import_csv, _import_pdf, _starter_csv_profile
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PROFILE_DIR = REPO_ROOT / "honeymoney" / "data" / "profiles"
@@ -22,25 +22,7 @@ def load_profile(name: str) -> dict:
 
 
 def starter_profile() -> dict:
-    return {
-        "id": "starter_csv",
-        "account_id": "starter_csv",
-        "account": "Starter CSV",
-        "institution": "Local",
-        "country": "HK",
-        "account_currency": "HKD",
-        "owner": "Household",
-        "payment_method": "Bank Account",
-        "csv": {
-            "detect_headers": ["Date", "Description", "Amount", "Currency"],
-            "columns": {
-                "transaction_date": "Date",
-                "description": "Description",
-                "amount": "Amount",
-                "original_currency": "Currency",
-            },
-        },
-    }
+    return _starter_csv_profile()
 
 
 def base_config() -> dict:

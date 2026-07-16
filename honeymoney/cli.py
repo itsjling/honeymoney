@@ -1860,26 +1860,7 @@ def _write_starter_workspace(root: Path, force: bool) -> None:
 
     _write_json_file(
         profile_path,
-        {
-            "id": "starter_csv",
-            "account_id": "starter_csv",
-            "account": "Starter CSV",
-            "account_type": "bank",
-            "institution": "Local",
-            "country": "HK",
-            "account_currency": "HKD",
-            "owner": "Household",
-            "payment_method": "Bank Account",
-            "csv": {
-                "detect_headers": ["Date", "Description", "Amount", "Currency"],
-                "columns": {
-                    "transaction_date": "Date",
-                    "description": "Description",
-                    "amount": "Amount",
-                    "original_currency": "Currency",
-                },
-            },
-        },
+        _starter_csv_profile(),
         force,
     )
     starter_profile_paths = _copy_starter_profiles(profiles_dir, force)
@@ -1917,6 +1898,29 @@ def _write_starter_workspace(root: Path, force: bool) -> None:
         },
         force,
     )
+
+
+def _starter_csv_profile() -> dict[str, Any]:
+    return {
+        "id": "starter_csv",
+        "account_id": "starter_csv",
+        "account": "Starter CSV",
+        "account_type": "bank",
+        "institution": "Local",
+        "country": "HK",
+        "account_currency": "HKD",
+        "owner": "Household",
+        "payment_method": "Bank Account",
+        "csv": {
+            "detect_headers": ["Date", "Description", "Amount", "Currency"],
+            "columns": {
+                "transaction_date": "Date",
+                "description": "Description",
+                "amount": "Amount",
+                "original_currency": "Currency",
+            },
+        },
+    }
 
 
 def _copy_starter_profiles(profiles_dir: Path, force: bool) -> list[Path]:

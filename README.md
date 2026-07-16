@@ -73,7 +73,7 @@ Creates a starter local workspace with:
 - `rules.json`
 - `corrections.csv`
 - `profile_mappings.json`
-- `profiles/` with `starter_csv.json` plus the bundled HSBC HK, HSBC One, and Mox bank/card profiles (CSV and PDF), all linked in `config.json`
+- `profiles/` with `starter_csv.json` plus the bundled HSBC One, HSBC credit-card, and Mox bank/card profiles, all linked in `config.json`
 - `input/`
 - `output/`
 
@@ -261,7 +261,12 @@ PDF support is for text-based statement PDFs. Install the PDF extra:
 python3 -m pip install -e ".[pdf]"
 ```
 
-Current example profiles cover HSBC Hong Kong and Mox bank/card statement shapes. The `hsbc_one_pdf` profile imports HSBC One combined-account statements directly: it separates HKD Savings, HKD Current, and Foreign Currency Savings transactions into stable account identities, preserves each transaction currency, and retains the original PDF as source provenance. Select that profile when prompted and optionally save the filename mapping for future statements. Real private samples should stay in `samples/` or `private_samples/`.
+Current example profiles cover HSBC One, HSBC credit-card, and Mox bank/card statement shapes. `hsbc_one_pdf` is the sole HSBC bank-statement profile: it separates HKD Savings, HKD Current, and Foreign Currency Savings transactions into stable account identities, preserves each transaction currency, and retains the original PDF as source provenance. Select that profile when prompted and optionally save the filename mapping for future statements. Real private samples should stay in `samples/` or `private_samples/`.
+
+Migration: remove `hsbc_hk_bank` and `hsbc_hk_bank_pdf` paths or mappings from
+existing configurations. Use `hsbc_one_pdf` for HSBC One PDF statements. For
+CSV exports, use `starter_csv` when its signed `Amount` columns fit, or keep a
+custom local profile for institution-specific debit/credit columns.
 
 To verify extraction against real statements without committing them, use the
 private PDF acceptance workflow in
@@ -283,5 +288,18 @@ Corrections apply by exact `transaction_id` and clear review by default.
 ## Tests
 
 ```bash
-python3 -m unittest discover
+./scripts/check.sh
+```
+
+Focused golden suites:
+
+```bash
+python3 -m unittest tests.test_import_profiles
+python3 -m unittest tests.test_transaction_categorization
+```
+
+Verify accepted private PDFs locally without exposing their values:
+
+```bash
+python3 scripts/check_private_pdfs.py check
 ```
