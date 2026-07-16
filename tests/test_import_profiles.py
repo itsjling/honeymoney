@@ -111,6 +111,13 @@ class MoxBankPdfProfileTest(unittest.TestCase):
 
 
 class MoxCreditCardPdfProfileTest(unittest.TestCase):
+    def test_foreign_currency_suffix(self) -> None:
+        assert_import_case(
+            self,
+            load_profile("mox_credit_card_pdf.json"),
+            "foreign_currency_suffix",
+        )
+
     def test_multiline_regex_percent(self) -> None:
         assert_import_case(
             self,

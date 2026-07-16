@@ -13,8 +13,16 @@
   "pdf": {
     "parser": "pdfplumber",
     "has_header": false,
-    "row_regex": "^(?:(?P<description_prefix>.*?)\\s+)?(?P<transaction_date>\\d{4}-\\d{2}-\\d{2}|\\d{1,2} [A-Za-z]{3})\\s+(?P<posting_date>\\d{4}-\\d{2}-\\d{2}|\\d{1,2} [A-Za-z]{3})\\s+(?P<description>.*?)(?P<amount>-?\\d[\\d,]*\\.\\d{2})(?!%)(?P<description_suffix>(?:(?!-?\\d[\\d,]*\\.\\d{2}(?!%)).)*)$",
+    "row_regex": "^(?:(?P<description_prefix>.*?)\\s+)?(?:1\\s+[A-Z]{3}\\s*=\\s*\\d+(?:\\.\\d+)?\\s+(?P<posted_currency>[A-Z]{3})\\s+)?(?P<transaction_date>\\d{4}-\\d{2}-\\d{2}|\\d{1,2} [A-Za-z]{3})\\s+(?P<posting_date>\\d{4}-\\d{2}-\\d{2}|\\d{1,2} [A-Za-z]{3})\\s+(?P<description>.*?)(?:(?P<foreign_amount>-?\\d[\\d,]*\\.\\d{2})\\s+(?P<foreign_currency>[A-Z]{3})\\s+(?P<posted_amount>-?\\d[\\d,]*\\.\\d{2})|(?P<domestic_amount>-?\\d[\\d,]*\\.\\d{2}))(?!%)(?P<description_suffix>(?:(?!-?\\d[\\d,]*\\.\\d{2}(?!%)).)*)$",
     "join_fields": {
+      "amount": [
+        "foreign_amount",
+        "domestic_amount"
+      ],
+      "posted_amount": [
+        "posted_amount",
+        "domestic_amount"
+      ],
       "description": [
         "description_prefix",
         "description",
@@ -25,7 +33,10 @@
       "transaction_date": "transaction_date",
       "posting_date": "posting_date",
       "description": "description",
-      "amount": "amount"
+      "amount": "amount",
+      "original_currency": "foreign_currency",
+      "posted_amount": "posted_amount",
+      "posted_currency": "posted_currency"
     }
   }
 }
