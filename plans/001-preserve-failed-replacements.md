@@ -1,5 +1,8 @@
 # Plan 001: Preserve ledger rows when replacement imports fail
 
+> **Historical plan:** Do not execute this document directly. Use
+> [the current reconciliation](README.md), its linked issue, and current main.
+
 > **Executor instructions**: Follow every step and verification gate. Update this plan's row in `plans/README.md` when complete. Do not push or open a PR unless instructed.
 >
 > **Drift check (run first)**: `git diff --stat aa0eedf..HEAD -- honeymoney/cli.py tests/test_workflow.py tests/test_cli_bootstrap.py`

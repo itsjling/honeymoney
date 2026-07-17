@@ -1,5 +1,8 @@
 # Plan 012: Define spreadsheet-safe CSV exports
 
+> **Historical plan:** Do not execute this document directly. Use
+> [the current reconciliation](README.md), its linked issue, and current main.
+
 > **Executor instructions**: Treat CSV columns as public contracts. Do not alter numeric semantics or destroy raw transaction text without a documented compatibility decision.
 >
 > **Drift check (run first)**: `git diff --stat aa0eedf..HEAD -- honeymoney/cli.py honeymoney/schema.py tests/test_cli_bootstrap.py tests/test_agent_cli.py README.md`

@@ -1,5 +1,8 @@
 # Plan 007: Enforce loopback-only Ollama requests
 
+> **Historical plan:** Do not execute this document directly. Use
+> [the current reconciliation](README.md), its linked issue, and current main.
+
 > **Executor instructions**: Preserve local testing and privacy guarantees. Do not add network services. Update the index after all gates pass.
 >
 > **Drift check (run first)**: `git diff --stat aa0eedf..HEAD -- honeymoney/ollama.py honeymoney/cli.py tests/test_ollama.py README.md docs/architecture.md examples/config.json`

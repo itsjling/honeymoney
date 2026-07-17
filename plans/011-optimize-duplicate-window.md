@@ -1,5 +1,8 @@
 # Plan 011: Make near-date duplicate detection scale linearly after sorting
 
+> **Historical plan:** Do not execute this document directly. Use
+> [the current reconciliation](README.md), its linked issue, and current main.
+
 > **Executor instructions**: Preserve exact duplicate semantics. Establish output equivalence before optimizing and update the index afterward.
 >
 > **Drift check (run first)**: `git diff --stat aa0eedf..HEAD -- honeymoney/cli.py tests/test_cli_bootstrap.py tests/test_workflow.py`

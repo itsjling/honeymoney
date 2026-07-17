@@ -1,5 +1,8 @@
 # Plan 010: Detect duplicates against the cumulative ledger
 
+> **Historical plan:** Do not execute this document directly. Use
+> [the current reconciliation](README.md), its linked issue, and current main.
+
 > **Executor instructions**: Use the stable identities from Plans 008–009. Preserve the rule that duplicates are flagged, never auto-deleted. Update the index after verification.
 >
 > **Drift check (run first)**: `git diff --stat aa0eedf..HEAD -- honeymoney/cli.py tests/test_workflow.py tests/test_cli_bootstrap.py spec-v1.md`

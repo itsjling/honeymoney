@@ -1,5 +1,8 @@
 # Plan 005: Make ledger and correction persistence recoverable
 
+> **Historical plan:** Do not execute this document directly. Use
+> [the current reconciliation](README.md), its linked issue, and current main.
+
 > **Executor instructions**: Treat this as a financial persistence change. Add failure tests before implementation, run every gate, and update the plan index.
 >
 > **Drift check (run first)**: `git diff --stat aa0eedf..HEAD -- honeymoney/cli.py tests/test_agent_cli.py tests/test_workflow.py docs/architecture.md`

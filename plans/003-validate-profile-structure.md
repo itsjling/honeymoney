@@ -1,5 +1,8 @@
 # Plan 003: Reject incomplete import profiles before row processing
 
+> **Historical plan:** Do not execute this document directly. Use
+> [the current reconciliation](README.md), its linked issue, and current main.
+
 > **Executor instructions**: Follow each step, preserve public profile compatibility unless explicitly tested, and update the index when complete.
 >
 > **Drift check (run first)**: `git diff --stat aa0eedf..HEAD -- honeymoney/cli.py honeymoney/data/profiles tests/test_import_profiles.py tests/test_cli_bootstrap.py docs/golden-datasets.md`

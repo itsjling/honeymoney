@@ -1,5 +1,8 @@
 # Plan 013: Make CI and PDF dependency resolution reproducible
 
+> **Historical plan:** Do not execute this document directly. Use
+> [the current reconciliation](README.md), its linked issue, and current main.
+
 > **Executor instructions**: Keep published runtime requirements appropriately broad while making development/CI resolution repeatable. Update the index when complete.
 >
 > **Drift check (run first)**: `git diff --stat aa0eedf..HEAD -- pyproject.toml scripts/bootstrap.sh scripts/check.sh .github/workflows/ci.yml README.md`

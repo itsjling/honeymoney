@@ -1,5 +1,8 @@
 # Plan 006: Commit reset corrections only after successful re-import
 
+> **Historical plan:** Do not execute this document directly. Use
+> [the current reconciliation](README.md), its linked issue, and current main.
+
 > **Executor instructions**: Build on the persistence boundary from Plan 005. Run every verification and update the index.
 >
 > **Drift check (run first)**: `git diff --stat aa0eedf..HEAD -- honeymoney/cli.py tests/test_workflow.py tests/test_agent_cli.py README.md`

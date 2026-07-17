@@ -1,5 +1,8 @@
 # Plan 014: Read the cumulative ledger once per import
 
+> **Historical plan:** Do not execute this document directly. Use
+> [the current reconciliation](README.md), its linked issue, and current main.
+
 > **Executor instructions**: Preserve merge ordering and replacement behavior exactly. Update the plan index after verification.
 >
 > **Drift check (run first)**: `git diff --stat aa0eedf..HEAD -- honeymoney/cli.py tests/test_workflow.py tests/test_cli_bootstrap.py`

@@ -1,5 +1,8 @@
 # Plan 009: Give statements a stable source namespace
 
+> **Historical plan:** Do not execute this document directly. Use
+> [the current reconciliation](README.md), its linked issue, and current main.
+
 > **Executor instructions**: Build on the identity decision in Plan 008. Preserve privacy and replacement behavior; update the index when done.
 >
 > **Drift check (run first)**: `git diff --stat aa0eedf..HEAD -- honeymoney/cli.py honeymoney/schema.py tests/test_workflow.py tests/test_cli_bootstrap.py README.md docs/architecture.md`

@@ -1,5 +1,8 @@
 # Plan 016: Design and add local profile validation and preview tooling
 
+> **Historical plan:** Do not execute this document directly. Use
+> [the current reconciliation](README.md), its linked issue, and current main.
+
 > **Executor instructions**: This is a direction plan for a new public CLI surface. Finalize command contracts in tests before implementation and update the index when done.
 >
 > **Drift check (run first)**: `git diff --stat aa0eedf..HEAD -- honeymoney/cli.py tests/test_agent_cli.py tests/test_import_profiles.py README.md docs/agents/codex.md docs/golden-datasets.md`

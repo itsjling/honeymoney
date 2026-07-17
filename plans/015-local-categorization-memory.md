@@ -1,5 +1,8 @@
 # Plan 015: Design and prototype local categorization memory
 
+> **Historical plan:** Do not execute this document directly. Use
+> [the current reconciliation](README.md), its linked issue, and current main.
+
 > **Executor instructions**: This is a direction plan. Resolve the policy questions and prove the behavior with synthetic data before enabling it by default. Update the index when complete.
 >
 > **Drift check (run first)**: `git diff --stat aa0eedf..HEAD -- honeymoney/cli.py honeymoney/rules.py honeymoney/schema.py tests/test_transaction_categorization.py tests/test_workflow.py README.md spec-v1.md docs/architecture.md`

@@ -1,5 +1,8 @@
 # Plan 002: Validate all public configuration structures at load time
 
+> **Historical plan:** Do not execute this document directly. Use
+> [the current reconciliation](README.md), its linked issue, and current main.
+
 > **Executor instructions**: Follow this plan exactly, run each verification, and update `plans/README.md` when done.
 >
 > **Drift check (run first)**: `git diff --stat aa0eedf..HEAD -- honeymoney/cli.py honeymoney/ollama.py honeymoney/schema.py tests/test_agent_cli.py tests/test_cli_bootstrap.py`

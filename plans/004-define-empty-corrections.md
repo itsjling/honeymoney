@@ -1,5 +1,8 @@
 # Plan 004: Make empty correction values consistent and safe
 
+> **Historical plan:** Do not execute this document directly. Use
+> [the current reconciliation](README.md), its linked issue, and current main.
+
 > **Executor instructions**: Implement only the selected correction semantics below, verify every public boundary, and update `plans/README.md`.
 >
 > **Drift check (run first)**: `git diff --stat aa0eedf..HEAD -- honeymoney/cli.py tests/test_agent_cli.py tests/test_workflow.py docs/agents/codex.md README.md`

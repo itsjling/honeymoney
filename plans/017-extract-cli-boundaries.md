@@ -1,5 +1,8 @@
 # Plan 017: Extract import, normalization, and ledger modules from the CLI
 
+> **Historical plan:** Do not execute this document directly. Use
+> [the current reconciliation](README.md), its linked issue, and current main.
+
 > **Executor instructions**: This is a behavior-preserving final consolidation. Move one seam at a time, keep compatibility adapters, and update the index only after full verification.
 >
 > **Drift check (run first)**: `git diff --stat aa0eedf..HEAD -- honeymoney/cli.py honeymoney tests`

@@ -1,5 +1,8 @@
 # Plan 008: Preserve distinct repeated transactions with stable identities
 
+> **Historical plan:** Do not execute this document directly. Use
+> [the current reconciliation](README.md), its linked issue, and current main.
+
 > **Executor instructions**: This changes a persisted public key. Complete characterization and migration design before code. Update the index only after all compatibility gates pass.
 >
 > **Drift check (run first)**: `git diff --stat aa0eedf..HEAD -- honeymoney/cli.py honeymoney/schema.py tests/test_cli_bootstrap.py tests/test_workflow.py docs/architecture.md README.md`
