@@ -4,10 +4,25 @@ import os
 import subprocess
 import sys
 import tempfile
-import threading
 import unittest
-from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+OFFLINE_OLLAMA_HOOK = REPO_ROOT / "tests" / "offline_ollama_hook"
+
+
+def offline_ollama_env(
+    mode: str, *, extra_pythonpath: Path | None = None
+) -> dict[str, str]:
+    env = dict(os.environ)
+    pythonpaths = [str(OFFLINE_OLLAMA_HOOK)]
+    if extra_pythonpath is not None:
+        pythonpaths.append(str(extra_pythonpath))
+    pythonpaths.append(str(REPO_ROOT))
+    env["PYTHONPATH"] = os.pathsep.join(pythonpaths)
+    env["HONEYMONEY_TEST_OLLAMA_MODE"] = mode
+    return env
+
 
 EXPECTED_CATEGORIZED_COLUMNS = [
     "transaction_id",
@@ -3450,6 +3465,7 @@ class CliBootstrapTest(unittest.TestCase):
                     "--no-interactive",
                 ],
                 cwd=Path(__file__).resolve().parents[1],
+                env=offline_ollama_env("unavailable"),
                 text=True,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -3472,40 +3488,6 @@ class CliBootstrapTest(unittest.TestCase):
             self.assertGreaterEqual(len(report["warnings"]), 1)
 
     def test_ollama_response_can_categorize_unresolved_rows(self) -> None:
-        captured_requests = []
-
-        class Handler(BaseHTTPRequestHandler):
-            def do_POST(self) -> None:
-                length = int(self.headers["Content-Length"])
-                captured_requests.append(json.loads(self.rfile.read(length)))
-                body = {
-                    "response": json.dumps(
-                        [
-                            {
-                                "id": json.loads(captured_requests[0]["prompt"])[
-                                    "transactions"
-                                ][0]["id"],
-                                "category": "Dining",
-                                "confidence": 0.86,
-                                "reason": "Restaurant-like merchant",
-                            }
-                        ]
-                    )
-                }
-                self.send_response(200)
-                self.send_header("Content-Type", "application/json")
-                self.end_headers()
-                self.wfile.write(json.dumps(body).encode("utf-8"))
-
-            def log_message(self, format: str, *args: object) -> None:
-                return
-
-        server = HTTPServer(("127.0.0.1", 0), Handler)
-        thread = threading.Thread(target=server.serve_forever, daemon=True)
-        thread.start()
-        self.addCleanup(server.shutdown)
-        self.addCleanup(server.server_close)
-
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             csv_path = root / "input.csv"
@@ -3550,7 +3532,7 @@ class CliBootstrapTest(unittest.TestCase):
                         "profiles": [str(profile_path)],
                         "ollama": {
                             "enabled": True,
-                            "url": f"http://127.0.0.1:{server.server_port}/api/generate",
+                            "url": "http://localhost:11434/api/generate",
                             "model": "qwen2.5:7b-instruct",
                         },
                     }
@@ -3573,6 +3555,7 @@ class CliBootstrapTest(unittest.TestCase):
                     "--no-interactive",
                 ],
                 cwd=Path(__file__).resolve().parents[1],
+                env=offline_ollama_env("success"),
                 text=True,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -3591,53 +3574,10 @@ class CliBootstrapTest(unittest.TestCase):
             self.assertEqual(row["confidence"], "0.86")
             self.assertEqual(row["needs_review"], "false")
             self.assertIn("ollama_categorized", row["flags"])
-            self.assertEqual(row["reason"], "Restaurant-like merchant")
+            self.assertEqual(row["reason"], "Synthetic loopback response")
             self.assertEqual(report["ollama"]["status"], "success")
-            prompt = json.loads(captured_requests[0]["prompt"])
-            self.assertNotIn("source_file", prompt["transactions"][0])
 
     def test_accounting_safe_ollama_boundary_is_end_to_end_and_idempotent(self) -> None:
-        captured_requests = []
-
-        class Handler(BaseHTTPRequestHandler):
-            def do_POST(self) -> None:
-                length = int(self.headers["Content-Length"])
-                request = json.loads(self.rfile.read(length))
-                captured_requests.append(request)
-                prompt = json.loads(request["prompt"])
-                categorizations = []
-                for item in prompt["transactions"]:
-                    category = (
-                        "Credit Card Payment"
-                        if item["merchant"] == "UNIDENTIFIED BANK CREDIT"
-                        else "Dining"
-                    )
-                    categorizations.append(
-                        {
-                            "id": item["id"],
-                            "category": category,
-                            "confidence": 0.99,
-                            "reason": "Synthetic loopback response",
-                        }
-                    )
-                self.send_response(200)
-                self.send_header("Content-Type", "application/json")
-                self.end_headers()
-                self.wfile.write(
-                    json.dumps({"response": json.dumps(categorizations)}).encode(
-                        "utf-8"
-                    )
-                )
-
-            def log_message(self, format: str, *args: object) -> None:
-                return
-
-        server = HTTPServer(("127.0.0.1", 0), Handler)
-        thread = threading.Thread(target=server.serve_forever, daemon=True)
-        thread.start()
-        self.addCleanup(server.shutdown)
-        self.addCleanup(server.server_close)
-
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             input_dir = root / "input"
@@ -3729,7 +3669,7 @@ class CliBootstrapTest(unittest.TestCase):
                         "profile_mappings": str(mappings),
                         "ollama": {
                             "enabled": True,
-                            "url": f"http://127.0.0.1:{server.server_port}/api/generate",
+                            "url": "http://localhost:11434/api/generate",
                             "model": "synthetic",
                         },
                     }
@@ -3754,6 +3694,7 @@ class CliBootstrapTest(unittest.TestCase):
                         "--no-interactive",
                     ],
                     cwd=Path(__file__).resolve().parents[1],
+                    env=offline_ollama_env("accounting"),
                     text=True,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
@@ -3813,39 +3754,8 @@ class CliBootstrapTest(unittest.TestCase):
             self.assertEqual(output.read_text(encoding="utf-8"), categorized_text)
             self.assertEqual(review_path.read_text(encoding="utf-8"), review_text)
             self.assertEqual(report_path.read_text(encoding="utf-8"), report_text)
-            prompt = json.loads(captured_requests[0]["prompt"])
-            self.assertNotIn("owner", prompt)
-            self.assertNotIn("Income", prompt["allowed_categories"])
 
     def test_invalid_ollama_response_marks_transaction_for_review(self) -> None:
-        class Handler(BaseHTTPRequestHandler):
-            def do_POST(self) -> None:
-                body = {
-                    "response": json.dumps(
-                        [
-                            {
-                                "id": "not-the-transaction-id",
-                                "category": "Review Needed",
-                                "confidence": 1.5,
-                                "reason": "Bad response",
-                            }
-                        ]
-                    )
-                }
-                self.send_response(200)
-                self.send_header("Content-Type", "application/json")
-                self.end_headers()
-                self.wfile.write(json.dumps(body).encode("utf-8"))
-
-            def log_message(self, format: str, *args: object) -> None:
-                return
-
-        server = HTTPServer(("127.0.0.1", 0), Handler)
-        thread = threading.Thread(target=server.serve_forever, daemon=True)
-        thread.start()
-        self.addCleanup(server.shutdown)
-        self.addCleanup(server.server_close)
-
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             csv_path = root / "input.csv"
@@ -3889,7 +3799,7 @@ class CliBootstrapTest(unittest.TestCase):
                         "exchange_rates": {"HKD": 1.0},
                         "ollama": {
                             "enabled": True,
-                            "url": f"http://127.0.0.1:{server.server_port}/api/generate",
+                            "url": "http://localhost:11434/api/generate",
                             "model": "qwen2.5:7b-instruct",
                         },
                     }
@@ -3912,6 +3822,7 @@ class CliBootstrapTest(unittest.TestCase):
                     "--no-interactive",
                 ],
                 cwd=Path(__file__).resolve().parents[1],
+                env=offline_ollama_env("invalid"),
                 text=True,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -5551,38 +5462,6 @@ def open(path):
     def test_mixed_v1_acceptance_path_uses_csv_pdf_rules_corrections_duplicates_and_ollama(
         self,
     ) -> None:
-        class Handler(BaseHTTPRequestHandler):
-            def do_POST(self) -> None:
-                length = int(self.headers["Content-Length"])
-                request_body = json.loads(self.rfile.read(length))
-                prompt = json.loads(request_body["prompt"])
-                body = {
-                    "response": json.dumps(
-                        [
-                            {
-                                "id": transaction["id"],
-                                "category": "Dining",
-                                "confidence": 0.91,
-                                "reason": "Local model matched dining-like transaction",
-                            }
-                            for transaction in prompt["transactions"]
-                        ]
-                    )
-                }
-                self.send_response(200)
-                self.send_header("Content-Type", "application/json")
-                self.end_headers()
-                self.wfile.write(json.dumps(body).encode("utf-8"))
-
-            def log_message(self, format: str, *args: object) -> None:
-                return
-
-        server = HTTPServer(("127.0.0.1", 0), Handler)
-        thread = threading.Thread(target=server.serve_forever, daemon=True)
-        thread.start()
-        self.addCleanup(server.shutdown)
-        self.addCleanup(server.server_close)
-
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             repo_root = Path(__file__).resolve().parents[1]
@@ -5760,14 +5639,13 @@ def open(path):
                 "pdf": {"enabled": True, "parser": "pdfplumber"},
                 "ollama": {
                     "enabled": False,
-                    "url": f"http://127.0.0.1:{server.server_port}/api/generate",
+                    "url": "http://localhost:11434/api/generate",
                     "batch_size": 2,
                 },
             }
             config_path = root / "config.json"
             config_path.write_text(json.dumps(config), encoding="utf-8")
-            env = dict(**os.environ)
-            env["PYTHONPATH"] = f"{fake_modules}:{repo_root}"
+            env = offline_ollama_env("mixed", extra_pythonpath=fake_modules)
 
             first_output_dir = root / "first-output"
             first_result = subprocess.run(

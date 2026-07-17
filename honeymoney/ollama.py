@@ -1,13 +1,16 @@
 from __future__ import annotations
 
+import ipaddress
 import json
+import socket
 import threading
 import time
 import urllib.error
 import urllib.request
 from decimal import Decimal, InvalidOperation
-from typing import Any, Callable, NamedTuple
-from urllib.parse import urlsplit, urlunsplit
+from io import BytesIO
+from typing import Any, Callable, Mapping, NamedTuple
+from urllib.parse import urljoin, urlsplit, urlunsplit
 
 from honeymoney.classification_policy import (
     evaluate_model_suggestion,
@@ -17,6 +20,201 @@ from honeymoney.classification_policy import (
 from honeymoney.schema import allowed_categories
 
 _TICK_INTERVAL_SECONDS = 1.0
+_DEFAULT_OLLAMA_URL = "http://localhost:11434/api/generate"
+_REDIRECT_STATUSES = {301, 302, 303, 307, 308}
+_MAX_REDIRECTS = 5
+
+
+class OllamaHttpRequest(NamedTuple):
+    method: str
+    url: str
+    headers: dict[str, str]
+    body: bytes | None
+    timeout: float
+
+
+class OllamaHttpResponse(NamedTuple):
+    status: int
+    reason: str
+    headers: Mapping[str, str]
+    body: bytes
+
+
+class _ValidatedEndpoint(NamedTuple):
+    pinned_url: str
+    host_header: str
+
+
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *args: Any, **kwargs: Any) -> None:
+        return None
+
+
+def _default_sender(request: OllamaHttpRequest) -> OllamaHttpResponse:
+    opener = urllib.request.build_opener(
+        urllib.request.ProxyHandler({}),
+        _NoRedirectHandler(),
+    )
+    wire_request = urllib.request.Request(
+        request.url,
+        data=request.body,
+        headers=request.headers,
+        method=request.method,
+    )
+    try:
+        with opener.open(wire_request, timeout=request.timeout) as response:
+            return OllamaHttpResponse(
+                int(response.status),
+                str(response.reason),
+                dict(response.headers.items()),
+                response.read(),
+            )
+    except urllib.error.HTTPError as error:
+        return OllamaHttpResponse(
+            error.code,
+            str(error.reason),
+            dict(error.headers.items()) if error.headers is not None else {},
+            error.read(),
+        )
+
+
+class LoopbackOllamaTransport:
+    """HTTP transport that can connect only to validated loopback addresses."""
+
+    def __init__(
+        self,
+        *,
+        resolver: Callable[..., list[tuple[Any, ...]]] | None = None,
+        sender: Callable[[OllamaHttpRequest], OllamaHttpResponse] | None = None,
+        max_redirects: int = _MAX_REDIRECTS,
+    ) -> None:
+        self._resolver = resolver or socket.getaddrinfo
+        self._sender = sender or _default_sender
+        self._max_redirects = max_redirects
+
+    def request(self, request: OllamaHttpRequest) -> bytes:
+        current = request
+        for redirect_count in range(self._max_redirects + 1):
+            endpoint = validate_ollama_endpoint(current.url, resolver=self._resolver)
+            headers = dict(current.headers)
+            headers["Host"] = endpoint.host_header
+            pinned = current._replace(url=endpoint.pinned_url, headers=headers)
+            response = self._sender(pinned)
+            if response.status not in _REDIRECT_STATUSES:
+                if response.status >= 400:
+                    raise urllib.error.HTTPError(
+                        current.url,
+                        response.status,
+                        response.reason,
+                        response.headers,
+                        BytesIO(response.body),
+                    )
+                return response.body
+
+            location = _header(response.headers, "location")
+            if not location:
+                raise ValueError("Ollama endpoint redirect did not include a location")
+            if redirect_count >= self._max_redirects:
+                raise ValueError("Ollama endpoint exceeded the redirect limit")
+            redirected_url = urljoin(current.url, location)
+            method, body, redirected_headers = _redirect_request_parts(
+                current, response.status
+            )
+            current = OllamaHttpRequest(
+                method,
+                redirected_url,
+                redirected_headers,
+                body,
+                current.timeout,
+            )
+        raise AssertionError("redirect loop accounting failed")
+
+
+def validate_ollama_endpoint(
+    url: str,
+    *,
+    resolver: Callable[..., list[tuple[Any, ...]]] | None = None,
+) -> _ValidatedEndpoint:
+    """Validate and pin an HTTP Ollama URL to one resolved loopback address."""
+    try:
+        parsed = urlsplit(url)
+        port = parsed.port
+        hostname = parsed.hostname
+    except (TypeError, ValueError) as error:
+        raise ValueError(f"Ollama endpoint URL is malformed: {url!r}") from error
+
+    if parsed.scheme.casefold() != "http":
+        raise ValueError("Ollama endpoint must use http on a local loopback address")
+    if not parsed.netloc or not hostname:
+        raise ValueError("Ollama endpoint must include a local loopback host")
+    if parsed.username is not None or parsed.password is not None:
+        raise ValueError("Ollama endpoint must not include credentials")
+    if parsed.fragment:
+        raise ValueError("Ollama endpoint must not include a URL fragment")
+    if port is not None and not 1 <= port <= 65535:
+        raise ValueError("Ollama endpoint port must be between 1 and 65535")
+
+    resolved_port = port or 80
+    try:
+        records = (resolver or socket.getaddrinfo)(
+            hostname,
+            resolved_port,
+            family=socket.AF_UNSPEC,
+            type=socket.SOCK_STREAM,
+        )
+    except OSError as error:
+        raise ValueError(
+            f"Ollama endpoint host {hostname!r} could not be resolved locally"
+        ) from error
+
+    addresses: list[str] = []
+    for record in records:
+        try:
+            address = str(record[4][0]).split("%", 1)[0]
+            parsed_address = ipaddress.ip_address(address)
+        except (IndexError, TypeError, ValueError) as error:
+            raise ValueError(
+                f"Ollama endpoint host {hostname!r} returned an invalid address"
+            ) from error
+        if not parsed_address.is_loopback:
+            raise ValueError(
+                "Ollama endpoint must resolve only to local loopback addresses"
+            )
+        canonical_address = str(parsed_address)
+        if canonical_address not in addresses:
+            addresses.append(canonical_address)
+    if not addresses:
+        raise ValueError("Ollama endpoint did not resolve to a usable loopback address")
+
+    selected = addresses[0]
+    pinned_host = f"[{selected}]" if ":" in selected else selected
+    pinned_netloc = f"{pinned_host}:{port}" if port is not None else pinned_host
+    path = parsed.path or "/"
+    pinned_url = urlunsplit(("http", pinned_netloc, path, parsed.query, ""))
+    return _ValidatedEndpoint(pinned_url, parsed.netloc)
+
+
+def _header(headers: Mapping[str, str], name: str) -> str:
+    for key, value in headers.items():
+        if key.casefold() == name.casefold():
+            return str(value)
+    return ""
+
+
+def _redirect_request_parts(
+    request: OllamaHttpRequest, status: int
+) -> tuple[str, bytes | None, dict[str, str]]:
+    if status in {301, 302, 303} and request.method not in {"GET", "HEAD"}:
+        headers = {
+            key: value
+            for key, value in request.headers.items()
+            if key.casefold() not in {"content-length", "content-type", "host"}
+        }
+        return "GET", None, headers
+    headers = {
+        key: value for key, value in request.headers.items() if key.casefold() != "host"
+    }
+    return request.method, request.body, headers
 
 
 class OllamaProgress(NamedTuple):
@@ -28,9 +226,12 @@ class OllamaProgress(NamedTuple):
     elapsed_seconds: float
 
 
-def list_ollama_models(ollama_config: dict[str, Any]) -> list[str]:
+def list_ollama_models(
+    ollama_config: dict[str, Any],
+    transport: LoopbackOllamaTransport | None = None,
+) -> list[str]:
     """Return model names installed at the configured Ollama endpoint."""
-    generate_url = str(ollama_config.get("url", "http://localhost:11434/api/generate"))
+    generate_url = str(ollama_config.get("url", _DEFAULT_OLLAMA_URL))
     parsed = urlsplit(generate_url)
     path = parsed.path.rstrip("/")
     if path.endswith("/generate"):
@@ -39,10 +240,17 @@ def list_ollama_models(ollama_config: dict[str, Any]) -> list[str]:
         path = f"{path}/api/tags" if path else "/api/tags"
     tags_url = urlunsplit((parsed.scheme, parsed.netloc, path, "", ""))
 
-    with urllib.request.urlopen(
-        tags_url, timeout=min(_timeout_seconds(ollama_config), 10.0)
-    ) as response:
-        payload = json.loads(response.read().decode("utf-8"))
+    http = transport or LoopbackOllamaTransport()
+    body = http.request(
+        OllamaHttpRequest(
+            "GET",
+            tags_url,
+            {"Accept": "application/json"},
+            None,
+            min(_timeout_seconds(ollama_config), 10.0),
+        )
+    )
+    payload = json.loads(body.decode("utf-8"))
     if not isinstance(payload, dict) or not isinstance(payload.get("models"), list):
         raise ValueError("Ollama model list response did not contain a models array")
 
@@ -60,6 +268,7 @@ def apply_ollama_fallback(
     transactions: list[dict[str, str]],
     config: dict[str, Any],
     progress: Callable[[OllamaProgress], None] | None = None,
+    transport: LoopbackOllamaTransport | None = None,
 ) -> tuple[dict[str, Any], list[str]]:
     ollama_config = config.get("ollama", {})
     if not ollama_config.get("enabled", False):
@@ -122,6 +331,7 @@ def apply_ollama_fallback(
                 ollama_config,
                 config,
                 tick=tick if progress is not None else None,
+                transport=transport,
             )
         except (
             OSError,
@@ -234,6 +444,7 @@ def _request_ollama(
     ollama_config: dict[str, Any],
     config: dict[str, Any],
     tick: Callable[[float], None] | None = None,
+    transport: LoopbackOllamaTransport | None = None,
 ) -> dict[str, Any]:
     descriptions = model_category_descriptions(config)
     categories = sorted(descriptions)
@@ -263,25 +474,24 @@ def _request_ollama(
         ),
     }
 
-    request = urllib.request.Request(
-        str(ollama_config.get("url", "http://localhost:11434/api/generate")),
-        data=json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
-        method="POST",
+    request = OllamaHttpRequest(
+        "POST",
+        str(ollama_config.get("url", _DEFAULT_OLLAMA_URL)),
+        {"Content-Type": "application/json"},
+        json.dumps(payload).encode("utf-8"),
+        _timeout_seconds(ollama_config),
     )
 
-    timeout = _timeout_seconds(ollama_config)
+    http = transport or LoopbackOllamaTransport()
     if tick is None:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            return json.loads(response.read().decode("utf-8"))
+        return json.loads(http.request(request).decode("utf-8"))
 
     result: dict[str, Any] = {}
     error: dict[str, Exception] = {}
 
     def worker() -> None:
         try:
-            with urllib.request.urlopen(request, timeout=timeout) as response:
-                result["body"] = json.loads(response.read().decode("utf-8"))
+            result["body"] = json.loads(http.request(request).decode("utf-8"))
         except Exception as exc:  # re-raised on the caller's thread below
             error["exc"] = exc
 

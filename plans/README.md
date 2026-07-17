@@ -52,9 +52,9 @@ correction, reconciliation, review, PDF, and JSON contracts.
 | [002](002-validate-public-config.md) | Validate public config | P1 | DONE | [#20](https://github.com/itsjling/honeymoney/issues/20) |
 | [003](003-validate-profile-structure.md) | Validate profile structure | P1 | DONE | [#20](https://github.com/itsjling/honeymoney/issues/20) |
 | [004](004-define-empty-corrections.md) | Define empty correction semantics | P1 | DONE | [#21](https://github.com/itsjling/honeymoney/issues/21) |
-| [005](005-failure-atomic-persistence.md) | Make persistence recoverable | P1 | PARTIAL | [#22](https://github.com/itsjling/honeymoney/issues/22) |
-| [006](006-transactional-reset.md) | Make reset transactional | P1 | TODO | [#23](https://github.com/itsjling/honeymoney/issues/23) |
-| [007](007-enforce-local-ollama.md) | Enforce local-only Ollama | P1 | TODO | [#18](https://github.com/itsjling/honeymoney/issues/18) |
+| [005](005-failure-atomic-persistence.md) | Make persistence recoverable | P1 | DONE | [#22](https://github.com/itsjling/honeymoney/issues/22) |
+| [006](006-transactional-reset.md) | Make reset transactional | P1 | DONE | [#23](https://github.com/itsjling/honeymoney/issues/23) |
+| [007](007-enforce-local-ollama.md) | Enforce local-only Ollama | P1 | DONE | [#18](https://github.com/itsjling/honeymoney/issues/18) |
 | [008](008-stable-transaction-identity.md) | Stabilize transaction identity | P1 | PARTIAL | [#24](https://github.com/itsjling/honeymoney/issues/24) |
 | [009](009-stable-source-namespace.md) | Stabilize source namespace | P1 | PARTIAL | [#24](https://github.com/itsjling/honeymoney/issues/24) |
 | [010](010-cross-import-duplicates.md) | Detect cross-import duplicates | P2 | TODO | [#25](https://github.com/itsjling/honeymoney/issues/25) |
@@ -129,52 +129,56 @@ python3 -m unittest tests.test_agent_cli tests.test_workflow tests.test_cash_flo
 The machine and human documentation now states the omitted-versus-empty
 contract explicitly.
 
-### 005 — PARTIAL
+### 005 — DONE
 
-Correction and review operations stage files, fsync file contents, keep
-backups, and attempt rollback. Normal imports still write the ledger, review
-CSV, and report separately; directory fsync, startup recovery, and a documented
-authoritative/derived protocol are absent.
-
-```sh
-sed -n '326,400p' honeymoney/corrections.py
-sed -n '1650,1705p' honeymoney/cli.py
-rg -n 'authoritative|recover|commit order' docs/architecture.md
-```
-
-Issue #22 must reconcile both persistence paths and current reconciliation
-artifacts. Sequential `os.replace` calls must not be described as multi-file
-atomicity.
-
-### 006 — TODO
-
-`--reset` now validates configuration, profiles, mappings, selected CSV headers,
-and statement parsing before calling `_remove_corrections`. It still removes
-saved corrections before rules, Ollama, reconciliation, and output persistence;
-a failure in those later phases can therefore lose reviewed state.
+Imports, reviews, and structured corrections now publish through one generation
+protocol. All output content and recovery copies are flushed before replacement;
+derived artifacts install first and the cumulative ledger installs last as the
+authoritative commit point. Retained state is hash-validated on the next command
+and deterministically completes the new generation or restores the old one.
+Directory entries are synchronized, permissions are preserved, and diagnostics
+do not include transaction values.
 
 ```sh
-sed -n '208,265p' honeymoney/cli.py
-sed -n '1810,1850p' honeymoney/cli.py
-python3 -m unittest tests.test_workflow tests.test_agent_cli
+python3 -m unittest tests.test_agent_cli tests.test_workflow tests.test_cash_flow_review
+./scripts/check.sh
 ```
 
-Issue #23 is correctly blocked by the common persistence boundary in #22.
+### 006 — DONE
 
-### 007 — TODO
+`--reset` now filters corrections only for successfully processed replacement
+sources and stages that filtered document in the same recoverable generation as
+the ledger and derived artifacts. Failed or skipped sources preserve both rows
+and corrections, mixed folders reset only successful sources, persistence
+failures recover the prior generation, and repeated resets do not affect
+unrelated corrections. Import reports distinguish requested and committed
+source actions.
 
-The Ollama client minimizes transaction payloads and defaults to localhost, but
-configured URLs go directly to `urllib.request.urlopen`; schemes, credentials,
-resolved addresses, and redirects are not constrained to loopback.
+The current issue contract supersedes the historical Plan-006 wording about
+preserving old report bytes: failed attempts publish a truthful failure report
+while preserving ledger, review, and correction state. Optional Ollama
+unavailability occurs after successful statement parsing, so rows remain
+processed and pending review; a requested reset still clears their prior
+corrections.
 
 ```sh
-sed -n '20,55p' honeymoney/ollama.py
-sed -n '199,255p' honeymoney/ollama.py
-python3 -m unittest tests.test_ollama
+python3 -m unittest tests.test_workflow tests.test_cli_bootstrap tests.test_agent_cli
+./scripts/check.sh
 ```
 
-Issue #18 is the highest-priority privacy follow-up. The live smoke test remains
-excluded unless a maintainer explicitly requests it.
+### 007 — DONE
+
+Model listing and categorization share a loopback-only transport. It accepts
+plain HTTP endpoints only, rejects credentials and malformed ports, resolves
+every hostname before sending, requires every resolved address to be loopback,
+pins the numeric destination, bypasses proxies, and revalidates every redirect.
+Default verification uses injected transports and runs under socket/DNS guards;
+real-loopback and live Ollama checks remain opt-in.
+
+```sh
+python3 -m unittest tests.test_ollama tests.test_ollama_transport tests.test_environment_smoke
+./scripts/check.sh
+```
 
 ### 008 — PARTIAL
 

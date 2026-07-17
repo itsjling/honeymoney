@@ -31,8 +31,9 @@ from honeymoney.corrections import (
     CORRECTION_FIELDS,
     apply_correction_operation,
     apply_corrections,
+    ledger_output_documents,
     load_corrections,
-    merge_correction_patches,
+    prepare_corrections_document,
     read_ledger,
     to_review_row,
     validate_correction,
@@ -41,7 +42,9 @@ from honeymoney.ollama import (
     OllamaProgress,
     apply_ollama_fallback,
     list_ollama_models,
+    validate_ollama_endpoint,
 )
+from honeymoney.persistence import persist_generation, recover_generation
 from honeymoney.reconciliation import (
     reconcile_ledger,
     reconciliation_date_window,
@@ -52,8 +55,6 @@ from honeymoney.rules import apply_rules, load_rules
 from honeymoney.schema import (
     ALLOWED_ACCOUNT_TYPES,
     ALLOWED_FLOW_TYPES,
-    CATEGORIZED_COLUMNS,
-    REVIEW_NEEDED_COLUMNS,
     allowed_categories,
     allowed_owners,
     allowed_payment_methods,
@@ -230,12 +231,40 @@ def _run_pipeline(
         profile_mappings_path=config.get("profile_mappings"),
     )
     if args.reset:
-        reset_ids = {
+        requested_action = "reset"
+    elif args.replace:
+        requested_action = "replace"
+    else:
+        requested_action = "import"
+    for file_report in file_reports:
+        file_report["requested_action"] = requested_action
+        if file_report.get("status") != "processed":
+            file_report["ledger_action"] = "preserved"
+        elif args.reset:
+            file_report["ledger_action"] = "reset"
+        elif args.replace:
+            file_report["ledger_action"] = "replaced"
+        else:
+            file_report["ledger_action"] = "added"
+    replace_sources = (
+        {
+            file_report["source_file"]
+            for file_report in file_reports
+            if file_report.get("status") == "processed"
+        }
+        if args.replace or args.reset
+        else None
+    )
+    reset_ids = (
+        {
             row["transaction_id"]
             for row in existing_ledger_rows
-            if row.get("source_file") in source_files and row.get("transaction_id")
+            if row.get("source_file") in (replace_sources or set())
+            and row.get("transaction_id")
         }
-        _remove_corrections(config, reset_ids)
+        if args.reset
+        else set()
+    )
     _status.update("Applying categorization rules...")
     rules = load_rules(config)
     apply_rules(transactions, rules, config)
@@ -252,26 +281,23 @@ def _run_pipeline(
             print(f"Warning: {warning}", file=sys.stderr)
     _status.update("Applying corrections...")
     corrections = load_corrections(config)
+    correction_documents: dict[Path, str] = {}
+    if args.reset and config.get("corrections"):
+        corrections_path, corrections_content, corrections = (
+            prepare_corrections_document(config, removed_transaction_ids=reset_ids)
+        )
+        correction_documents[corrections_path] = corrections_content
     apply_corrections(transactions, corrections)
     _status.clear()
     if interactive:
         categorized_interactively = _prompt_uncategorized(transactions, config)
-        _save_interactive_corrections(categorized_interactively, config)
+    else:
+        categorized_interactively = []
     review_rows = [row for row in transactions if row["needs_review"] == "true"]
 
     _status.update("Writing output files...")
-    replace_sources = (
-        {
-            file_report["source_file"]
-            for file_report in file_reports
-            if file_report.get("status") == "processed"
-        }
-        if args.replace or args.reset
-        else None
-    )
     ledger_rows = _merge_into_ledger(categorized_path, transactions, replace_sources)
     reconciliation = reconcile_ledger(ledger_rows, config)
-    _write_ledger_outputs(categorized_path, ledger_rows)
     report = {
         "status": "partial_success" if import_warnings else "success",
         "input_count": len(input_files),
@@ -306,7 +332,17 @@ def _run_pipeline(
         "ollama": ollama_report,
         "reconciliation": reconciliation,
     }
-    _write_report(import_report_path, report)
+    files = ledger_output_documents(categorized_path, ledger_rows)
+    files[import_report_path] = json.dumps(report, indent=2, sort_keys=True) + "\n"
+    files.update(correction_documents)
+    files.update(
+        _interactive_correction_documents(
+            categorized_interactively,
+            config,
+            removed_transaction_ids=reset_ids,
+        )
+    )
+    persist_generation(categorized_path, files)
     _status.clear()
 
     if print_import_summary:
@@ -390,6 +426,7 @@ def _config_command(argv: list[str]) -> int:
 
     config_path = _existing_config_path(args.config_path)
     config = _read_config_document(config_path)
+    _recover_config_generation(config)
     artifacts = {"config_json": str(config_path)}
 
     if args.action is None:
@@ -556,6 +593,8 @@ def _validate_config_document(config: dict[str, Any]) -> None:
                 raise ValueError(
                     f"Config field ollama.{field} must be a non-empty string"
                 )
+        if "url" in ollama:
+            validate_ollama_endpoint(ollama["url"])
         if "batch_size" in ollama and (
             isinstance(ollama["batch_size"], bool)
             or not isinstance(ollama["batch_size"], int)
@@ -708,6 +747,9 @@ def _setup_command(argv: list[str]) -> int:
     if args.json and not args.root:
         raise ValueError("honeymoney setup --json requires --root")
     root = _setup_root(args.root)
+    existing_config_path = root / "config.json"
+    if existing_config_path.exists():
+        _recover_config_generation(_read_config_document(existing_config_path))
     _write_starter_workspace(root, force=args.force)
     if args.json:
         _emit_json(
@@ -1806,16 +1848,8 @@ def _merge_into_ledger(
 def _write_ledger_outputs(
     categorized_path: Path, ledger_rows: list[dict[str, str]]
 ) -> None:
-    review_needed_path = categorized_path.parent / "review_needed.csv"
-    _write_csv(categorized_path, CATEGORIZED_COLUMNS, ledger_rows)
-    _write_csv(
-        review_needed_path,
-        REVIEW_NEEDED_COLUMNS,
-        [
-            to_review_row(row)
-            for row in ledger_rows
-            if row.get("needs_review") == "true"
-        ],
+    persist_generation(
+        categorized_path, ledger_output_documents(categorized_path, ledger_rows)
     )
 
 
@@ -1939,12 +1973,15 @@ def _apply_interactive_category(transaction: dict[str, str], category: str) -> N
     transaction["flags"] = _append_flag(transaction["flags"], "manual_correction")
 
 
-def _save_interactive_corrections(
-    categorized: list[dict[str, str]], config: dict[str, Any]
-) -> None:
+def _interactive_correction_documents(
+    categorized: list[dict[str, str]],
+    config: dict[str, Any],
+    *,
+    removed_transaction_ids: set[str] | None = None,
+) -> dict[Path, str]:
     if not categorized or not config.get("corrections"):
-        return
-    merge_correction_patches(
+        return {}
+    path, content, _ = prepare_corrections_document(
         config,
         {
             transaction["transaction_id"]: {
@@ -1955,30 +1992,9 @@ def _save_interactive_corrections(
             }
             for transaction in categorized
         },
+        removed_transaction_ids=removed_transaction_ids,
     )
-
-
-def _remove_corrections(config: dict[str, Any], transaction_ids: set[str]) -> None:
-    corrections_path = config.get("corrections")
-    if not corrections_path or not transaction_ids:
-        return
-    path = Path(corrections_path)
-    if not path.exists():
-        return
-
-    with path.open(newline="", encoding="utf-8") as fh:
-        reader = csv.DictReader(fh)
-        fieldnames = reader.fieldnames or ["transaction_id"]
-        rows = [
-            row
-            for row in reader
-            if (row.get("transaction_id") or "").strip() not in transaction_ids
-        ]
-
-    with path.open("w", newline="", encoding="utf-8") as fh:
-        writer = csv.DictWriter(fh, fieldnames=fieldnames, extrasaction="ignore")
-        writer.writeheader()
-        writer.writerows(rows)
+    return {path: content}
 
 
 def _write_starter_workspace(root: Path, force: bool) -> None:
@@ -2129,7 +2145,15 @@ def _load_config(config_path: str | None) -> dict[str, Any]:
     config.setdefault("paths", {})
     config["paths"].setdefault("input", "./input")
     config["paths"].setdefault("output", "./output/categorized.csv")
+    _recover_config_generation(config)
     return config
+
+
+def _recover_config_generation(config: dict[str, Any]) -> None:
+    paths = config.get("paths", {})
+    output = paths.get("output") if isinstance(paths, dict) else None
+    if isinstance(output, str) and output.strip():
+        recover_generation(Path(output))
 
 
 def _load_profiles(config: dict[str, Any]) -> list[dict[str, Any]]:

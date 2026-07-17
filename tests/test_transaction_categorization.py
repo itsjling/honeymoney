@@ -1,10 +1,8 @@
 import json
-import threading
 import unittest
-from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-from honeymoney.ollama import apply_ollama_fallback
+from honeymoney.ollama import OllamaHttpRequest, apply_ollama_fallback
 from honeymoney.reconciliation import reconcile_ledger
 from honeymoney.rules import apply_rules
 from tests.golden_helpers import FIXTURE_DIR, assert_rows_match, base_config, load_json
@@ -42,39 +40,26 @@ class DeterministicCategorizationTest(unittest.TestCase):
         assert_rows_match(self, rows, expected["rows"], context=str(case_dir))
 
 
-class FakeOllamaServer:
+class FakeOllamaTransport:
     def __init__(self, response_factory):
         self.requests: list[dict] = []
-        captured = self.requests
+        self.response_factory = response_factory
 
-        class Handler(BaseHTTPRequestHandler):
-            def do_POST(self) -> None:
-                length = int(self.headers["Content-Length"])
-                request = json.loads(self.rfile.read(length))
-                captured.append(request)
-                body = response_factory(request)
-                self.send_response(200)
-                self.send_header("Content-Type", "application/json")
-                self.end_headers()
-                self.wfile.write(json.dumps(body).encode("utf-8"))
-
-            def log_message(self, format: str, *args: object) -> None:
-                return
-
-        self.server = HTTPServer(("127.0.0.1", 0), Handler)
-        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
-
-    def __enter__(self) -> "FakeOllamaServer":
-        self.thread.start()
+    def __enter__(self) -> "FakeOllamaTransport":
         return self
 
     def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
-        self.server.shutdown()
-        self.server.server_close()
+        return None
 
     @property
     def url(self) -> str:
-        return f"http://127.0.0.1:{self.server.server_port}/api/generate"
+        return "http://localhost:11434/api/generate"
+
+    def request(self, request: OllamaHttpRequest) -> bytes:
+        assert request.body is not None
+        body = json.loads(request.body)
+        self.requests.append(body)
+        return json.dumps(self.response_factory(body)).encode()
 
 
 class OllamaCategorizationTest(unittest.TestCase):
@@ -86,12 +71,13 @@ class OllamaCategorizationTest(unittest.TestCase):
         response_payload = load_json(case_dir / "response.json")
         expected = load_json(case_dir / "expected.json")
 
-        with FakeOllamaServer(
+        with FakeOllamaTransport(
             lambda request: {"response": json.dumps(response_payload)}
         ) as server:
             report, warnings = apply_ollama_fallback(
                 rows,
                 {**base_config(), "ollama": {"enabled": True, "url": server.url}},
+                transport=server,
             )
 
         self.assertEqual(warnings, expected["warnings"])
@@ -122,12 +108,13 @@ class OllamaCategorizationTest(unittest.TestCase):
         response_payload = load_json(case_dir / "response.json")
         expected = load_json(case_dir / "expected.json")
 
-        with FakeOllamaServer(
+        with FakeOllamaTransport(
             lambda request: {"response": json.dumps(response_payload)}
         ) as server:
             report, warnings = apply_ollama_fallback(
                 rows,
                 {**base_config(), "ollama": {"enabled": True, "url": server.url}},
+                transport=server,
             )
 
         self.assertEqual(warnings, expected["warnings"])
@@ -139,6 +126,10 @@ class OllamaCategorizationTest(unittest.TestCase):
         rows = load_json(case_dir / "rows.json")
         expected = load_json(case_dir / "expected.json")
 
+        class UnavailableTransport:
+            def request(self, request: OllamaHttpRequest) -> bytes:
+                raise ConnectionError("synthetic unavailable")
+
         report, warnings = apply_ollama_fallback(
             rows,
             {
@@ -149,6 +140,7 @@ class OllamaCategorizationTest(unittest.TestCase):
                     "timeout_seconds": 0.1,
                 },
             },
+            transport=UnavailableTransport(),
         )
 
         assert_report_subset(self, report, expected["report"])
@@ -169,7 +161,7 @@ class OllamaCategorizationTest(unittest.TestCase):
                 )
             }
 
-        with FakeOllamaServer(response) as server:
+        with FakeOllamaTransport(response) as server:
             report, warnings = apply_ollama_fallback(
                 rows,
                 {
@@ -180,6 +172,7 @@ class OllamaCategorizationTest(unittest.TestCase):
                         "batch_size": 2,
                     },
                 },
+                transport=server,
             )
 
         self.assertEqual(warnings, expected["warnings"])
@@ -219,11 +212,13 @@ class OllamaCategorizationTest(unittest.TestCase):
                     "reason": "Dangerous accounting suggestion",
                 }
             )
-        with FakeOllamaServer(
+        with FakeOllamaTransport(
             lambda request: {"response": json.dumps(response)}
         ) as server:
             report, warnings = apply_ollama_fallback(
-                rows, {**base_config(), "ollama": {"enabled": True, "url": server.url}}
+                rows,
+                {**base_config(), "ollama": {"enabled": True, "url": server.url}},
+                transport=server,
             )
         self.assertEqual(warnings, [])
         self.assertEqual(report["rejected_count"], len(protected_categories))

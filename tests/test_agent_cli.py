@@ -22,9 +22,15 @@ class AgentCliTest(unittest.TestCase):
         *,
         cwd: Path | None = None,
         input_text: str | None = None,
+        filesystem_fault: str | None = None,
     ) -> subprocess.CompletedProcess[str]:
         env = dict(os.environ)
-        env["PYTHONPATH"] = str(REPO_ROOT)
+        python_paths = []
+        if filesystem_fault is not None:
+            python_paths.append(REPO_ROOT / "tests" / "fault_injection")
+            env["HONEYMONEY_TEST_FS_FAULT"] = filesystem_fault
+        python_paths.append(REPO_ROOT)
+        env["PYTHONPATH"] = os.pathsep.join(map(str, python_paths))
         return subprocess.run(
             [sys.executable, "-m", "honeymoney.cli", *args],
             cwd=cwd or REPO_ROOT,
@@ -295,6 +301,229 @@ class AgentCliTest(unittest.TestCase):
             self.assertEqual(saved["transaction_id"], row["transaction_id"])
             self.assertEqual(saved["category"], "Groceries")
             self.assertEqual(saved["needs_review"], "false")
+
+    def test_correct_failure_restores_all_existing_artifacts(self) -> None:
+        faults = [
+            "file-fsync:review_needed.csv",
+            "file-fsync:corrections.csv",
+            "file-fsync:categorized.csv",
+            "replace-before:review_needed.csv",
+            "replace-before:corrections.csv",
+            "replace-before:categorized.csv",
+            "directory-fsync-after:categorized.csv",
+        ]
+        for fault in faults:
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory() as tmp:
+                root = self._setup_workspace(tmp)
+                statement = root / "may.csv"
+                self._write_statement(statement)
+                imported = self._run_cli(["import", str(statement), "--json"], cwd=root)
+                self.assertEqual(imported.returncode, 0, imported.stderr)
+                categorized = root / "output" / "categorized.csv"
+                review = root / "output" / "review_needed.csv"
+                corrections = root / "corrections.csv"
+                with categorized.open(newline="", encoding="utf-8") as fh:
+                    [row] = list(csv.DictReader(fh))
+                before = {
+                    path: path.read_bytes()
+                    for path in (categorized, review, corrections)
+                }
+                correction = json.dumps(
+                    [
+                        {
+                            "transaction_id": row["transaction_id"],
+                            "category": "Groceries",
+                            "needs_review": False,
+                        }
+                    ]
+                )
+
+                result = self._run_cli(
+                    ["correct", "--file", "-", "--json"],
+                    cwd=root,
+                    input_text=correction,
+                    filesystem_fault=fault,
+                )
+
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertEqual({path: path.read_bytes() for path in before}, before)
+
+    def test_correct_failure_restores_previously_absent_secondary_artifacts(
+        self,
+    ) -> None:
+        faults = [
+            "file-fsync:review_needed.csv",
+            "file-fsync:corrections.csv",
+            "file-fsync:categorized.csv",
+            "replace-before:review_needed.csv",
+            "replace-before:corrections.csv",
+            "replace-before:categorized.csv",
+            "directory-fsync-after:categorized.csv",
+        ]
+        for fault in faults:
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory() as tmp:
+                root = self._setup_workspace(tmp)
+                statement = root / "may.csv"
+                self._write_statement(statement)
+                imported = self._run_cli(["import", str(statement), "--json"], cwd=root)
+                self.assertEqual(imported.returncode, 0, imported.stderr)
+                categorized = root / "output" / "categorized.csv"
+                with categorized.open(newline="", encoding="utf-8") as fh:
+                    [row] = list(csv.DictReader(fh))
+                before = categorized.read_bytes()
+                review = root / "output" / "review_needed.csv"
+                corrections = root / "corrections.csv"
+                review.unlink()
+                corrections.unlink()
+
+                result = self._run_cli(
+                    ["correct", "--file", "-", "--json"],
+                    cwd=root,
+                    input_text=json.dumps(
+                        [
+                            {
+                                "transaction_id": row["transaction_id"],
+                                "category": "Groceries",
+                                "needs_review": False,
+                            }
+                        ]
+                    ),
+                    filesystem_fault=fault,
+                )
+
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertEqual(categorized.read_bytes(), before)
+                self.assertFalse(review.exists())
+                self.assertFalse(corrections.exists())
+
+    def test_correct_retained_generation_is_completed_by_a_non_ledger_command(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._setup_workspace(tmp)
+            statement = root / "may.csv"
+            self._write_statement(statement)
+            imported = self._run_cli(["import", str(statement), "--json"], cwd=root)
+            self.assertEqual(imported.returncode, 0, imported.stderr)
+            categorized = root / "output" / "categorized.csv"
+            with categorized.open(newline="", encoding="utf-8") as fh:
+                [row] = list(csv.DictReader(fh))
+            correction = json.dumps(
+                [
+                    {
+                        "transaction_id": row["transaction_id"],
+                        "category": "Groceries",
+                        "needs_review": False,
+                    }
+                ]
+            )
+
+            interrupted = self._run_cli(
+                ["correct", "--file", "-", "--json"],
+                cwd=root,
+                input_text=correction,
+                filesystem_fault="replace-after:categorized.csv",
+            )
+            self.assertEqual(interrupted.returncode, 75, interrupted.stderr)
+
+            recovered = self._run_cli(["config", "--json"], cwd=root)
+
+            self.assertEqual(recovered.returncode, 0, recovered.stderr)
+            self.assertEqual(self._json(recovered)["command"], "config")
+            with categorized.open(newline="", encoding="utf-8") as fh:
+                [corrected] = list(csv.DictReader(fh))
+            self.assertEqual(corrected["category"], "Groceries")
+            with (root / "output" / "review_needed.csv").open(
+                newline="", encoding="utf-8"
+            ) as fh:
+                self.assertEqual(list(csv.DictReader(fh)), [])
+            with (root / "corrections.csv").open(newline="", encoding="utf-8") as fh:
+                [saved] = list(csv.DictReader(fh))
+            self.assertEqual(saved["category"], "Groceries")
+            self.assertEqual(
+                list((root / "output").glob(".*honeymoney-state.json")), []
+            )
+
+    def test_successful_correction_preserves_existing_artifact_permissions(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._setup_workspace(tmp)
+            statement = root / "may.csv"
+            self._write_statement(statement)
+            imported = self._run_cli(["import", str(statement), "--json"], cwd=root)
+            self.assertEqual(imported.returncode, 0, imported.stderr)
+            categorized = root / "output" / "categorized.csv"
+            review = root / "output" / "review_needed.csv"
+            corrections = root / "corrections.csv"
+            modes = {categorized: 0o640, review: 0o600, corrections: 0o644}
+            for path, mode in modes.items():
+                path.chmod(mode)
+            with categorized.open(newline="", encoding="utf-8") as fh:
+                [row] = list(csv.DictReader(fh))
+
+            result = self._run_cli(
+                ["correct", "--file", "-", "--json"],
+                cwd=root,
+                input_text=json.dumps(
+                    [
+                        {
+                            "transaction_id": row["transaction_id"],
+                            "category": "Groceries",
+                            "needs_review": False,
+                        }
+                    ]
+                ),
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(
+                {path: path.stat().st_mode & 0o777 for path in modes}, modes
+            )
+
+    def test_remembered_one_shot_failure_restores_rules_and_review_artifacts(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._setup_workspace(tmp)
+            statement = root / "income.csv"
+            statement.write_text(
+                "Date,Description,Amount,Currency\n"
+                "2026-05-04,SYNTHETIC CREDIT,120.00,HKD\n",
+                encoding="utf-8",
+            )
+            imported = self._run_cli(
+                ["import", str(statement), "--no-interactive"], cwd=root
+            )
+            self.assertEqual(imported.returncode, 0, imported.stderr)
+            categorized = root / "output" / "categorized.csv"
+            with categorized.open(newline="", encoding="utf-8") as fh:
+                [row] = list(csv.DictReader(fh))
+            paths = (
+                categorized,
+                root / "output" / "review_needed.csv",
+                root / "corrections.csv",
+                root / "rules.json",
+            )
+            before = {path: path.read_bytes() for path in paths}
+
+            result = self._run_cli(
+                [
+                    "review",
+                    "--transaction",
+                    row["transaction_id"],
+                    "--as",
+                    "income",
+                    "--remember",
+                    "--yes",
+                    "--json",
+                ],
+                cwd=root,
+                filesystem_fault="replace-before:rules.json",
+            )
+
+            self.assertEqual(result.returncode, 2, result.stderr)
+            self.assertEqual({path: path.read_bytes() for path in paths}, before)
 
     def test_correct_rejects_the_entire_batch_before_writing(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

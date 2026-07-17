@@ -95,7 +95,19 @@ Processes one pasted file or folder path. If `PATH` is omitted, the command prom
 
 After each import, any records that could not be auto-categorized are offered for interactive categorization: pick a category number, press Enter to skip one, or enter `q` to skip the rest. Your picks are saved to `corrections.csv` so they stick on future runs. Pass `--no-interactive` to skip the prompts.
 
-Import refuses to process a file whose `source_file` is already present in `categorized.csv`. Use `--replace` to re-import that source and replace its existing ledger rows. Use `--reset` to do the same replacement and also remove old `corrections.csv` entries for that source before categorization; `--reset` supersedes `--replace` if both are present.
+Import refuses to process a file whose `source_file` is already present in
+`categorized.csv`. Use `--replace` to re-import that source and replace its
+existing ledger rows. Use `--reset` to do the same replacement and remove old
+`corrections.csv` entries only for sources that were processed successfully.
+Failed or skipped sources retain both their ledger rows and corrections.
+Correction removal and the replacement ledger use one recoverable generation;
+`--reset` supersedes `--replace` if both are present.
+
+A failed reset attempt writes a truthful current `import_report.json` while
+preserving the prior ledger, review rows, and corrections. Optional Ollama
+unavailability is not a statement-processing failure: parsed rows are committed,
+left uncategorized for review, and their prior corrections are cleared as the
+requested reset specifies.
 
 ```bash
 honeymoney review
@@ -120,9 +132,9 @@ for the versioned JSON envelope. A confirmed income sets `category=Income`,
 `flow_type=income`, full confidence, and clears review. Refunds remain refunds;
 owned transfers, card payments, and investment transfers stay excluded from
 income. All review forms merge corrections by transaction ID, reconcile the
-cumulative ledger, and atomically replace `corrections.csv`, `categorized.csv`,
-and `review_needed.csv`. Repeating a review does not append duplicate correction
-rows.
+cumulative ledger, and publish `corrections.csv`, `categorized.csv`, and
+`review_needed.csv` through the recoverable ledger-generation protocol.
+Repeating a review does not append duplicate correction rows.
 
 After interactive income confirmation, review can remember matching future
 inflows. For a fully explicit one-shot operation use `--remember --yes`. The
@@ -267,6 +279,10 @@ Rules may assign `flow_type` as well as `category`. For institution-specific tre
 
 Set `ollama.enabled` to `true` to categorize remaining unknown transactions with a local Ollama model. Options in the `ollama` config section:
 
+- `url`: an `http` URL whose hostname resolves only to loopback addresses
+  (`localhost`, `127.0.0.1`, or `[::1]` are typical). Remote/LAN addresses,
+  URL credentials, malformed URLs, and redirects away from loopback are
+  rejected before transaction data is sent.
 - `model`: must be a model you have pulled locally (check with `ollama list`).
 - `timeout_seconds`: request timeout per batch (default 120).
 - `batch_size`: transactions per request (default 5). Local inference is generation-bound, so total time is roughly constant regardless of batch size (~1-2s per transaction); a smaller batch just means the status line updates more often and any one request has less to lose if it fails.
@@ -327,9 +343,10 @@ PYTHON=python3.10 ./scripts/check.sh
 ```
 
 The offline verification command runs formatting, linting, unit tests,
-`pip check`, a wheel/source build, and distribution-metadata checks. Once the
-bootstrap install is available, it does not query dependency indexes or
-advisory services.
+`pip check`, a wheel/source build, and distribution-metadata checks. The test
+runner forbids in-process socket creation and DNS lookups; Ollama behavior is
+exercised through injected in-memory transports. Once the bootstrap install is
+available, the command does not query dependency indexes or advisory services.
 
 Refresh the reviewed resolution intentionally on Python 3.10:
 

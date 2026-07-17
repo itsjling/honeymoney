@@ -36,6 +36,44 @@ provides statement-level replacement and reset behavior. Corrections are
 persistent overrides keyed by `transaction_id`; rules and Ollama suggestions
 run before corrections, so reviewed choices win.
 
+## Filesystem persistence
+
+`categorized.csv` is the authoritative cumulative ledger. `review_needed.csv`
+is regenerated from that ledger whenever the ledger changes, while
+`import_report.json` records the last import attempt and is replaced with its
+import generation. Corrections and remembered rules remain independent inputs,
+but operations that change them and the ledger publish them through the same
+recoverable persistence boundary.
+
+Each operation writes and flushes complete staged files and prior-file backups
+before replacing any public path. Non-ledger artifacts are replaced first and
+`categorized.csv` last; that final ledger replacement is the generation commit
+point. The containing directories are then synchronized. This ordering is a
+recovery protocol, not a claim that several filesystem replacements are atomic.
+
+Hidden generation state beside `categorized.csv` contains only paths, modes,
+and content digests. If a write fails before the ledger commit point, the old
+files are restored. If interruption occurs after it, the next command that
+loads the active workspace configuration completes the new generation before
+continuing. Recovery removes public files that were
+absent in the prior generation, preserves existing file permissions, and does
+not include transaction values in diagnostics. Retained state also prevents a
+new operation from silently proceeding when recovery cannot be completed.
+
+Reset derives correction removal from prior ledger rows belonging only to
+sources whose current file report is `processed`. The filtered correction
+document is held in memory during categorization and is published in the same
+generation as the replacement ledger. Failed and skipped sources therefore
+retain their rows and corrections; a persistence failure restores both inputs
+to the prior generation. Import reports record the requested action and the
+ledger action actually committed for each source.
+
+The current import report describes the latest attempted import even when a
+source fails, while the authoritative ledger, its derived review rows, and saved
+corrections remain on the prior financial generation. Ollama is an optional
+post-parse categorizer: its unavailability leaves parsed rows pending review and
+does not turn a successfully processed statement into a failed reset.
+
 `category` is the merchant/budget classification. `flow_type` is the accounting
 treatment used by cash-flow totals. Ollama is limited to configured spending
 categories and cannot set an owner or protected accounting treatment. Protected
@@ -52,9 +90,15 @@ provides an explicit inspect/rewrite seam.
 - `honeymoney/cli.py`: command routing, workspace setup, imports, profile
   selection, normalization, ledger management, review filtering, and JSON output.
 - `honeymoney/corrections.py`: correction validation, merge-by-transaction-ID,
-  cumulative reconciliation, and atomic correction/ledger/review/rule writes.
+  cumulative reconciliation, and correction/ledger/review/rule generation content.
+- `honeymoney/persistence.py`: staged filesystem generation commits, authoritative
+  ledger replacement, directory synchronization, and retained-state recovery.
 - `honeymoney/rules.py`: deterministic rule validation and application.
-- `honeymoney/ollama.py`: optional local-only categorization fallback.
+- `honeymoney/ollama.py`: optional local-only categorization fallback. Its
+  shared model-listing and generation transport accepts only `http` endpoints
+  that resolve exclusively to loopback addresses, pins the connection to a
+  validated numeric address, bypasses proxies, and revalidates redirects before
+  following them.
 - `honeymoney/schema.py`: public ledger/review columns and allowed values.
 - `honeymoney/report.py`: offline HTML report generation.
 - `honeymoney/reconciliation.py`: deterministic flow derivation, transfer pairing,
