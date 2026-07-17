@@ -239,20 +239,26 @@ test ! -e tests/test_duplicate_performance.py
 The optimization is folded into #25 so output equivalence and cumulative-ledger
 correctness land in one vertical slice.
 
-### 012 — TODO
+### 012 — DONE
 
-Both normal output and correction documents pass canonical text directly to
-`csv.DictWriter`; there is no text-column formula neutralization or reversible
-read-back policy. Numeric columns are currently unchanged and must stay so.
+Every spreadsheet-facing CSV now uses one centralized, reversible export
+boundary. Formula-triggering text receives a versioned Honeymoney cell prefix;
+canonical values that already begin with that prefix are doubled, so repeated
+read/write cycles are injective and stable. The prefix is decoded only at
+ledger and correction read boundaries, before rules, reconciliation, identity,
+or accounting logic can observe it.
+
+The format keeps the existing UTF-8 header bytes and minimal CSV quoting.
+Numeric amount, balance, confidence, review-state, page, and row columns bypass
+the text encoder and remain numeric-looking. BOM-bearing and quote-all legacy
+files retain ordinary leading apostrophes. The compatibility contract and
+reserved v1 sentinel are documented in `docs/csv-compatibility.md`.
 
 ```sh
-sed -n '326,335p' honeymoney/corrections.py
-sed -n '3420,3440p' honeymoney/cli.py
+python3 -m unittest tests.test_spreadsheet_safe_csv
 python3 -m unittest tests.test_agent_cli tests.test_cli_bootstrap tests.test_workflow
+./scripts/check.sh
 ```
-
-Issue #26 covers every spreadsheet-facing CSV path after #22 stabilizes the
-writer boundary.
 
 ### 013 — DONE
 
