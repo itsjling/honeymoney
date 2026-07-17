@@ -39,6 +39,8 @@ def import_profile_case(
 ) -> tuple[list[dict[str, str]], list[str]]:
     if (case_dir / "input.csv").exists():
         return _import_csv_case(profile, case_dir / "input.csv"), []
+    if (case_dir / "input.pdf").exists():
+        return _import_pdf_byte_case(profile, case_dir / "input.pdf")
     if (case_dir / "tables.json").exists() or (case_dir / "words.json").exists():
         tables = _fixture_pages(case_dir / "tables.json")
         words_pages = _fixture_pages(case_dir / "words.json")
@@ -52,6 +54,21 @@ def assert_import_case(
     fixture_name: str,
 ) -> None:
     case_dir = FIXTURE_DIR / "import_profiles" / str(profile["id"]) / fixture_name
+    expected = load_json(case_dir / "expected.json")
+    rows, warnings = import_profile_case(profile, case_dir)
+
+    test_case.assertEqual(warnings, expected.get("warnings", []))
+    assert_rows_match(test_case, rows, expected["rows"], context=str(case_dir))
+
+
+def assert_pdf_byte_import_case(
+    test_case: unittest.TestCase,
+    profile: dict,
+    fixture_name: str,
+) -> None:
+    case_dir = FIXTURE_DIR / "import_profiles" / str(profile["id"]) / fixture_name
+    fixture_path = case_dir / "input.pdf"
+    test_case.assertTrue(fixture_path.is_file(), f"Missing PDF fixture: {fixture_path}")
     expected = load_json(case_dir / "expected.json")
     rows, warnings = import_profile_case(profile, case_dir)
 
@@ -92,6 +109,16 @@ def _import_csv_case(profile: dict, fixture_path: Path) -> list[dict[str, str]]:
         csv_path = root / "statement.csv"
         csv_path.write_text(fixture_path.read_text(encoding="utf-8"), encoding="utf-8")
         return _import_csv(csv_path, profile, base_config(), root)
+
+
+def _import_pdf_byte_case(
+    profile: dict, fixture_path: Path
+) -> tuple[list[dict[str, str]], list[str]]:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        statement_path = root / "statement.pdf"
+        statement_path.write_bytes(fixture_path.read_bytes())
+        return _import_pdf(statement_path, profile, base_config(), root)
 
 
 def _import_pdf_case(

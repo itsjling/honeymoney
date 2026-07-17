@@ -13,8 +13,9 @@ Import profile cases live here:
 ```text
 tests/fixtures/import_profiles/<profile_id>/<case_name>/
   input.csv      # CSV profiles only
-  tables.json    # PDF table extraction cases
-  words.json     # PDF word-coordinate extraction cases
+  input.pdf      # accepted PDF-byte profile goldens
+  tables.json    # reviewed synthetic table layout and smaller parser cases
+  words.json     # reviewed synthetic word-coordinate layout and smaller parser cases
   expected.json  # normalized rows plus expected warnings
 ```
 
@@ -58,6 +59,7 @@ string is not the point of the test:
 
 3. Add one synthetic input fixture:
    - `input.csv` for CSV profiles.
+   - `input.pdf` for a real `pdfplumber` extraction golden.
    - `tables.json` for `pdfplumber.extract_tables()` style data.
    - `words.json` for `pdfplumber.extract_words()` coordinate data.
 
@@ -100,6 +102,41 @@ and retain the settings required by its table, regex, word-row, or sectioned
 word-row parser. CSV mappings are also checked against the selected synthetic
 statement's actual headers; a golden cannot silently normalize a missing mapped
 column to an empty value or zero amount.
+
+### Regenerating the accepted PDF bytes
+
+The four `accepted_statement/input.pdf` files are deterministic clean-room
+documents generated from the adjacent reviewed synthetic `tables.json` or
+`words.json` layout. The generator uses only the Python standard library and
+emits no timestamps, random identifiers, document metadata, attachments,
+images, forms, scripts, or active content.
+
+Regenerate all four fixtures intentionally:
+
+```bash
+python3 tests/fixtures/import_profiles/generate_pdf_byte_goldens.py
+```
+
+Check that the committed bytes still match their sources without rewriting
+them:
+
+```bash
+python3 tests/fixtures/import_profiles/generate_pdf_byte_goldens.py --check
+```
+
+After regeneration, manually inspect every extracted page of visible text and
+the normalized-row diff. Review all identities, descriptions, dates,
+identifiers, and amounts as invented. Then update
+`pdf_byte_privacy_review.json` with the reviewed PDF and visible-text SHA-256
+hashes. Its checklist covers provenance, visible text, empty metadata, and the
+absence of attachments or embedded/active objects. Do not update those hashes
+merely to make a failing test pass.
+
+`tests.test_import_profiles` opens these bytes through installed `pdfplumber`.
+It verifies normalized rows and warnings, exact regeneration, the review
+hashes, empty metadata, page counts, and prohibited PDF object markers. The
+older JSON layouts remain useful for isolated parser cases, but they do not
+replace this end-to-end extraction seam.
 
 ## Adding a Categorization Golden
 
@@ -194,10 +231,10 @@ ordinary spending accuracy, requiring 100% safety and at least 90% accuracy.
 
 ## Checking Real PDFs Locally
 
-The committed goldens model `pdfplumber` table and word extraction with
-synthetic JSON. To also catch regressions in extraction from real PDF bytes,
-keep a separate acceptance corpus under the gitignored `private_samples/`
-directory. Nothing in this workflow is committed or sent to Ollama.
+The committed clean-room PDFs catch deterministic extraction regressions from
+synthetic bytes. To also check institution-produced statement PDFs, keep a
+separate acceptance corpus under the gitignored `private_samples/` directory.
+Nothing in that workflow is committed or sent to Ollama.
 
 Initialize the local workspace:
 

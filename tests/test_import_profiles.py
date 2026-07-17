@@ -1,10 +1,17 @@
+import hashlib
+import subprocess
+import sys
 import unittest
+
+import pdfplumber
 
 from honeymoney.cli import _assign_transaction_ids
 from tests.golden_helpers import (
     FIXTURE_DIR,
     assert_import_case,
+    assert_pdf_byte_import_case,
     import_profile_case,
+    load_json,
     load_profile,
     starter_profile,
 )
@@ -26,7 +33,7 @@ class MoxCreditCardCsvProfileTest(unittest.TestCase):
 
 class HsbcOnePdfProfileTest(unittest.TestCase):
     def test_accepted_statement(self) -> None:
-        assert_import_case(
+        assert_pdf_byte_import_case(
             self,
             load_profile("hsbc_one_pdf.json"),
             "accepted_statement",
@@ -54,7 +61,7 @@ class HsbcOnePdfProfileTest(unittest.TestCase):
 
 class HsbcCreditCardPdfProfileTest(unittest.TestCase):
     def test_accepted_statement(self) -> None:
-        assert_import_case(
+        assert_pdf_byte_import_case(
             self,
             load_profile("hsbc_hk_credit_card_pdf.json"),
             "accepted_statement",
@@ -63,7 +70,7 @@ class HsbcCreditCardPdfProfileTest(unittest.TestCase):
 
 class MoxBankPdfProfileTest(unittest.TestCase):
     def test_accepted_statement(self) -> None:
-        assert_import_case(
+        assert_pdf_byte_import_case(
             self,
             load_profile("mox_bank_pdf.json"),
             "accepted_statement",
@@ -91,7 +98,7 @@ class MoxBankPdfProfileTest(unittest.TestCase):
 
 class MoxCreditCardPdfProfileTest(unittest.TestCase):
     def test_accepted_statement(self) -> None:
-        assert_import_case(
+        assert_pdf_byte_import_case(
             self,
             load_profile("mox_credit_card_pdf.json"),
             "accepted_statement",
@@ -112,6 +119,74 @@ class AccountSemanticsTest(unittest.TestCase):
                 self.assertEqual(
                     load_profile(profile_name)["account_type"], account_type
                 )
+
+
+class PdfByteFixtureReviewTest(unittest.TestCase):
+    def test_pdf_byte_goldens_are_reproducible_and_privacy_reviewed(self) -> None:
+        fixture_root = FIXTURE_DIR / "import_profiles"
+        generator = fixture_root / "generate_pdf_byte_goldens.py"
+        result = subprocess.run(
+            [sys.executable, str(generator), "--check"],
+            cwd=fixture_root.parents[2],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+        review_path = fixture_root / "pdf_byte_privacy_review.json"
+        self.assertTrue(review_path.is_file(), f"Missing review: {review_path}")
+        review = load_json(review_path)
+        self.assertEqual(
+            set(review["fixtures"]),
+            {
+                "hsbc_one_pdf",
+                "hsbc_hk_credit_card_pdf",
+                "mox_bank_pdf",
+                "mox_credit_card_pdf",
+            },
+        )
+        prohibited_objects = [
+            b"/EmbeddedFile",
+            b"/EmbeddedFiles",
+            b"/Filespec",
+            b"/JavaScript",
+            b"/JS",
+            b"/Launch",
+            b"/OpenAction",
+            b"/AA",
+            b"/AcroForm",
+            b"/XFA",
+            b"/RichMedia",
+            b"/Subtype /Image",
+            b"/Encrypt",
+        ]
+        for profile_id, expected in review["fixtures"].items():
+            with self.subTest(profile=profile_id):
+                fixture_path = (
+                    fixture_root / profile_id / "accepted_statement/input.pdf"
+                )
+                fixture_bytes = fixture_path.read_bytes()
+                self.assertEqual(
+                    hashlib.sha256(fixture_bytes).hexdigest(), expected["sha256"]
+                )
+                for marker in prohibited_objects:
+                    self.assertNotIn(marker, fixture_bytes)
+
+                with pdfplumber.open(fixture_path) as pdf:
+                    visible_text = "\n\f\n".join(
+                        page.extract_text() or "" for page in pdf.pages
+                    )
+                    self.assertEqual(len(pdf.pages), expected["page_count"])
+                    self.assertEqual(pdf.metadata, {})
+                self.assertEqual(
+                    hashlib.sha256(visible_text.encode()).hexdigest(),
+                    expected["visible_text_sha256"],
+                )
+                self.assertTrue(expected["visible_text_reviewed"])
+                self.assertTrue(expected["metadata_reviewed"])
+                self.assertTrue(expected["embedded_content_reviewed"])
+                self.assertFalse(expected["contains_private_data"])
 
 
 if __name__ == "__main__":
