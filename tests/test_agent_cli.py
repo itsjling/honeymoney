@@ -477,6 +477,50 @@ class AgentCliTest(unittest.TestCase):
                 {path: path.stat().st_mode & 0o777 for path in modes}, modes
             )
 
+    def test_remembered_one_shot_failure_restores_rules_and_review_artifacts(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._setup_workspace(tmp)
+            statement = root / "income.csv"
+            statement.write_text(
+                "Date,Description,Amount,Currency\n"
+                "2026-05-04,SYNTHETIC CREDIT,120.00,HKD\n",
+                encoding="utf-8",
+            )
+            imported = self._run_cli(
+                ["import", str(statement), "--no-interactive"], cwd=root
+            )
+            self.assertEqual(imported.returncode, 0, imported.stderr)
+            categorized = root / "output" / "categorized.csv"
+            with categorized.open(newline="", encoding="utf-8") as fh:
+                [row] = list(csv.DictReader(fh))
+            paths = (
+                categorized,
+                root / "output" / "review_needed.csv",
+                root / "corrections.csv",
+                root / "rules.json",
+            )
+            before = {path: path.read_bytes() for path in paths}
+
+            result = self._run_cli(
+                [
+                    "review",
+                    "--transaction",
+                    row["transaction_id"],
+                    "--as",
+                    "income",
+                    "--remember",
+                    "--yes",
+                    "--json",
+                ],
+                cwd=root,
+                filesystem_fault="replace-before:rules.json",
+            )
+
+            self.assertEqual(result.returncode, 2, result.stderr)
+            self.assertEqual({path: path.read_bytes() for path in paths}, before)
+
     def test_correct_rejects_the_entire_batch_before_writing(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = self._setup_workspace(tmp)

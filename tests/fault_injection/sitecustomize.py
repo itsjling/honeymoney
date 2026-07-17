@@ -61,6 +61,7 @@ def _fsync(descriptor: int) -> None:
         not _triggered
         and fault_mode == "file-fsync"
         and expected in Path(descriptor_path).name
+        and Path(descriptor_path).name.endswith(".new")
         and stat.S_ISREG(descriptor_mode)
     ):
         _triggered = True

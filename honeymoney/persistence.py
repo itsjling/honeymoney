@@ -231,7 +231,11 @@ def _validate_state(state: dict[str, Any], authoritative_path: Path) -> None:
 
 
 def _fsync_directories(entries: list[dict[str, Any]]) -> None:
-    directories = {Path(entry["target"]).parent for entry in entries}
+    directories = {
+        Path(entry["target"]).parent
+        for entry in entries
+        if Path(entry["target"]).parent.exists()
+    }
     for directory in sorted(directories, key=str):
         _fsync_directory(directory)
 

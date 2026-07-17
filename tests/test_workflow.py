@@ -249,6 +249,30 @@ def open(path):
                 ):
                     self.assertFalse((root / "output" / name).exists())
 
+    def test_interactive_import_failure_restores_the_correction_input(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._setup_workspace(tmp)
+            statement = root / "may.csv"
+            self._write_statement(statement, ["2026-05-04,SYNTHETIC MARKET,-12.00,HKD"])
+            corrections = root / "corrections.csv"
+            before = corrections.read_bytes()
+
+            result = self._run_cli(
+                ["import", str(statement)],
+                cwd=root,
+                input_text=f"{_category_number('Groceries')}\n",
+                filesystem_fault="replace-before:corrections.csv",
+            )
+
+            self.assertEqual(result.returncode, 2, result.stderr)
+            self.assertEqual(corrections.read_bytes(), before)
+            for name in (
+                "categorized.csv",
+                "review_needed.csv",
+                "import_report.json",
+            ):
+                self.assertFalse((root / "output" / name).exists())
+
     def test_failed_replacement_restores_the_complete_old_generation(self) -> None:
         faults = [
             "file-fsync:review_needed.csv",
