@@ -13,7 +13,7 @@ exit 1 for every local `codex/improve-plan-*` tip and `codex/improve-all`, which
 means none is an ancestor of the reconciled commit:
 
 ```sh
-git merge-base --is-ancestor BRANCH 5ef77af167be6dca2ceeb47ca4462d9538e83764
+git merge-base --is-ancestor BRANCH 96482747ac34b741c0b5de55c6c2bf1c3f44e3c1
 ```
 
 Do not merge, rebase, cherry-pick, publish, or delete those branches as part of
