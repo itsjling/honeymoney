@@ -31,8 +31,9 @@ from honeymoney.corrections import (
     CORRECTION_FIELDS,
     apply_correction_operation,
     apply_corrections,
+    ledger_output_documents,
     load_corrections,
-    merge_correction_patches,
+    merged_corrections_document,
     read_ledger,
     to_review_row,
     validate_correction,
@@ -42,6 +43,7 @@ from honeymoney.ollama import (
     apply_ollama_fallback,
     list_ollama_models,
 )
+from honeymoney.persistence import persist_generation
 from honeymoney.reconciliation import (
     reconcile_ledger,
     reconciliation_date_window,
@@ -52,8 +54,6 @@ from honeymoney.rules import apply_rules, load_rules
 from honeymoney.schema import (
     ALLOWED_ACCOUNT_TYPES,
     ALLOWED_FLOW_TYPES,
-    CATEGORIZED_COLUMNS,
-    REVIEW_NEEDED_COLUMNS,
     allowed_categories,
     allowed_owners,
     allowed_payment_methods,
@@ -256,7 +256,8 @@ def _run_pipeline(
     _status.clear()
     if interactive:
         categorized_interactively = _prompt_uncategorized(transactions, config)
-        _save_interactive_corrections(categorized_interactively, config)
+    else:
+        categorized_interactively = []
     review_rows = [row for row in transactions if row["needs_review"] == "true"]
 
     _status.update("Writing output files...")
@@ -271,7 +272,6 @@ def _run_pipeline(
     )
     ledger_rows = _merge_into_ledger(categorized_path, transactions, replace_sources)
     reconciliation = reconcile_ledger(ledger_rows, config)
-    _write_ledger_outputs(categorized_path, ledger_rows)
     report = {
         "status": "partial_success" if import_warnings else "success",
         "input_count": len(input_files),
@@ -306,7 +306,10 @@ def _run_pipeline(
         "ollama": ollama_report,
         "reconciliation": reconciliation,
     }
-    _write_report(import_report_path, report)
+    files = ledger_output_documents(categorized_path, ledger_rows)
+    files[import_report_path] = json.dumps(report, indent=2, sort_keys=True) + "\n"
+    files.update(_interactive_correction_documents(categorized_interactively, config))
+    persist_generation(categorized_path, files)
     _status.clear()
 
     if print_import_summary:
@@ -1806,16 +1809,8 @@ def _merge_into_ledger(
 def _write_ledger_outputs(
     categorized_path: Path, ledger_rows: list[dict[str, str]]
 ) -> None:
-    review_needed_path = categorized_path.parent / "review_needed.csv"
-    _write_csv(categorized_path, CATEGORIZED_COLUMNS, ledger_rows)
-    _write_csv(
-        review_needed_path,
-        REVIEW_NEEDED_COLUMNS,
-        [
-            to_review_row(row)
-            for row in ledger_rows
-            if row.get("needs_review") == "true"
-        ],
+    persist_generation(
+        categorized_path, ledger_output_documents(categorized_path, ledger_rows)
     )
 
 
@@ -1939,12 +1934,12 @@ def _apply_interactive_category(transaction: dict[str, str], category: str) -> N
     transaction["flags"] = _append_flag(transaction["flags"], "manual_correction")
 
 
-def _save_interactive_corrections(
+def _interactive_correction_documents(
     categorized: list[dict[str, str]], config: dict[str, Any]
-) -> None:
+) -> dict[Path, str]:
     if not categorized or not config.get("corrections"):
-        return
-    merge_correction_patches(
+        return {}
+    path, content = merged_corrections_document(
         config,
         {
             transaction["transaction_id"]: {
@@ -1956,6 +1951,7 @@ def _save_interactive_corrections(
             for transaction in categorized
         },
     )
+    return {path: content}
 
 
 def _remove_corrections(config: dict[str, Any], transaction_ids: set[str]) -> None:

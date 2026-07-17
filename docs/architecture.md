@@ -36,6 +36,29 @@ provides statement-level replacement and reset behavior. Corrections are
 persistent overrides keyed by `transaction_id`; rules and Ollama suggestions
 run before corrections, so reviewed choices win.
 
+## Filesystem persistence
+
+`categorized.csv` is the authoritative cumulative ledger. `review_needed.csv`
+is regenerated from that ledger whenever the ledger changes, while
+`import_report.json` records the last import attempt and is replaced with its
+import generation. Corrections and remembered rules remain independent inputs,
+but operations that change them and the ledger publish them through the same
+recoverable persistence boundary.
+
+Each operation writes and flushes complete staged files and prior-file backups
+before replacing any public path. Non-ledger artifacts are replaced first and
+`categorized.csv` last; that final ledger replacement is the generation commit
+point. The containing directories are then synchronized. This ordering is a
+recovery protocol, not a claim that several filesystem replacements are atomic.
+
+Hidden generation state beside `categorized.csv` contains only paths, modes,
+and content digests. If a write fails before the ledger commit point, the old
+files are restored. If interruption occurs after it, the next ledger-reading
+command completes the new generation. Recovery removes public files that were
+absent in the prior generation, preserves existing file permissions, and does
+not include transaction values in diagnostics. Retained state also prevents a
+new operation from silently proceeding when recovery cannot be completed.
+
 `category` is the merchant/budget classification. `flow_type` is the accounting
 treatment used by cash-flow totals. Ollama is limited to configured spending
 categories and cannot set an owner or protected accounting treatment. Protected
@@ -52,7 +75,9 @@ provides an explicit inspect/rewrite seam.
 - `honeymoney/cli.py`: command routing, workspace setup, imports, profile
   selection, normalization, ledger management, review filtering, and JSON output.
 - `honeymoney/corrections.py`: correction validation, merge-by-transaction-ID,
-  cumulative reconciliation, and atomic correction/ledger/review/rule writes.
+  cumulative reconciliation, and correction/ledger/review/rule generation content.
+- `honeymoney/persistence.py`: staged filesystem generation commits, authoritative
+  ledger replacement, directory synchronization, and retained-state recovery.
 - `honeymoney/rules.py`: deterministic rule validation and application.
 - `honeymoney/ollama.py`: optional local-only categorization fallback.
 - `honeymoney/schema.py`: public ledger/review columns and allowed values.

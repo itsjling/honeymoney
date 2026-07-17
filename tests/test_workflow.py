@@ -212,7 +212,7 @@ def open(path):
             "replace-before:review_needed.csv",
             "replace-before:import_report.json",
             "replace-before:categorized.csv",
-            "directory-fsync",
+            "directory-fsync-after:categorized.csv",
         ]
         for fault in faults:
             with self.subTest(fault=fault), tempfile.TemporaryDirectory() as tmp:
@@ -242,7 +242,7 @@ def open(path):
             "replace-before:review_needed.csv",
             "replace-before:import_report.json",
             "replace-before:categorized.csv",
-            "directory-fsync",
+            "directory-fsync-after:categorized.csv",
         ]
         for fault in faults:
             with self.subTest(fault=fault), tempfile.TemporaryDirectory() as tmp:
@@ -306,6 +306,34 @@ def open(path):
             self.assertEqual(row["merchant"], "UPDATED MARKET")
             self.assertTrue((root / "output" / "review_needed.csv").exists())
             self.assertTrue((root / "output" / "import_report.json").exists())
+            self.assertEqual(
+                list((root / "output").glob(".*honeymoney-state.json")), []
+            )
+
+    def test_next_command_discards_a_retained_uncommitted_generation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._setup_workspace(tmp)
+            statement = root / "may.csv"
+            self._write_statement(
+                statement, ["2026-05-04,SYNTHETIC MARKET,-12.00,HKD"]
+            )
+
+            interrupted = self._run_cli(
+                ["import", str(statement), "--no-interactive"],
+                cwd=root,
+                filesystem_fault="replace-after:import_report.json",
+            )
+            self.assertEqual(interrupted.returncode, 75, interrupted.stderr)
+
+            recovered = self._run_cli(["status"], cwd=root)
+
+            self.assertEqual(recovered.returncode, 0, recovered.stderr)
+            for name in (
+                "categorized.csv",
+                "review_needed.csv",
+                "import_report.json",
+            ):
+                self.assertFalse((root / "output" / name).exists())
             self.assertEqual(
                 list((root / "output").glob(".*honeymoney-state.json")), []
             )
@@ -671,6 +699,47 @@ def open(path):
                 [correction] = list(csv.DictReader(fh))
             self.assertEqual(correction["transaction_id"], row["transaction_id"])
             self.assertEqual(correction["category"], "Groceries")
+
+    def test_interactive_and_one_shot_review_share_persistence_rollback(self) -> None:
+        for review_kind in ("interactive", "one-shot"):
+            with self.subTest(review_kind=review_kind), tempfile.TemporaryDirectory() as tmp:
+                root = self._setup_workspace(tmp)
+                statement = root / "may.csv"
+                self._write_statement(
+                    statement, ["2026-05-04,SYNTHETIC PURCHASE,-12.00,HKD"]
+                )
+                imported = self._run_cli(
+                    ["import", str(statement), "--no-interactive"], cwd=root
+                )
+                self.assertEqual(imported.returncode, 0, imported.stderr)
+                with (root / "output" / "categorized.csv").open(
+                    newline="", encoding="utf-8"
+                ) as fh:
+                    [row] = list(csv.DictReader(fh))
+                before = self._review_artifact_bytes(root)
+                if review_kind == "interactive":
+                    args = ["review"]
+                    input_text = f"{_category_number('Groceries')}\n"
+                else:
+                    args = [
+                        "review",
+                        "--transaction",
+                        row["transaction_id"],
+                        "--as",
+                        "expense",
+                        "--json",
+                    ]
+                    input_text = None
+
+                result = self._run_cli(
+                    args,
+                    cwd=root,
+                    input_text=input_text,
+                    filesystem_fault="replace-before:categorized.csv",
+                )
+
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertEqual(self._review_artifact_bytes(root), before)
 
     def test_review_command_reports_when_no_transactions_need_review(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

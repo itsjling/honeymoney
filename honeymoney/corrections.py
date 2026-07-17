@@ -3,14 +3,12 @@ from __future__ import annotations
 import csv
 import io
 import json
-import os
-import stat
-import tempfile
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
+from honeymoney.persistence import persist_generation, recover_generation
 from honeymoney.reconciliation import reconcile_ledger
 from honeymoney.rules import validate_rules
 from honeymoney.schema import (
@@ -161,10 +159,10 @@ def apply_corrections(
         )
 
 
-def merge_correction_patches(
+def merged_corrections_document(
     config: dict[str, Any], correction_patches: dict[str, dict[str, str]]
-) -> None:
-    """Merge correction patches when their transactions are not in the ledger yet."""
+) -> tuple[Path, str]:
+    """Build merged correction content without changing the live file."""
     corrections_value = config.get("corrections")
     if not corrections_value:
         raise ValueError("Config must define a corrections CSV path")
@@ -176,9 +174,21 @@ def merge_correction_patches(
         _correction_row(transaction_id, correction)
         for transaction_id, correction in sorted(merged.items())
     ]
-    _atomic_write_text_files(
-        {Path(corrections_value): _csv_document(CORRECTION_COLUMNS, rows)}
-    )
+    return Path(corrections_value), _csv_document(CORRECTION_COLUMNS, rows)
+
+
+def ledger_output_documents(
+    categorized_path: Path, ledger_rows: list[dict[str, str]]
+) -> dict[Path, str]:
+    review_rows = [
+        to_review_row(row) for row in ledger_rows if row.get("needs_review") == "true"
+    ]
+    return {
+        categorized_path: _csv_document(CATEGORIZED_COLUMNS, ledger_rows),
+        categorized_path.parent / "review_needed.csv": _csv_document(
+            REVIEW_NEEDED_COLUMNS, review_rows
+        ),
+    }
 
 
 def apply_correction_operation(
@@ -254,13 +264,8 @@ def apply_correction_operation(
         for transaction_id, correction in sorted(merged_corrections.items())
     ]
 
-    files = {
-        corrections_path: _csv_document(CORRECTION_COLUMNS, correction_rows),
-        categorized_path: _csv_document(CATEGORIZED_COLUMNS, corrected_ledger),
-        categorized_path.parent / "review_needed.csv": _csv_document(
-            REVIEW_NEEDED_COLUMNS, review_rows
-        ),
-    }
+    files = ledger_output_documents(categorized_path, corrected_ledger)
+    files[corrections_path] = _csv_document(CORRECTION_COLUMNS, correction_rows)
     rules_added = 0
     if remembered_rules:
         rules_path_value = config.get("rules")
@@ -290,7 +295,7 @@ def apply_correction_operation(
         rules_document["rules"] = existing_rules
         files[rules_path] = json.dumps(rules_document, indent=2, sort_keys=True) + "\n"
 
-    _atomic_write_text_files(files)
+    persist_generation(categorized_path, files)
     return CorrectionOperationResult(
         applied_count=len(normalized_patches),
         remaining_review_count=len(review_rows),
@@ -335,6 +340,7 @@ def _correction_row(transaction_id: str, correction: dict[str, str]) -> dict[str
 
 
 def read_ledger(path: Path) -> list[dict[str, str]]:
+    recover_generation(path)
     if not path.exists():
         return []
     with path.open(newline="", encoding="utf-8") as fh:
@@ -371,75 +377,6 @@ def _csv_document(columns: list[str], rows: list[dict[str, str]]) -> str:
     writer.writeheader()
     writer.writerows(rows)
     return buffer.getvalue()
-
-
-def _atomic_write_text_files(files: dict[Path, str]) -> None:
-    staged: list[tuple[Path, Path]] = []
-    backups: dict[Path, Path | None] = {}
-    completed = False
-    try:
-        for target, content in files.items():
-            target.parent.mkdir(parents=True, exist_ok=True)
-            existing_mode = (
-                stat.S_IMODE(target.stat().st_mode) if target.exists() else None
-            )
-            descriptor, temporary_name = tempfile.mkstemp(
-                dir=target.parent,
-                prefix=f".{target.name}.",
-                suffix=".tmp",
-            )
-            temporary_path = Path(temporary_name)
-            with os.fdopen(descriptor, "w", encoding="utf-8", newline="") as fh:
-                fh.write(content)
-                fh.flush()
-                os.fsync(fh.fileno())
-            if existing_mode is not None:
-                os.chmod(temporary_path, existing_mode)
-            staged.append((temporary_path, target))
-        for temporary_path, target in staged:
-            backup_path = None
-            if target.exists():
-                backup_descriptor, backup_name = tempfile.mkstemp(
-                    dir=target.parent,
-                    prefix=f".{target.name}.",
-                    suffix=".bak",
-                )
-                os.close(backup_descriptor)
-                backup_path = Path(backup_name)
-                backup_path.unlink()
-                os.replace(target, backup_path)
-            backups[target] = backup_path
-            os.replace(temporary_path, target)
-        completed = True
-    except Exception as write_error:
-        rollback_errors = []
-        for target in reversed(backups):
-            backup_path = backups.get(target)
-            try:
-                target.unlink(missing_ok=True)
-                if backup_path is not None:
-                    os.replace(backup_path, target)
-                    backups[target] = None
-            except Exception as rollback_error:
-                rollback_errors.append((target, rollback_error))
-        if rollback_errors:
-            retained = ", ".join(
-                str(backups[target])
-                for target, _ in rollback_errors
-                if backups.get(target) is not None
-            )
-            raise OSError(
-                "Correction write failed and rollback was incomplete; "
-                f"retained backups: {retained or '(none)'}"
-            ) from write_error
-        raise
-    finally:
-        for temporary_path, _ in staged:
-            temporary_path.unlink(missing_ok=True)
-        if completed:
-            for backup_path in backups.values():
-                if backup_path is not None:
-                    backup_path.unlink(missing_ok=True)
 
 
 def _append_flag(existing: str, flag: str) -> str:
