@@ -53,7 +53,7 @@ class CashFlowWorkflowTest(unittest.TestCase):
 
     def _ledger_rows(self, root: Path) -> list[dict[str, str]]:
         with (root / "output" / "categorized.csv").open(
-            newline="", encoding="utf-8-sig"
+            newline="", encoding="utf-8"
         ) as fh:
             return list(csv.DictReader(fh))
 
@@ -354,7 +354,7 @@ class CashFlowWorkflowTest(unittest.TestCase):
             self.assertEqual(rows["txn_unique_in"]["needs_review"], "false")
             self.assertEqual(rows["txn_excluded_in"]["needs_review"], "false")
             with (root / "output" / "review_needed.csv").open(
-                newline="", encoding="utf-8-sig"
+                newline="", encoding="utf-8"
             ) as fh:
                 review_rows = list(csv.DictReader(fh))
             self.assertEqual(

@@ -1,10 +1,10 @@
-import codecs
 import csv
 import json
 import os
 import subprocess
 import sys
 import tempfile
+import unicodedata
 import unittest
 from pathlib import Path
 
@@ -15,6 +15,7 @@ from honeymoney.corrections import (
     prepare_corrections_document,
     read_ledger,
 )
+from honeymoney.csv_artifacts import HONEYMONEY_CSV_ESCAPE_V1
 from honeymoney.reconciliation import reconcile_ledger
 from honeymoney.rules import apply_rules
 from honeymoney.schema import (
@@ -78,15 +79,27 @@ class SpreadsheetSafeCsvTest(unittest.TestCase):
     def test_ledger_and_review_exports_are_reversible_and_keep_amounts_numeric(
         self,
     ) -> None:
+        self.assertTrue(HONEYMONEY_CSV_ESCAPE_V1.startswith("'"))
+        self.assertTrue(
+            all(
+                unicodedata.category(character) == "Cf"
+                for character in HONEYMONEY_CSV_ESCAPE_V1[1:]
+            )
+        )
         dangerous_values = [
-            ("=SUM(A1:A2)", "'=SUM(A1:A2)"),
-            ("+FORMULA", "'+FORMULA"),
-            ("-FORMULA", "'-FORMULA"),
-            ("@FORMULA", "'@FORMULA"),
-            ("\tFORMULA", "'\tFORMULA"),
-            ("\rFORMULA", "'\rFORMULA"),
-            ("  =FORMULA", "'  =FORMULA"),
-            ("'=LEGITIMATE TEXT", "''=LEGITIMATE TEXT"),
+            ("=SUM(A1:A2)", f"{HONEYMONEY_CSV_ESCAPE_V1}=SUM(A1:A2)"),
+            ("+FORMULA", f"{HONEYMONEY_CSV_ESCAPE_V1}+FORMULA"),
+            ("-FORMULA", f"{HONEYMONEY_CSV_ESCAPE_V1}-FORMULA"),
+            ("@FORMULA", f"{HONEYMONEY_CSV_ESCAPE_V1}@FORMULA"),
+            ("\tFORMULA", f"{HONEYMONEY_CSV_ESCAPE_V1}\tFORMULA"),
+            ("\rFORMULA", f"{HONEYMONEY_CSV_ESCAPE_V1}\rFORMULA"),
+            ("  =FORMULA", f"{HONEYMONEY_CSV_ESCAPE_V1}  =FORMULA"),
+            ("'=LEGITIMATE TEXT", "'=LEGITIMATE TEXT"),
+            (
+                f"{HONEYMONEY_CSV_ESCAPE_V1}=CANONICAL SENTINEL",
+                f"{HONEYMONEY_CSV_ESCAPE_V1}{HONEYMONEY_CSV_ESCAPE_V1}"
+                "=CANONICAL SENTINEL",
+            ),
         ]
         rows = []
         for index, (canonical, _) in enumerate(dangerous_values, start=1):
@@ -119,21 +132,23 @@ class SpreadsheetSafeCsvTest(unittest.TestCase):
             ledger_path.write_text(ledger_text, encoding="utf-8", newline="")
 
             ledger_bytes = ledger_path.read_bytes()
-            self.assertTrue(ledger_bytes.startswith(codecs.BOM_UTF8))
+            self.assertTrue(ledger_bytes.startswith(b"transaction_id,date,"))
             first_data_line = ledger_bytes.splitlines()[1]
             self.assertEqual(first_data_line.count(b",-12.34,"), 3)
             self.assertIn(b",0.25,true,", first_data_line)
             self.assertNotIn(b'"-12.34"', first_data_line)
             self.assertNotIn(b'"0.25"', first_data_line)
 
-            with ledger_path.open(newline="", encoding="utf-8-sig") as handle:
-                exported_rows = list(csv.DictReader(handle))
+            with ledger_path.open(newline="", encoding="utf-8") as handle:
+                reader = csv.DictReader(handle)
+                self.assertEqual(reader.fieldnames, CATEGORIZED_COLUMNS)
+                exported_rows = list(reader)
             with (ledger_path.parent / "review_needed.csv").open(
                 "w", newline="", encoding="utf-8"
             ) as handle:
                 handle.write(documents[ledger_path.parent / "review_needed.csv"])
             with (ledger_path.parent / "review_needed.csv").open(
-                newline="", encoding="utf-8-sig"
+                newline="", encoding="utf-8"
             ) as handle:
                 review_rows = list(csv.DictReader(handle))
 
@@ -167,7 +182,7 @@ class SpreadsheetSafeCsvTest(unittest.TestCase):
                 ledger_text,
             )
 
-    def test_legacy_quote_all_artifacts_preserve_literal_apostrophes_until_rewritten(
+    def test_bom_legacy_artifacts_preserve_literal_apostrophes_until_rewritten(
         self,
     ) -> None:
         legacy_row = self._ledger_row(
@@ -179,7 +194,7 @@ class SpreadsheetSafeCsvTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             ledger_path = root / "categorized.csv"
-            with ledger_path.open("w", newline="", encoding="utf-8") as handle:
+            with ledger_path.open("w", newline="", encoding="utf-8-sig") as handle:
                 writer = csv.DictWriter(
                     handle,
                     fieldnames=CATEGORIZED_COLUMNS,
@@ -188,6 +203,7 @@ class SpreadsheetSafeCsvTest(unittest.TestCase):
                 writer.writeheader()
                 writer.writerow(legacy_row)
             ledger_before = ledger_path.read_bytes()
+            self.assertTrue(ledger_before.startswith(b"\xef\xbb\xbf"))
 
             [loaded] = read_ledger(ledger_path)
 
@@ -197,14 +213,14 @@ class SpreadsheetSafeCsvTest(unittest.TestCase):
             self.assertEqual(loaded["notes"], "'=LEGACY NOTE")
 
             migrated = ledger_output_documents(ledger_path, [loaded])[ledger_path]
-            self.assertTrue(migrated.startswith("\ufefftransaction_id,date"))
+            self.assertTrue(migrated.startswith("transaction_id,date"))
             ledger_path.write_text(migrated, encoding="utf-8", newline="")
             [reloaded] = read_ledger(ledger_path)
             self.assertEqual(reloaded["merchant"], "'=LEGACY MERCHANT")
             self.assertEqual(reloaded["original_description"], "''LEGACY DESCRIPTION")
 
             corrections_path = root / "corrections.csv"
-            with corrections_path.open("w", newline="", encoding="utf-8") as handle:
+            with corrections_path.open("w", newline="", encoding="utf-8-sig") as handle:
                 writer = csv.DictWriter(
                     handle,
                     fieldnames=CORRECTION_COLUMNS,
@@ -219,6 +235,7 @@ class SpreadsheetSafeCsvTest(unittest.TestCase):
                     }
                 )
             corrections_before = corrections_path.read_bytes()
+            self.assertTrue(corrections_before.startswith(b"\xef\xbb\xbf"))
             config = {
                 "corrections": str(corrections_path),
                 "categories": ["'=Legacy Category"],
@@ -232,7 +249,7 @@ class SpreadsheetSafeCsvTest(unittest.TestCase):
             )
             self.assertEqual(loaded_corrections["txn_legacy"]["notes"], "''Legacy note")
             _, migrated_corrections, _ = prepare_corrections_document(config)
-            self.assertTrue(migrated_corrections.startswith("\ufefftransaction_id"))
+            self.assertTrue(migrated_corrections.startswith("transaction_id"))
             corrections_path.write_text(
                 migrated_corrections, encoding="utf-8", newline=""
             )
@@ -351,20 +368,74 @@ class SpreadsheetSafeCsvTest(unittest.TestCase):
 
             self.assertEqual(merged, {"=txn_safe": correction})
             corrections_path.write_text(content, encoding="utf-8", newline="")
-            with corrections_path.open(newline="", encoding="utf-8-sig") as handle:
+            with corrections_path.open(newline="", encoding="utf-8") as handle:
                 [exported] = list(csv.DictReader(handle))
-            self.assertEqual(exported["transaction_id"], "'=txn_safe")
-            self.assertEqual(exported["category"], "'=Custom Category")
-            self.assertEqual(exported["owner"], "'@Custom Owner")
-            self.assertEqual(exported["payment_method"], "'+Custom Method")
-            self.assertEqual(exported["reason"], "'-Reviewed formula-like reason")
-            self.assertEqual(exported["notes"], "'\tFormula-like note")
+            self.assertEqual(
+                exported["transaction_id"], f"{HONEYMONEY_CSV_ESCAPE_V1}=txn_safe"
+            )
+            self.assertEqual(
+                exported["category"],
+                f"{HONEYMONEY_CSV_ESCAPE_V1}=Custom Category",
+            )
+            self.assertEqual(
+                exported["owner"], f"{HONEYMONEY_CSV_ESCAPE_V1}@Custom Owner"
+            )
+            self.assertEqual(
+                exported["payment_method"],
+                f"{HONEYMONEY_CSV_ESCAPE_V1}+Custom Method",
+            )
+            self.assertEqual(
+                exported["reason"],
+                f"{HONEYMONEY_CSV_ESCAPE_V1}-Reviewed formula-like reason",
+            )
+            self.assertEqual(
+                exported["notes"],
+                f"{HONEYMONEY_CSV_ESCAPE_V1}\tFormula-like note",
+            )
             self.assertEqual(exported["confidence"], "0.75")
             self.assertEqual(exported["needs_review"], "true")
 
             self.assertEqual(load_corrections(config), {"=txn_safe": correction})
             _, rewritten, _ = prepare_corrections_document(config)
             self.assertEqual(rewritten, content)
+
+    def test_ordinary_corrections_keep_legacy_whitespace_and_empty_note_semantics(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            corrections_path = Path(tmp) / "corrections.csv"
+            with corrections_path.open("w", newline="", encoding="utf-8") as handle:
+                writer = csv.DictWriter(handle, fieldnames=CORRECTION_COLUMNS)
+                writer.writeheader()
+                writer.writerow(
+                    {
+                        "transaction_id": "txn_ordinary",
+                        "category": "  Dining  ",
+                        "reason": "  reviewed  ",
+                        "notes": " ",
+                    }
+                )
+            config = {
+                "corrections": str(corrections_path),
+                "categories": ["Dining"],
+            }
+
+            expected = {
+                "txn_ordinary": {
+                    "category": "Dining",
+                    "reason": "reviewed",
+                    "notes": "",
+                }
+            }
+            self.assertEqual(load_corrections(config), expected)
+
+            _, content, merged = prepare_corrections_document(config)
+            self.assertEqual(merged, expected)
+            self.assertTrue(content.startswith("transaction_id,"))
+            self.assertNotIn(HONEYMONEY_CSV_ESCAPE_V1, content)
+            corrections_path.write_text(content, encoding="utf-8", newline="")
+            self.assertEqual(load_corrections(config), expected)
+            self.assertEqual(prepare_corrections_document(config)[1], content)
 
     def test_normal_import_neutralizes_statement_text_but_not_negative_amounts(
         self,
@@ -380,15 +451,23 @@ class SpreadsheetSafeCsvTest(unittest.TestCase):
 
             self.assertEqual(result.returncode, 0, result.stderr)
             ledger_path = root / "output" / "categorized.csv"
-            with ledger_path.open(newline="", encoding="utf-8-sig") as handle:
+            with ledger_path.open(newline="", encoding="utf-8") as handle:
                 [ledger_row] = list(csv.DictReader(handle))
             with (root / "output" / "review_needed.csv").open(
-                newline="", encoding="utf-8-sig"
+                newline="", encoding="utf-8"
             ) as handle:
                 [review_row] = list(csv.DictReader(handle))
-            self.assertEqual(ledger_row["merchant"], "'=SUM(A1:A2)")
-            self.assertEqual(ledger_row["original_description"], "'=SUM(A1:A2)")
-            self.assertEqual(review_row["merchant"], "'=SUM(A1:A2)")
+            self.assertEqual(
+                ledger_row["merchant"], f"{HONEYMONEY_CSV_ESCAPE_V1}=SUM(A1:A2)"
+            )
+            self.assertEqual(
+                ledger_row["original_description"],
+                f"{HONEYMONEY_CSV_ESCAPE_V1}=SUM(A1:A2)",
+            )
+            self.assertEqual(
+                review_row["merchant"],
+                f"{HONEYMONEY_CSV_ESCAPE_V1}=SUM(A1:A2)",
+            )
             self.assertEqual(ledger_row["original_amount"], "-12.34")
             self.assertEqual(ledger_row["posted_amount"], "-12.34")
             self.assertEqual(ledger_row["amount_hkd"], "-12.34")
@@ -410,7 +489,7 @@ class SpreadsheetSafeCsvTest(unittest.TestCase):
 
             self.assertEqual(repeated.returncode, 0, repeated.stderr)
             self.assertEqual(ledger_path.read_bytes(), before)
-            with ledger_path.open(newline="", encoding="utf-8-sig") as handle:
+            with ledger_path.open(newline="", encoding="utf-8") as handle:
                 [repeated_row] = list(csv.DictReader(handle))
             self.assertEqual(
                 repeated_row["transaction_id"], ledger_row["transaction_id"]
@@ -431,7 +510,7 @@ class SpreadsheetSafeCsvTest(unittest.TestCase):
             )
             self.assertEqual(imported.returncode, 0, imported.stderr)
             ledger_path = root / "output" / "categorized.csv"
-            with ledger_path.open(newline="", encoding="utf-8-sig") as handle:
+            with ledger_path.open(newline="", encoding="utf-8") as handle:
                 [imported_row] = list(csv.DictReader(handle))
 
             config_path = root / "config.json"
@@ -470,18 +549,34 @@ class SpreadsheetSafeCsvTest(unittest.TestCase):
                 root / "corrections.csv",
             ]
             before = {path: path.read_bytes() for path in artifact_paths}
-            with ledger_path.open(newline="", encoding="utf-8-sig") as handle:
+            with ledger_path.open(newline="", encoding="utf-8") as handle:
                 [ledger_row] = list(csv.DictReader(handle))
             with (root / "corrections.csv").open(
-                newline="", encoding="utf-8-sig"
+                newline="", encoding="utf-8"
             ) as handle:
                 [correction_row] = list(csv.DictReader(handle))
-            self.assertEqual(ledger_row["category"], "'=Custom Category")
-            self.assertEqual(ledger_row["owner"], "'@Custom Owner")
-            self.assertEqual(ledger_row["payment_method"], "'+Custom Method")
-            self.assertEqual(ledger_row["reason"], "'-Structured reason")
-            self.assertEqual(ledger_row["notes"], "'@Structured note")
-            self.assertEqual(correction_row["category"], "'=Custom Category")
+            self.assertEqual(
+                ledger_row["category"],
+                f"{HONEYMONEY_CSV_ESCAPE_V1}=Custom Category",
+            )
+            self.assertEqual(
+                ledger_row["owner"], f"{HONEYMONEY_CSV_ESCAPE_V1}@Custom Owner"
+            )
+            self.assertEqual(
+                ledger_row["payment_method"],
+                f"{HONEYMONEY_CSV_ESCAPE_V1}+Custom Method",
+            )
+            self.assertEqual(
+                ledger_row["reason"],
+                f"{HONEYMONEY_CSV_ESCAPE_V1}-Structured reason",
+            )
+            self.assertEqual(
+                ledger_row["notes"], f"{HONEYMONEY_CSV_ESCAPE_V1}@Structured note"
+            )
+            self.assertEqual(
+                correction_row["category"],
+                f"{HONEYMONEY_CSV_ESCAPE_V1}=Custom Category",
+            )
             self.assertEqual(correction_row["confidence"], "0.75")
 
             repeated = self._run_cli(
@@ -504,20 +599,21 @@ class SpreadsheetSafeCsvTest(unittest.TestCase):
                 input_text=f"{category_number}\n",
             )
             self.assertEqual(interactive.returncode, 0, interactive.stderr)
-            with ledger_path.open(newline="", encoding="utf-8-sig") as handle:
+            with ledger_path.open(newline="", encoding="utf-8") as handle:
                 rows_by_merchant = {
                     row["merchant"]: row for row in csv.DictReader(handle)
                 }
             with (root / "corrections.csv").open(
-                newline="", encoding="utf-8-sig"
+                newline="", encoding="utf-8"
             ) as handle:
                 correction_rows = list(csv.DictReader(handle))
             self.assertEqual(
                 rows_by_merchant["SYNTHETIC INTERACTIVE"]["category"],
-                "'=Custom Category",
+                f"{HONEYMONEY_CSV_ESCAPE_V1}=Custom Category",
             )
             self.assertIn(
-                "'=Custom Category", {row["category"] for row in correction_rows}
+                f"{HONEYMONEY_CSV_ESCAPE_V1}=Custom Category",
+                {row["category"] for row in correction_rows},
             )
 
 

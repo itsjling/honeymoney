@@ -48,7 +48,7 @@ def load_corrections(config: dict[str, Any]) -> dict[str, dict[str, str]]:
 
     artifact = read_csv_artifact(Path(corrections_path), CORRECTION_COLUMNS)
     corrections: dict[str, dict[str, str]] = {}
-    for row in artifact.rows:
+    for row_index, row in enumerate(artifact.rows):
         transaction_id = row.get("transaction_id", "").strip()
         if not transaction_id:
             continue
@@ -57,14 +57,18 @@ def load_corrections(config: dict[str, Any]) -> dict[str, dict[str, str]]:
             if field == "notes":
                 continue
             value = _correction_csv_value(
-                field, row.get(field, ""), artifact.safe_format
+                field,
+                row.get(field, ""),
+                (row_index, field) in artifact.encoded_cells,
             )
             if value:
                 meaningful[field] = value
         raw_notes = row.get("notes")
         if raw_notes is not None and raw_notes != "":
             meaningful["notes"] = _correction_csv_value(
-                "notes", raw_notes, artifact.safe_format
+                "notes",
+                raw_notes,
+                (row_index, "notes") in artifact.encoded_cells,
             )
         if meaningful:
             validate_correction(transaction_id, meaningful, config)
@@ -353,12 +357,12 @@ def _correction_row(transaction_id: str, correction: dict[str, str]) -> dict[str
     return row
 
 
-def _correction_csv_value(field: str, value: str, safe_format: bool) -> str:
-    if not safe_format:
-        return value.strip()
+def _correction_csv_value(field: str, value: str, encoded_cell: bool) -> str:
     if field == "notes" and value == " ":
         return ""
-    return value
+    if encoded_cell:
+        return value
+    return value.strip()
 
 
 def read_ledger(path: Path) -> list[dict[str, str]]:

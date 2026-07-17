@@ -220,7 +220,7 @@ class PrivatePdfAcceptanceTest(unittest.TestCase):
             }
             _write_snapshot(actual, [row])
 
-            with actual.open(newline="", encoding="utf-8-sig") as fh:
+            with actual.open(newline="", encoding="utf-8") as fh:
                 [snapshot] = list(csv.DictReader(fh))
             self.assertEqual(snapshot["merchant"], "SYNTHETIC SHOP")
             self.assertNotIn("transaction_id", snapshot)
@@ -374,7 +374,7 @@ class PrivatePdfAcceptanceTest(unittest.TestCase):
             )
 
             self.assertEqual(warnings, [])
-            with actual_path.open(newline="", encoding="utf-8-sig") as fh:
+            with actual_path.open(newline="", encoding="utf-8") as fh:
                 [row] = list(csv.DictReader(fh))
             self.assertEqual(row["transaction_date"], "2026-06-01")
             self.assertEqual(row["posting_date"], "2026-06-02")

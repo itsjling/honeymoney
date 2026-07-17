@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import codecs
 import csv
 import io
 from dataclasses import dataclass
@@ -26,14 +25,22 @@ CANONICAL_CSV_COLUMNS = frozenset(
 
 _FORMULA_MARKERS = ("=", "+", "-", "@")
 _CONTROL_MARKERS = ("\t", "\r")
-_ESCAPE_PREFIX = "'"
-_CSV_SIGNATURE = "\ufeff"
+# Apostrophe plus the invisible Unicode tag for "honeymoney-csv-v1". The
+# product-and-version-specific tag makes each encoded cell self-identifying
+# without changing the document header or relying on ambiguous quote styles.
+HONEYMONEY_CSV_ESCAPE_V1 = (
+    "'"
+    "\U000e0068\U000e006f\U000e006e\U000e0065\U000e0079"
+    "\U000e006d\U000e006f\U000e006e\U000e0065\U000e0079"
+    "\U000e002d\U000e0063\U000e0073\U000e0076\U000e002d"
+    "\U000e0076\U000e0031\U000e007f"
+)
 
 
 @dataclass(frozen=True)
 class CsvArtifact:
     rows: list[dict[str, str]]
-    safe_format: bool
+    encoded_cells: frozenset[tuple[int, str]]
 
 
 def csv_document(columns: list[str], rows: Iterable[Mapping[str, str]]) -> str:
@@ -55,46 +62,45 @@ def csv_document(columns: list[str], rows: Iterable[Mapping[str, str]]) -> str:
         }
         for row in rows
     )
-    return f"{_CSV_SIGNATURE}{buffer.getvalue()}"
+    return buffer.getvalue()
 
 
 def read_csv_artifact(path: Path, columns: list[str]) -> CsvArtifact:
-    """Read a public CSV and decode only the marked spreadsheet-safe format."""
-    with path.open("rb") as handle:
-        safe_format = handle.read(len(codecs.BOM_UTF8)) == codecs.BOM_UTF8
+    """Read a public CSV and decode self-identifying spreadsheet-safe cells."""
     with path.open(newline="", encoding="utf-8-sig") as handle:
         rows = []
-        for row in csv.DictReader(handle):
+        encoded_cells: set[tuple[int, str]] = set()
+        for row_index, row in enumerate(csv.DictReader(handle)):
+            for column in columns:
+                if column not in CANONICAL_CSV_COLUMNS and (
+                    row.get(column) or ""
+                ).startswith(HONEYMONEY_CSV_ESCAPE_V1):
+                    encoded_cells.add((row_index, column))
             rows.append(
                 {
-                    column: (
-                        canonical_csv_cell(column, row.get(column) or "")
-                        if safe_format
-                        else row.get(column) or ""
-                    )
+                    column: canonical_csv_cell(column, row.get(column) or "")
                     for column in columns
                 }
             )
-    return CsvArtifact(rows, safe_format)
+    return CsvArtifact(rows, frozenset(encoded_cells))
 
 
 def spreadsheet_safe_cell(column: str, value: str) -> str:
     """Return a reversible spreadsheet display value for one public CSV cell."""
     if column in CANONICAL_CSV_COLUMNS:
         return value
-    if value.startswith(_ESCAPE_PREFIX) or _formula_triggering_text(value):
-        return f"{_ESCAPE_PREFIX}{value}"
+    if value.startswith(HONEYMONEY_CSV_ESCAPE_V1) or _formula_triggering_text(value):
+        return f"{HONEYMONEY_CSV_ESCAPE_V1}{value}"
     return value
 
 
 def canonical_csv_cell(column: str, value: str) -> str:
     """Restore canonical text from a Honeymoney-authored public CSV cell."""
-    if column in CANONICAL_CSV_COLUMNS or not value.startswith(_ESCAPE_PREFIX):
+    if column in CANONICAL_CSV_COLUMNS or not value.startswith(
+        HONEYMONEY_CSV_ESCAPE_V1
+    ):
         return value
-    remainder = value[len(_ESCAPE_PREFIX) :]
-    if remainder.startswith(_ESCAPE_PREFIX) or _formula_triggering_text(remainder):
-        return remainder
-    return value
+    return value[len(HONEYMONEY_CSV_ESCAPE_V1) :]
 
 
 def _formula_triggering_text(value: str) -> bool:
