@@ -1,7 +1,7 @@
 # Improvement plan reconciliation
 
 This index was reconciled on 2026-07-17 against current `main` commit
-`5ef77af167be6dca2ceeb47ca4462d9538e83764`. The original plans were written
+`a91db80fe5b3b20cccf3abf4b51f58ec199d3fde`. The original plans were written
 on 2026-07-11 against `aa0eedf`; their source excerpts, branch names, and line
 numbers are historical context, not execution instructions for the live
 architecture.
@@ -35,6 +35,18 @@ correction, reconciliation, review, PDF, and JSON contracts.
   dependency or decision is resolved.
 
 ## Reconciled status
+
+### Executed specifications
+
+- [018](018-accounting-safe-ollama-categorization.md) — Make Ollama
+  categorization accounting-safe and semantically constrained. **DONE** in
+  isolated execution: implementation commit `8d9a857` passed independent
+  offline review and the `qwen2.5:3b` benchmark passed with 100% accounting
+  safety and 100% ordinary-category accuracy. Worktree:
+  `/tmp/honeymoney-plan-018`; maintainer merge pending; not published to the
+  issue tracker.
+
+### Historical-plan reconciliation
 
 | Plan | Title | Priority | Reconciled status | Follow-up |
 |---|---|---:|---|---|
