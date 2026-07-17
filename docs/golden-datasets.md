@@ -93,6 +93,14 @@ The canonical PDF import goldens currently cover `hsbc_one_pdf`,
 is the only HSBC bank-statement profile; do not add goldens for the retired
 `hsbc_hk_bank` or `hsbc_hk_bank_pdf` profiles.
 
+Every profile is validated before statement rows are read. Keep stable account
+metadata, define exactly one of `csv` or `pdf`, map a transaction or posting
+date and exactly one amount strategy (`amount` or the `debit`/`credit` pair),
+and retain the settings required by its table, regex, word-row, or sectioned
+word-row parser. CSV mappings are also checked against the selected synthetic
+statement's actual headers; a golden cannot silently normalize a missing mapped
+column to an empty value or zero amount.
+
 ## Adding a Categorization Golden
 
 For deterministic rules:

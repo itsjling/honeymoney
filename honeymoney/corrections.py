@@ -60,6 +60,9 @@ def load_corrections(config: dict[str, Any]) -> dict[str, dict[str, str]]:
                 for field in CORRECTION_FIELDS
                 if (row.get(field) or "").strip()
             }
+            raw_notes = row.get("notes")
+            if raw_notes is not None and raw_notes != "":
+                meaningful["notes"] = raw_notes.strip()
             if meaningful:
                 validate_correction(transaction_id, meaningful, config)
                 corrections[transaction_id] = meaningful
@@ -170,7 +173,7 @@ def merge_correction_patches(
         validate_correction(transaction_id, patch, config)
         merged[transaction_id] = {**merged.get(transaction_id, {}), **patch}
     rows = [
-        {"transaction_id": transaction_id, **correction}
+        _correction_row(transaction_id, correction)
         for transaction_id, correction in sorted(merged.items())
     ]
     _atomic_write_text_files(
@@ -219,6 +222,11 @@ def apply_correction_operation(
                 "needs_review", "true"
             )
         validate_correction(transaction_id, merged_correction, config)
+        _validate_resolved_state(
+            transaction_id,
+            ledger_by_id[transaction_id],
+            merged_correction,
+        )
         effective_batch[transaction_id] = merged_correction
         merged_corrections[transaction_id] = merged_correction
 
@@ -242,7 +250,7 @@ def apply_correction_operation(
         if row.get("needs_review") == "true"
     ]
     correction_rows = [
-        {"transaction_id": transaction_id, **correction}
+        _correction_row(transaction_id, correction)
         for transaction_id, correction in sorted(merged_corrections.items())
     ]
 
@@ -290,6 +298,36 @@ def apply_correction_operation(
         ledger_rows=corrected_ledger,
         rules_added=rules_added,
     )
+
+
+def _validate_resolved_state(
+    transaction_id: str,
+    ledger_row: dict[str, str],
+    correction: dict[str, str],
+) -> None:
+    needs_review = correction.get(
+        "needs_review", ledger_row.get("needs_review", "true")
+    ).casefold()
+    category = correction.get("category", ledger_row.get("category", ""))
+    flow_type = correction.get("flow_type", ledger_row.get("flow_type", ""))
+    if (
+        needs_review == "false"
+        and category in {"", "Unknown"}
+        and flow_type in {"", "unresolved"}
+    ):
+        raise ValueError(
+            f"Correction {transaction_id}: Unknown category cannot be marked resolved "
+            "without an explicit accounting flow decision"
+        )
+
+
+def _correction_row(transaction_id: str, correction: dict[str, str]) -> dict[str, str]:
+    row = {"transaction_id": transaction_id, **correction}
+    if "notes" in correction and correction["notes"] == "":
+        # CSV has no null type. A single whitespace character preserves the
+        # distinction between an omitted cell and an explicit clear operation.
+        row["notes"] = " "
+    return row
 
 
 def read_ledger(path: Path) -> list[dict[str, str]]:

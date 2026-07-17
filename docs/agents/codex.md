@@ -70,7 +70,12 @@ optional, but each item must set at least one correction:
 Use `--file -` to read the array from stdin. The entire batch is rejected before
 any files change if an ID, field, or value is invalid. Corrections are field-wise
 patches: omitted fields keep their saved values, and omitting `needs_review`
-preserves the transaction's current review state.
+preserves the transaction's current review state. An explicit `"notes": ""`
+clears notes and remains a clear operation after correction reload and later
+imports. Empty or whitespace-only `category`, `flow_type`, `owner`,
+`payment_method`, `confidence`, `reason`, and `needs_review` values are invalid.
+An empty or `Unknown` category may be marked resolved only when an explicit
+accounting flow decision already exists or is included in the patch.
 
 Human one-shot review uses the same validated correction merge and atomic
 ledger/review rewrite as `correct`. `--remember --yes` is valid for safe income

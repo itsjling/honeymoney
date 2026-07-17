@@ -51,9 +51,9 @@ correction, reconciliation, review, PDF, and JSON contracts.
 | Plan | Title | Priority | Reconciled status | Follow-up |
 |---|---|---:|---|---|
 | [001](001-preserve-failed-replacements.md) | Preserve failed replacement rows | P1 | TODO | [#19](https://github.com/itsjling/honeymoney/issues/19) |
-| [002](002-validate-public-config.md) | Validate public config | P1 | PARTIAL | [#20](https://github.com/itsjling/honeymoney/issues/20) |
-| [003](003-validate-profile-structure.md) | Validate profile structure | P1 | PARTIAL | [#20](https://github.com/itsjling/honeymoney/issues/20) |
-| [004](004-define-empty-corrections.md) | Define empty correction semantics | P1 | PARTIAL | [#21](https://github.com/itsjling/honeymoney/issues/21) |
+| [002](002-validate-public-config.md) | Validate public config | P1 | DONE | [#20](https://github.com/itsjling/honeymoney/issues/20) |
+| [003](003-validate-profile-structure.md) | Validate profile structure | P1 | DONE | [#20](https://github.com/itsjling/honeymoney/issues/20) |
+| [004](004-define-empty-corrections.md) | Define empty correction semantics | P1 | DONE | [#21](https://github.com/itsjling/honeymoney/issues/21) |
 | [005](005-failure-atomic-persistence.md) | Make persistence recoverable | P1 | PARTIAL | [#22](https://github.com/itsjling/honeymoney/issues/22) |
 | [006](006-transactional-reset.md) | Make reset transactional | P1 | TODO | [#23](https://github.com/itsjling/honeymoney/issues/23) |
 | [007](007-enforce-local-ollama.md) | Enforce local-only Ollama | P1 | TODO | [#18](https://github.com/itsjling/honeymoney/issues/18) |
@@ -86,54 +86,51 @@ The focused suites preserve successful replacement behavior but do not cover
 failed mixed-source replacement. Issue #19 adds that observable contract using
 synthetic CSV/PDF failures.
 
-### 002 — PARTIAL
+### 002 — DONE
 
-The versioned JSON error envelope and exit code 2 exist, and current validation
-covers `paths`, basic Ollama fields, and reconciliation settings. Public
-sections such as profiles, profile mappings, rules, corrections, PDF settings,
-exchange rates, categories, owners, payment methods, thresholds, and numeric
-Ollama limits do not have the complete structural/range validation matrix.
+Configuration loading now validates every public container and nested scalar
+used by the CLI, including path references, vocabularies, PDF settings,
+exchange rates, thresholds, reconciliation, category policies, and Ollama
+numeric limits. Boolean-as-number, non-finite, out-of-range, duplicate, and
+empty values fail with field-specific errors before statement processing.
 
 ```sh
-sed -n '450,525p' honeymoney/cli.py
-python3 -m unittest tests.test_agent_cli tests.test_cli_bootstrap
+python3 -m unittest tests.test_config_cli tests.test_agent_cli
 ```
 
-Issue #20 owns the remaining startup validation rather than restoring the old
-branch implementation around newer accounting configuration.
+Structured commands preserve the versioned single-document error envelope and
+exit 2 contract. Checked-in examples and starter configuration remain valid.
 
-### 003 — PARTIAL
+### 003 — DONE
 
-Profiles currently validate `account_id` and controlled owner, payment method,
-and account type values. They do not validate parser mode, coherent date and
-amount strategies, parser-specific structure, or selected CSV headers before
-normalization.
+Profiles now validate account metadata and controlled values, exactly one CSV
+or PDF parser mode, coherent date and amount strategies, sign configuration,
+regular expressions, and word/sectioned-word parser structure. The selected
+CSV profile's mapped headers are checked against the statement before row
+normalization, and profiles/mappings are loaded before reset can change saved
+corrections.
 
 ```sh
-sed -n '1998,2040p' honeymoney/cli.py
 python3 -m unittest tests.test_import_profiles tests.test_cli_bootstrap
 ```
 
-The bundled-profile goldens pass, but passing known profiles is weaker than
-rejecting malformed ones before output mutation. Issue #20 combines plans 002
-and 003 at their shared startup-validation seam.
+Malformed-profile regression cases assert field paths and unchanged artifacts;
+all bundled profile goldens pass unchanged.
 
-### 004 — PARTIAL
+### 004 — DONE
 
-Structured corrections already validate the batch before the correction
-operation writes and merge omitted fields with saved values. However JSON
-normalization strips empty strings, validation treats them as absent, and the
-CSV loader drops them. Explicit empty notes therefore cannot reliably mean
-"clear notes," while empty non-note fields are not consistently rejected.
+Structured corrections now reject empty or whitespace-only non-note fields
+before any artifact changes. Omitted fields preserve saved values and review
+state, while an explicit empty note is persisted as a durable clear operation
+that survives correction reload and later imports. Empty or `Unknown`
+categories cannot be marked resolved without an explicit accounting flow.
 
 ```sh
-sed -n '45,145p' honeymoney/corrections.py
-sed -n '1470,1530p' honeymoney/cli.py
-python3 -m unittest tests.test_agent_cli tests.test_cash_flow_review
+python3 -m unittest tests.test_agent_cli tests.test_workflow tests.test_cash_flow_review
 ```
 
-Issue #21 preserves the useful merge behavior and completes the public empty
-versus omitted contract.
+The machine and human documentation now states the omitted-versus-empty
+contract explicitly.
 
 ### 005 — PARTIAL
 
@@ -154,9 +151,10 @@ atomicity.
 
 ### 006 — TODO
 
-`--reset` calls `_remove_corrections` before profiles, rules, CSV/PDF parsing,
-Ollama, reconciliation, and output persistence. `_remove_corrections` rewrites
-the live CSV directly, so a later failure loses reviewed state.
+`--reset` now validates configuration, profiles, mappings, selected CSV headers,
+and statement parsing before calling `_remove_corrections`. It still removes
+saved corrections before rules, Ollama, reconciliation, and output persistence;
+a failure in those later phases can therefore lose reviewed state.
 
 ```sh
 sed -n '208,265p' honeymoney/cli.py
