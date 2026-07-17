@@ -59,6 +59,14 @@ absent in the prior generation, preserves existing file permissions, and does
 not include transaction values in diagnostics. Retained state also prevents a
 new operation from silently proceeding when recovery cannot be completed.
 
+Reset derives correction removal from prior ledger rows belonging only to
+sources whose current file report is `processed`. The filtered correction
+document is held in memory during categorization and is published in the same
+generation as the replacement ledger. Failed and skipped sources therefore
+retain their rows and corrections; a persistence failure restores both inputs
+to the prior generation. Import reports record the requested action and the
+ledger action actually committed for each source.
+
 `category` is the merchant/budget classification. `flow_type` is the accounting
 treatment used by cash-flow totals. Ollama is limited to configured spending
 categories and cannot set an owner or protected accounting treatment. Protected

@@ -95,7 +95,13 @@ Processes one pasted file or folder path. If `PATH` is omitted, the command prom
 
 After each import, any records that could not be auto-categorized are offered for interactive categorization: pick a category number, press Enter to skip one, or enter `q` to skip the rest. Your picks are saved to `corrections.csv` so they stick on future runs. Pass `--no-interactive` to skip the prompts.
 
-Import refuses to process a file whose `source_file` is already present in `categorized.csv`. Use `--replace` to re-import that source and replace its existing ledger rows. Use `--reset` to do the same replacement and also remove old `corrections.csv` entries for that source before categorization; `--reset` supersedes `--replace` if both are present.
+Import refuses to process a file whose `source_file` is already present in
+`categorized.csv`. Use `--replace` to re-import that source and replace its
+existing ledger rows. Use `--reset` to do the same replacement and remove old
+`corrections.csv` entries only for sources that were processed successfully.
+Failed or skipped sources retain both their ledger rows and corrections.
+Correction removal and the replacement ledger use one recoverable generation;
+`--reset` supersedes `--replace` if both are present.
 
 ```bash
 honeymoney review
@@ -120,9 +126,9 @@ for the versioned JSON envelope. A confirmed income sets `category=Income`,
 `flow_type=income`, full confidence, and clears review. Refunds remain refunds;
 owned transfers, card payments, and investment transfers stay excluded from
 income. All review forms merge corrections by transaction ID, reconcile the
-cumulative ledger, and atomically replace `corrections.csv`, `categorized.csv`,
-and `review_needed.csv`. Repeating a review does not append duplicate correction
-rows.
+cumulative ledger, and publish `corrections.csv`, `categorized.csv`, and
+`review_needed.csv` through the recoverable ledger-generation protocol.
+Repeating a review does not append duplicate correction rows.
 
 After interactive income confirmation, review can remember matching future
 inflows. For a fully explicit one-shot operation use `--remember --yes`. The

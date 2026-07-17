@@ -33,7 +33,7 @@ from honeymoney.corrections import (
     apply_corrections,
     ledger_output_documents,
     load_corrections,
-    merged_corrections_document,
+    prepare_corrections_document,
     read_ledger,
     to_review_row,
     validate_correction,
@@ -230,12 +230,40 @@ def _run_pipeline(
         profile_mappings_path=config.get("profile_mappings"),
     )
     if args.reset:
-        reset_ids = {
+        requested_action = "reset"
+    elif args.replace:
+        requested_action = "replace"
+    else:
+        requested_action = "import"
+    for file_report in file_reports:
+        file_report["requested_action"] = requested_action
+        if file_report.get("status") != "processed":
+            file_report["ledger_action"] = "preserved"
+        elif args.reset:
+            file_report["ledger_action"] = "reset"
+        elif args.replace:
+            file_report["ledger_action"] = "replaced"
+        else:
+            file_report["ledger_action"] = "added"
+    replace_sources = (
+        {
+            file_report["source_file"]
+            for file_report in file_reports
+            if file_report.get("status") == "processed"
+        }
+        if args.replace or args.reset
+        else None
+    )
+    reset_ids = (
+        {
             row["transaction_id"]
             for row in existing_ledger_rows
-            if row.get("source_file") in source_files and row.get("transaction_id")
+            if row.get("source_file") in (replace_sources or set())
+            and row.get("transaction_id")
         }
-        _remove_corrections(config, reset_ids)
+        if args.reset
+        else set()
+    )
     _status.update("Applying categorization rules...")
     rules = load_rules(config)
     apply_rules(transactions, rules, config)
@@ -252,6 +280,14 @@ def _run_pipeline(
             print(f"Warning: {warning}", file=sys.stderr)
     _status.update("Applying corrections...")
     corrections = load_corrections(config)
+    correction_documents: dict[Path, str] = {}
+    if args.reset and config.get("corrections"):
+        corrections_path, corrections_content, corrections = (
+            prepare_corrections_document(
+                config, removed_transaction_ids=reset_ids
+            )
+        )
+        correction_documents[corrections_path] = corrections_content
     apply_corrections(transactions, corrections)
     _status.clear()
     if interactive:
@@ -261,15 +297,6 @@ def _run_pipeline(
     review_rows = [row for row in transactions if row["needs_review"] == "true"]
 
     _status.update("Writing output files...")
-    replace_sources = (
-        {
-            file_report["source_file"]
-            for file_report in file_reports
-            if file_report.get("status") == "processed"
-        }
-        if args.replace or args.reset
-        else None
-    )
     ledger_rows = _merge_into_ledger(categorized_path, transactions, replace_sources)
     reconciliation = reconcile_ledger(ledger_rows, config)
     report = {
@@ -308,7 +335,14 @@ def _run_pipeline(
     }
     files = ledger_output_documents(categorized_path, ledger_rows)
     files[import_report_path] = json.dumps(report, indent=2, sort_keys=True) + "\n"
-    files.update(_interactive_correction_documents(categorized_interactively, config))
+    files.update(correction_documents)
+    files.update(
+        _interactive_correction_documents(
+            categorized_interactively,
+            config,
+            removed_transaction_ids=reset_ids,
+        )
+    )
     persist_generation(categorized_path, files)
     _status.clear()
 
@@ -1935,11 +1969,14 @@ def _apply_interactive_category(transaction: dict[str, str], category: str) -> N
 
 
 def _interactive_correction_documents(
-    categorized: list[dict[str, str]], config: dict[str, Any]
+    categorized: list[dict[str, str]],
+    config: dict[str, Any],
+    *,
+    removed_transaction_ids: set[str] | None = None,
 ) -> dict[Path, str]:
     if not categorized or not config.get("corrections"):
         return {}
-    path, content = merged_corrections_document(
+    path, content, _ = prepare_corrections_document(
         config,
         {
             transaction["transaction_id"]: {
@@ -1950,31 +1987,9 @@ def _interactive_correction_documents(
             }
             for transaction in categorized
         },
+        removed_transaction_ids=removed_transaction_ids,
     )
     return {path: content}
-
-
-def _remove_corrections(config: dict[str, Any], transaction_ids: set[str]) -> None:
-    corrections_path = config.get("corrections")
-    if not corrections_path or not transaction_ids:
-        return
-    path = Path(corrections_path)
-    if not path.exists():
-        return
-
-    with path.open(newline="", encoding="utf-8") as fh:
-        reader = csv.DictReader(fh)
-        fieldnames = reader.fieldnames or ["transaction_id"]
-        rows = [
-            row
-            for row in reader
-            if (row.get("transaction_id") or "").strip() not in transaction_ids
-        ]
-
-    with path.open("w", newline="", encoding="utf-8") as fh:
-        writer = csv.DictWriter(fh, fieldnames=fieldnames, extrasaction="ignore")
-        writer.writeheader()
-        writer.writerows(rows)
 
 
 def _write_starter_workspace(root: Path, force: bool) -> None:

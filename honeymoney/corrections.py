@@ -159,22 +159,31 @@ def apply_corrections(
         )
 
 
-def merged_corrections_document(
-    config: dict[str, Any], correction_patches: dict[str, dict[str, str]]
-) -> tuple[Path, str]:
-    """Build merged correction content without changing the live file."""
+def prepare_corrections_document(
+    config: dict[str, Any],
+    correction_patches: dict[str, dict[str, str]] | None = None,
+    *,
+    removed_transaction_ids: set[str] | None = None,
+) -> tuple[Path, str, dict[str, dict[str, str]]]:
+    """Build filtered and merged correction state without changing the live file."""
     corrections_value = config.get("corrections")
     if not corrections_value:
         raise ValueError("Config must define a corrections CSV path")
     merged = load_corrections(config)
-    for transaction_id, patch in correction_patches.items():
+    for transaction_id in removed_transaction_ids or set():
+        merged.pop(transaction_id, None)
+    for transaction_id, patch in (correction_patches or {}).items():
         validate_correction(transaction_id, patch, config)
         merged[transaction_id] = {**merged.get(transaction_id, {}), **patch}
     rows = [
         _correction_row(transaction_id, correction)
         for transaction_id, correction in sorted(merged.items())
     ]
-    return Path(corrections_value), _csv_document(CORRECTION_COLUMNS, rows)
+    return (
+        Path(corrections_value),
+        _csv_document(CORRECTION_COLUMNS, rows),
+        merged,
+    )
 
 
 def ledger_output_documents(

@@ -304,7 +304,9 @@ class AgentCliTest(unittest.TestCase):
 
     def test_correct_failure_restores_all_existing_artifacts(self) -> None:
         faults = [
-            "file-fsync",
+            "file-fsync:review_needed.csv",
+            "file-fsync:corrections.csv",
+            "file-fsync:categorized.csv",
             "replace-before:review_needed.csv",
             "replace-before:corrections.csv",
             "replace-before:categorized.csv",
@@ -349,6 +351,56 @@ class AgentCliTest(unittest.TestCase):
                 self.assertEqual(
                     {path: path.read_bytes() for path in before}, before
                 )
+
+    def test_correct_failure_restores_previously_absent_secondary_artifacts(
+        self,
+    ) -> None:
+        faults = [
+            "file-fsync:review_needed.csv",
+            "file-fsync:corrections.csv",
+            "file-fsync:categorized.csv",
+            "replace-before:review_needed.csv",
+            "replace-before:corrections.csv",
+            "replace-before:categorized.csv",
+            "directory-fsync-after:categorized.csv",
+        ]
+        for fault in faults:
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory() as tmp:
+                root = self._setup_workspace(tmp)
+                statement = root / "may.csv"
+                self._write_statement(statement)
+                imported = self._run_cli(
+                    ["import", str(statement), "--json"], cwd=root
+                )
+                self.assertEqual(imported.returncode, 0, imported.stderr)
+                categorized = root / "output" / "categorized.csv"
+                with categorized.open(newline="", encoding="utf-8") as fh:
+                    [row] = list(csv.DictReader(fh))
+                before = categorized.read_bytes()
+                review = root / "output" / "review_needed.csv"
+                corrections = root / "corrections.csv"
+                review.unlink()
+                corrections.unlink()
+
+                result = self._run_cli(
+                    ["correct", "--file", "-", "--json"],
+                    cwd=root,
+                    input_text=json.dumps(
+                        [
+                            {
+                                "transaction_id": row["transaction_id"],
+                                "category": "Groceries",
+                                "needs_review": False,
+                            }
+                        ]
+                    ),
+                    filesystem_fault=fault,
+                )
+
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertEqual(categorized.read_bytes(), before)
+                self.assertFalse(review.exists())
+                self.assertFalse(corrections.exists())
 
     def test_correct_retained_generation_is_completed_by_the_next_command(
         self,

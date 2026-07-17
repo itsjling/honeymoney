@@ -219,7 +219,9 @@ def open(path):
 
     def test_first_import_failure_does_not_publish_a_partial_generation(self) -> None:
         faults = [
-            "file-fsync",
+            "file-fsync:review_needed.csv",
+            "file-fsync:import_report.json",
+            "file-fsync:categorized.csv",
             "replace-before:review_needed.csv",
             "replace-before:import_report.json",
             "replace-before:categorized.csv",
@@ -249,7 +251,9 @@ def open(path):
 
     def test_failed_replacement_restores_the_complete_old_generation(self) -> None:
         faults = [
-            "file-fsync",
+            "file-fsync:review_needed.csv",
+            "file-fsync:import_report.json",
+            "file-fsync:categorized.csv",
             "replace-before:review_needed.csv",
             "replace-before:import_report.json",
             "replace-before:categorized.csv",
@@ -670,6 +674,39 @@ def open(path):
             corrections = (root / "corrections.csv").read_text(encoding="utf-8")
             self.assertEqual(len(corrections.strip().splitlines()), 1)
 
+    def test_interactive_reset_replaces_the_old_correction_with_the_new_choice(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._setup_workspace(tmp)
+            statement = root / "may.csv"
+            self._write_statement(
+                statement, ["2026-05-04,SYNTHETIC MARKET,-12.00,HKD"]
+            )
+            first = self._run_cli(
+                ["import", str(statement)],
+                cwd=root,
+                input_text=f"{_category_number('Groceries')}\n",
+            )
+            self.assertEqual(first.returncode, 0, first.stderr)
+
+            reset = self._run_cli(
+                ["import", str(statement), "--reset"],
+                cwd=root,
+                input_text=f"{_category_number('Dining')}\n",
+            )
+
+            self.assertEqual(reset.returncode, 0, reset.stderr)
+            with (root / "output" / "categorized.csv").open(
+                newline="", encoding="utf-8"
+            ) as fh:
+                [row] = list(csv.DictReader(fh))
+            self.assertEqual(row["category"], "Dining")
+            with (root / "corrections.csv").open(newline="", encoding="utf-8") as fh:
+                [correction] = list(csv.DictReader(fh))
+            self.assertEqual(correction["transaction_id"], row["transaction_id"])
+            self.assertEqual(correction["category"], "Dining")
+
     def test_reset_rule_and_persistence_failures_restore_the_old_generation(
         self,
     ) -> None:
@@ -710,6 +747,33 @@ def open(path):
 
                 self.assertEqual(result.returncode, 2, result.stderr)
                 self.assertEqual(self._reset_state_bytes(root), before)
+
+    def test_reset_csv_validation_failure_preserves_the_old_generation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._setup_workspace(tmp)
+            statement = root / "may.csv"
+            self._write_statement(
+                statement, ["2026-05-04,SYNTHETIC MARKET,-12.00,HKD"]
+            )
+            first = self._run_cli(
+                ["import", str(statement)],
+                cwd=root,
+                input_text=f"{_category_number('Groceries')}\n",
+            )
+            self.assertEqual(first.returncode, 0, first.stderr)
+            before = self._reset_state_bytes(root)
+            profile_path = root / "profiles" / "starter_csv.json"
+            profile = json.loads(profile_path.read_text(encoding="utf-8"))
+            profile["csv"]["columns"]["amount"] = "Missing Amount"
+            profile_path.write_text(json.dumps(profile), encoding="utf-8")
+
+            result = self._run_cli(
+                ["import", str(statement), "--reset", "--no-interactive"],
+                cwd=root,
+            )
+
+            self.assertEqual(result.returncode, 2, result.stderr)
+            self.assertEqual(self._reset_state_bytes(root), before)
 
     def test_failed_pdf_reset_preserves_ledger_and_correction_but_reports_failure(
         self,
@@ -809,7 +873,13 @@ def open(path):
             )
 
             reset = self._run_cli(
-                ["import", str(statements), "--reset", "--no-interactive"],
+                [
+                    "import",
+                    str(statements),
+                    "--reset",
+                    "--no-interactive",
+                    "--json",
+                ],
                 cwd=root,
                 extra_pythonpath=fake_modules,
             )
@@ -844,6 +914,19 @@ def open(path):
                     "statement.pdf": ("failed", "preserved"),
                 },
             )
+            payload = json.loads(reset.stdout)
+            self.assertEqual(payload["command"], "import")
+            self.assertEqual(payload["status"], "partial_success")
+            self.assertEqual(payload["data"]["files"], report["files"])
+
+            before_repeat = self._reset_state_bytes(root)
+            repeated = self._run_cli(
+                ["import", str(statements), "--reset", "--no-interactive"],
+                cwd=root,
+                extra_pythonpath=fake_modules,
+            )
+            self.assertEqual(repeated.returncode, 0, repeated.stderr)
+            self.assertEqual(self._reset_state_bytes(root), before_repeat)
 
     def test_review_command_categorizes_transactions_needing_review(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

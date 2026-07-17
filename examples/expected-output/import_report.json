@@ -6,7 +6,9 @@
   "errors": [],
   "files": [
     {
+      "ledger_action": "added",
       "profile_id": "starter_csv",
+      "requested_action": "import",
       "source_file": "transactions.csv",
       "status": "processed",
       "transaction_count": "3"
