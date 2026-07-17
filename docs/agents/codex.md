@@ -11,6 +11,8 @@ environment when desired, then run:
 ```
 
 Set `PYTHON=/path/to/python` when Codex should use a specific interpreter.
+Bootstrap resolves the reviewed direct and transitive versions from
+`constraints/dev.txt`; CI proves that resolution on Python 3.10 and 3.13.
 
 ## Codex cloud
 
@@ -22,6 +24,16 @@ with:
 - maintenance script: `./scripts/bootstrap.sh`;
 - no secrets;
 - agent-phase internet access disabled.
+
+Run `./scripts/bootstrap.sh` during environment setup while package-index access
+is available. The subsequent `./scripts/check.sh` agent phase is offline: it
+uses the installed environment for Ruff, tests, `pip check`, package builds,
+and distribution-metadata verification. It does not perform advisory lookup.
+
+Maintainers can run `./scripts/dependency-health.sh` separately when network
+access is allowed. That command audits package names and versions only; it does
+not open statement files. CI keeps this online audit in its own job after the
+offline-compatible Python-version matrix succeeds.
 
 Launch cloud work manually from a decision-complete GitHub issue carrying the
 `ready-for-agent` label. Cloud tasks must use only committed synthetic fixtures;

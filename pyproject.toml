@@ -7,11 +7,12 @@ dependencies = []
 
 [project.optional-dependencies]
 pdf = [
-  "pdfplumber",
-  "PyMuPDF",
+  "pdfplumber>=0.11.10,<0.12",
+  "PyMuPDF>=1.28,<1.29",
 ]
 dev = [
   "build>=1.2,<2",
+  "pip-audit>=2.10,<3",
   "ruff>=0.12,<1",
   "setuptools>=70.1",
   "wheel>=0.45,<1",

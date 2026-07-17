@@ -317,9 +317,49 @@ state, remain unchanged.
 
 ## Tests
 
+Development and CI installs use the reviewed resolution in
+`constraints/dev.txt` while published PDF requirements remain compatible
+ranges. Bootstrap from any directory with Python 3.10 or 3.13:
+
 ```bash
-./scripts/check.sh
+PYTHON=python3.10 ./scripts/bootstrap.sh
+PYTHON=python3.10 ./scripts/check.sh
 ```
+
+The offline verification command runs formatting, linting, unit tests,
+`pip check`, a wheel/source build, and distribution-metadata checks. Once the
+bootstrap install is available, it does not query dependency indexes or
+advisory services.
+
+Refresh the reviewed resolution intentionally on Python 3.10:
+
+```bash
+PYTHON=python3.10 ./scripts/refresh-constraints.sh
+git diff -- pyproject.toml constraints/dev.txt
+```
+
+The refresh uses a clean temporary environment and rewrites the complete direct
+and transitive resolution. Never hand-edit individual transitive pins. Before
+accepting the diff, bootstrap clean environments on both Python 3.10 and 3.13,
+run the import-profile goldens, and run the full verification command:
+
+```bash
+clean_python=/path/to/clean-environment/bin/python
+PYTHON="$clean_python" ./scripts/bootstrap.sh
+"$clean_python" -m unittest tests.test_import_profiles
+PYTHON="$clean_python" ./scripts/check.sh
+```
+
+Dependency advisory lookup is deliberately separate because it needs network
+access. It checks installed-package consistency first, then fails for any known
+advisory (which is stricter than checking only high-severity findings):
+
+```bash
+./scripts/dependency-health.sh
+```
+
+This command sends only package names and versions to the public advisory
+service; it never reads statement inputs or generated ledgers.
 
 Focused golden suites:
 
