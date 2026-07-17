@@ -3,7 +3,6 @@
     {
       "id": "txn_unknown",
       "category": "Dining",
-      "owner": "Household",
       "confidence": 0.86,
       "reason": "Restaurant-like merchant"
     }

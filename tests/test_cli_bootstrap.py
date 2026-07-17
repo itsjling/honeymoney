@@ -3486,7 +3486,6 @@ class CliBootstrapTest(unittest.TestCase):
                                     "transactions"
                                 ][0]["id"],
                                 "category": "Dining",
-                                "owner": "Household",
                                 "confidence": 0.86,
                                 "reason": "Restaurant-like merchant",
                             }
@@ -3597,6 +3596,227 @@ class CliBootstrapTest(unittest.TestCase):
             prompt = json.loads(captured_requests[0]["prompt"])
             self.assertNotIn("source_file", prompt["transactions"][0])
 
+    def test_accounting_safe_ollama_boundary_is_end_to_end_and_idempotent(self) -> None:
+        captured_requests = []
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self) -> None:
+                length = int(self.headers["Content-Length"])
+                request = json.loads(self.rfile.read(length))
+                captured_requests.append(request)
+                prompt = json.loads(request["prompt"])
+                categorizations = []
+                for item in prompt["transactions"]:
+                    category = (
+                        "Credit Card Payment"
+                        if item["merchant"] == "UNIDENTIFIED BANK CREDIT"
+                        else "Dining"
+                    )
+                    categorizations.append(
+                        {
+                            "id": item["id"],
+                            "category": category,
+                            "confidence": 0.99,
+                            "reason": "Synthetic loopback response",
+                        }
+                    )
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(
+                    json.dumps({"response": json.dumps(categorizations)}).encode(
+                        "utf-8"
+                    )
+                )
+
+            def log_message(self, format: str, *args: object) -> None:
+                return
+
+        server = HTTPServer(("127.0.0.1", 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        self.addCleanup(server.shutdown)
+        self.addCleanup(server.server_close)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            input_dir = root / "input"
+            input_dir.mkdir()
+            (input_dir / "card.csv").write_text(
+                "\n".join(
+                    [
+                        "Date,Description,Amount,Currency",
+                        "2026-05-01,CARD RESTAURANT,-80.00,HKD",
+                        "2026-05-02,CASH REBATE,8.00,HKD",
+                        "2026-05-03,ATM WITHDRAWAL,-100.00,HKD",
+                        "2026-05-04,CREDIT CARD PAYMENT,172.00,HKD",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            (input_dir / "bank.csv").write_text(
+                "\n".join(
+                    [
+                        "Date,Description,Amount,Currency",
+                        "2026-05-05,SAVINGS INTEREST,2.00,HKD",
+                        "2026-05-06,UNIDENTIFIED BANK CREDIT,90.00,HKD",
+                        "2026-05-07,UNKNOWN OWNER SHOP,-20.00,HKD",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            profile_columns = {
+                "transaction_date": "Date",
+                "description": "Description",
+                "amount": "Amount",
+                "original_currency": "Currency",
+            }
+            card_profile = root / "card_profile.json"
+            card_profile.write_text(
+                json.dumps(
+                    {
+                        "id": "card",
+                        "account_id": "synthetic_card",
+                        "account": "Synthetic Card",
+                        "account_type": "credit_card",
+                        "institution": "Synthetic",
+                        "country": "HK",
+                        "account_currency": "HKD",
+                        "owner": "Household",
+                        "payment_method": "Credit Card",
+                        "csv": {"columns": profile_columns},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            bank_profile = root / "bank_profile.json"
+            bank_profile.write_text(
+                json.dumps(
+                    {
+                        "id": "bank",
+                        "account_id": "synthetic_bank",
+                        "account": "Synthetic Bank",
+                        "account_type": "bank",
+                        "institution": "Synthetic",
+                        "country": "HK",
+                        "account_currency": "HKD",
+                        "owner": "Unknown",
+                        "payment_method": "Bank Account",
+                        "csv": {"columns": profile_columns},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            mappings = root / "profile_mappings.json"
+            mappings.write_text(
+                json.dumps(
+                    {
+                        "filename_patterns": [
+                            {"pattern": "card.csv", "profile": "card"},
+                            {"pattern": "bank.csv", "profile": "bank"},
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            config_path = root / "config.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "base_currency": "HKD",
+                        "exchange_rates": {"HKD": 1.0},
+                        "profiles": [str(card_profile), str(bank_profile)],
+                        "profile_mappings": str(mappings),
+                        "ollama": {
+                            "enabled": True,
+                            "url": f"http://127.0.0.1:{server.server_port}/api/generate",
+                            "model": "synthetic",
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            output = root / "output" / "categorized.csv"
+
+            def run_import() -> subprocess.CompletedProcess[str]:
+                return subprocess.run(
+                    [
+                        sys.executable,
+                        "-m",
+                        "honeymoney.cli",
+                        "--input",
+                        str(input_dir),
+                        "--output",
+                        str(output),
+                        "--config",
+                        str(config_path),
+                        "--replace",
+                        "--no-interactive",
+                    ],
+                    cwd=Path(__file__).resolve().parents[1],
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    check=False,
+                )
+
+            first = run_import()
+            self.assertEqual(first.returncode, 0, first.stderr)
+            categorized_text = output.read_text(encoding="utf-8")
+            review_path = output.parent / "review_needed.csv"
+            review_text = review_path.read_text(encoding="utf-8")
+            report_path = output.parent / "import_report.json"
+            report_text = report_path.read_text(encoding="utf-8")
+            with output.open(newline="", encoding="utf-8") as fh:
+                rows = {row["merchant"]: row for row in csv.DictReader(fh)}
+            with review_path.open(newline="", encoding="utf-8") as fh:
+                review_rows = {row["merchant"]: row for row in csv.DictReader(fh)}
+            report = json.loads(report_text)
+
+            self.assertEqual(rows["CARD RESTAURANT"]["category"], "Dining")
+            self.assertEqual(rows["CARD RESTAURANT"]["flow_type"], "expense")
+            self.assertEqual(rows["CARD RESTAURANT"]["owner"], "Household")
+            self.assertEqual(rows["CASH REBATE"]["flow_type"], "refund")
+            self.assertEqual(rows["CASH REBATE"]["needs_review"], "true")
+            self.assertEqual(rows["SAVINGS INTEREST"]["flow_type"], "income")
+            self.assertEqual(rows["SAVINGS INTEREST"]["needs_review"], "true")
+            self.assertEqual(rows["ATM WITHDRAWAL"]["flow_type"], "expense")
+            self.assertEqual(
+                rows["CREDIT CARD PAYMENT"]["flow_type"], "credit_card_payment"
+            )
+            self.assertEqual(rows["UNIDENTIFIED BANK CREDIT"]["category"], "Unknown")
+            self.assertIn(
+                "ollama_policy_rejected", rows["UNIDENTIFIED BANK CREDIT"]["flags"]
+            )
+            self.assertIn(
+                "Credit Card Payment", rows["UNIDENTIFIED BANK CREDIT"]["reason"]
+            )
+            self.assertEqual(rows["UNKNOWN OWNER SHOP"]["category"], "Dining")
+            self.assertEqual(rows["UNKNOWN OWNER SHOP"]["owner"], "Unknown")
+            self.assertEqual(
+                set(review_rows),
+                {
+                    "CASH REBATE",
+                    "SAVINGS INTEREST",
+                    "UNIDENTIFIED BANK CREDIT",
+                    "UNKNOWN OWNER SHOP",
+                },
+            )
+            self.assertEqual(report["categorization"]["structural_count"], 4)
+            self.assertEqual(report["ollama"]["candidate_count"], 3)
+            self.assertEqual(report["ollama"]["accepted_count"], 1)
+            self.assertEqual(report["ollama"]["reviewable_count"], 1)
+            self.assertEqual(report["ollama"]["rejected_count"], 1)
+
+            second = run_import()
+            self.assertEqual(second.returncode, 0, second.stderr)
+            self.assertEqual(output.read_text(encoding="utf-8"), categorized_text)
+            self.assertEqual(review_path.read_text(encoding="utf-8"), review_text)
+            self.assertEqual(report_path.read_text(encoding="utf-8"), report_text)
+            prompt = json.loads(captured_requests[0]["prompt"])
+            self.assertNotIn("owner", prompt)
+            self.assertNotIn("Income", prompt["allowed_categories"])
+
     def test_invalid_ollama_response_marks_transaction_for_review(self) -> None:
         class Handler(BaseHTTPRequestHandler):
             def do_POST(self) -> None:
@@ -3606,7 +3826,6 @@ class CliBootstrapTest(unittest.TestCase):
                             {
                                 "id": "not-the-transaction-id",
                                 "category": "Review Needed",
-                                "owner": "Household",
                                 "confidence": 1.5,
                                 "reason": "Bad response",
                             }
@@ -5343,7 +5562,6 @@ def open(path):
                             {
                                 "id": transaction["id"],
                                 "category": "Dining",
-                                "owner": "Household",
                                 "confidence": 0.91,
                                 "reason": "Local model matched dining-like transaction",
                             }

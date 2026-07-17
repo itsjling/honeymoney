@@ -23,6 +23,10 @@ from importlib import resources
 from pathlib import Path
 from typing import Any
 
+from honeymoney.classification_policy import (
+    apply_structural_classification,
+    validate_category_policies,
+)
 from honeymoney.corrections import (
     CORRECTION_FIELDS,
     apply_correction_operation,
@@ -238,6 +242,8 @@ def _run_pipeline(
     apply_rules(transactions, rules, config)
     _status.update("Checking for duplicates...")
     _annotate_duplicate_suspicions(transactions)
+    _status.update("Applying structural classifications...")
+    structural_count = apply_structural_classification(transactions, config)
     ollama_report, ollama_warnings = apply_ollama_fallback(
         transactions, config, progress=_ollama_progress
     )
@@ -268,6 +274,7 @@ def _run_pipeline(
         "review_count": len(review_rows),
         "uncategorized_count": _uncategorized_count(transactions),
         "duplicate_count": _count_flag(transactions, "duplicate_suspected"),
+        "categorization": {"structural_count": structural_count},
         "strict": args.strict,
         "interactive": interactive,
         "replace": args.replace or args.reset,
@@ -494,6 +501,7 @@ def _validate_config_document(config: dict[str, Any]) -> None:
         if not isinstance(reconciliation, dict):
             raise ValueError("Config field reconciliation must be a JSON object")
         reconciliation_date_window(config)
+    validate_category_policies(config)
 
 
 def _write_config_document(path: Path, config: dict[str, Any]) -> None:

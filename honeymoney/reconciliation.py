@@ -5,6 +5,7 @@ from datetime import date
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
+from honeymoney.classification_policy import trusted_accounting_provenance
 from honeymoney.schema import ALLOWED_ACCOUNT_TYPES, ALLOWED_FLOW_TYPES
 
 TRANSFER_FLOW_TYPES = {
@@ -142,6 +143,7 @@ def _derive_flow_type(row: dict[str, str]) -> None:
     if existing in ALLOWED_FLOW_TYPES and row.get("flow_source") in {
         "rule",
         "correction",
+        "structural",
     }:
         return
 
@@ -152,23 +154,23 @@ def _derive_flow_type(row: dict[str, str]) -> None:
         account_type = "unknown"
 
     if category == "Income":
-        flags = _tokens(row.get("flags", ""))
-        explicitly_confirmed = "manual_correction" in flags or any(
-            flag.startswith("matched_rule:") for flag in flags
-        )
-        # Legacy ledgers may have an explicit Income category without provenance.
-        # Preserve that contract, while preventing Ollama alone from establishing flow.
-        flow_type = (
-            "unresolved"
-            if "ollama_categorized" in flags and not explicitly_confirmed
-            else "income"
-        )
+        flow_type = "income" if trusted_accounting_provenance(row) else "unresolved"
     elif category == "Credit Card Payment":
-        flow_type = "credit_card_payment"
+        flow_type = (
+            "credit_card_payment"
+            if trusted_accounting_provenance(row)
+            else "unresolved"
+        )
     elif category == "Internal Transfer":
-        flow_type = "internal_transfer"
+        flow_type = (
+            "internal_transfer" if trusted_accounting_provenance(row) else "unresolved"
+        )
     elif category in {"Savings", "Investments"}:
-        flow_type = "investment_transfer"
+        flow_type = (
+            "investment_transfer"
+            if trusted_accounting_provenance(row)
+            else "unresolved"
+        )
     elif amount is None or amount == 0:
         flow_type = "unresolved"
     elif category in {"", "Unknown", "Other"}:

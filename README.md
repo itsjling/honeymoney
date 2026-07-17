@@ -131,6 +131,21 @@ normalized description, and inflow direction; it never matches by amount. The
 rule and correction are validated and persisted together, and deterministic
 rules run before the optional local Ollama fallback.
 
+## Accounting-safe Ollama categorization
+
+Ollama is an optional local merchant-category suggester, never an accounting
+authority. Import precedence is rules, duplicate annotation, conservative
+structural classification, Ollama, then saved corrections. The model sees only
+spending categories and cannot change an owner. `Income`, `Credit Card Payment`,
+`Internal Transfer`, `Savings`, and `Investments` are protected accounting
+categories: only rules, corrections, structural matching, or reconciliation can
+establish their flows.
+
+Optional `category_policies` entries give a category a `kind` and model
+description. Kinds are `spending`, `accounting`, and `manual_only`; custom
+categories default to manual-only, and protected built-ins cannot become
+spending. Import reports include additive structural and Ollama outcome metrics.
+
 ```bash
 honeymoney config
 honeymoney config edit
@@ -232,7 +247,7 @@ Common edits:
 
 Profiles may set `account_type` to `bank`, `credit_card`, `investment`, or `unknown`; omission remains compatible and common payment methods are inferred. CSV/PDF column mappings may optionally expose `statement_opening_balance` and `statement_closing_balance`. Reconciliation reports an explicit `unavailable` balance status when the source does not supply both rather than inventing balances.
 
-Rules may assign `flow_type` as well as `category`. For institution-specific treatment, use `conditions` to combine exact, keyword, or regex matches on fields such as `institution`, `account_id`, `account_type`, and `original_description`. The derived `direction` condition supports exact `inflow` or `outflow` matching without changing transaction identity. These deterministic rules run before local Ollama; Ollama can suggest merchant categories but does not set or replace `flow_type`.
+Rules may assign `flow_type` as well as `category`. For institution-specific treatment, use `conditions` to combine exact, keyword, or regex matches on fields such as `institution`, `account_id`, `account_type`, and `original_description`. The derived `direction` condition supports exact `inflow` or `outflow` matching without changing transaction identity. These deterministic rules run before local Ollama; Ollama can suggest spending merchant categories but does not set an owner or replace `flow_type`.
 
 ### Ollama fallback
 
@@ -243,7 +258,7 @@ Set `ollama.enabled` to `true` to categorize remaining unknown transactions with
 - `batch_size`: transactions per request (default 5). Local inference is generation-bound, so total time is roughly constant regardless of batch size (~1-2s per transaction); a smaller batch just means the status line updates more often and any one request has less to lose if it fails.
 - `think`: allow thinking models to reason before answering (default `false`; slower and unnecessary since responses are schema-constrained).
 
-Requests constrain the response to the allowed categories and owners. The status line shows which batch is in flight (`batch 2/20 (transactions 6-10 of 98, 4s)`) and ticks up every second while waiting, so a slow local model doesn't look stuck. If Ollama is unreachable, the model is missing, or a categorization is rejected, the import prints a warning explaining why and the affected rows stay uncategorized for interactive or manual review.
+Requests constrain the response to model-eligible spending categories, with definitions and accounting-boundary guidance; they never include owners. The status line shows which batch is in flight (`batch 2/20 (transactions 6-10 of 98, 4s)`) and ticks up every second while waiting, so a slow local model doesn't look stuck. If Ollama is unreachable, the model is missing, or a categorization is rejected, the import prints a warning explaining why and the affected rows stay uncategorized for interactive or manual review.
 When an interactive import reaches uncategorized rows while the fallback is disabled, the prompt explains that `ollama.enabled` must be set to `true` in `config.json`.
 
 The repo also includes fuller examples:

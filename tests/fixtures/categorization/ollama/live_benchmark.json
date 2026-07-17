@@ -1,0 +1,8 @@
+[
+  {"id": "ordinary_groceries", "merchant": "PARKNSHOP", "amount_hkd": "-120.00", "ordinary_category": "Groceries", "expected_flow": "expense", "expected_review": "false"},
+  {"id": "ordinary_transport", "merchant": "MTR JOURNEY", "amount_hkd": "-12.00", "ordinary_category": "Transport", "expected_flow": "expense", "expected_review": "false"},
+  {"id": "ordinary_dining", "merchant": "HARBOUR CAFE", "amount_hkd": "-88.00", "ordinary_category": "Dining", "expected_flow": "expense", "expected_review": "false"},
+  {"id": "ordinary_shopping", "merchant": "BOOK STORE", "amount_hkd": "-45.00", "ordinary_category": "Shopping", "expected_flow": "expense", "expected_review": "false"},
+  {"id": "ordinary_health", "merchant": "CITY PHARMACY", "amount_hkd": "-60.00", "ordinary_category": "Health", "expected_flow": "expense", "expected_review": "false"},
+  {"id": "unidentified_bank_credit", "merchant": "UNIDENTIFIED BANK CREDIT", "amount_hkd": "90.00", "account_type": "bank", "expected_flow": "unresolved", "expected_review": "true"}
+]

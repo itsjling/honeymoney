@@ -237,6 +237,22 @@ class ConfigCliTest(unittest.TestCase):
             self.assertIn("property name", result.stderr)
             self.assertEqual(config_path.read_bytes(), original)
 
+    def test_config_rejects_invalid_category_policy(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._setup_workspace(tmp)
+            config_path = root / "config.json"
+            config = json.loads(config_path.read_text(encoding="utf-8"))
+            config["category_policies"] = {
+                "Income": {"kind": "spending", "description": "Not allowed"}
+            }
+            config_path.write_text(json.dumps(config), encoding="utf-8")
+
+            result = self._run_cli(["config", "--json"], cwd=root)
+
+            self.assertEqual(result.returncode, 2)
+            payload = json.loads(result.stdout)
+            self.assertIn("cannot relax", payload["errors"][0]["message"])
+
 
 if __name__ == "__main__":
     unittest.main()

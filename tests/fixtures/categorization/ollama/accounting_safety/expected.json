@@ -1,20 +1,19 @@
 {
   "report": {
-    "status": "unavailable",
+    "status": "success",
     "candidate_count": 1,
     "accepted_count": 0,
     "reviewable_count": 0,
-    "rejected_count": 0,
+    "rejected_count": 1,
     "applied_count": 0,
     "invalid_count": 0
   },
-  "warnings_prefix": "Ollama unavailable:",
   "rows": [
     {
-      "transaction_id": "txn_unknown",
+      "transaction_id": "txn_restaurant",
       "category": "Unknown",
       "needs_review": "true",
-      "_flags_contains": ["ollama_unavailable"]
+      "_flags_contains": ["ollama_policy_rejected"]
     }
   ]
 }

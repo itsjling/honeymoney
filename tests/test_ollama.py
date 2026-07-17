@@ -44,7 +44,6 @@ class OllamaTest(unittest.TestCase):
                             {
                                 "id": "txn_1",
                                 "category": "Dining",
-                                "owner": "Household",
                                 "confidence": 0.86,
                                 "reason": "Restaurant-like merchant",
                             }
@@ -86,13 +85,12 @@ class OllamaTest(unittest.TestCase):
         self.assertIs(request["think"], False)
         item_schema = request["format"]["properties"]["categorizations"]["items"]
         self.assertIn("Dining", item_schema["properties"]["category"]["enum"])
-        self.assertIn("Household", item_schema["properties"]["owner"]["enum"])
         self.assertEqual(
-            item_schema["required"], ["id", "category", "owner", "confidence", "reason"]
+            item_schema["required"], ["id", "category", "confidence", "reason"]
         )
         prompt = json.loads(request["prompt"])
         self.assertIn("Dining", prompt["allowed_categories"])
-        self.assertIn("Household", prompt["allowed_owners"])
+        self.assertNotIn("allowed_owners", prompt)
         sent_transaction = prompt["transactions"][0]
         self.assertNotIn("source_file", sent_transaction)
         self.assertNotIn("notes", sent_transaction)
@@ -109,7 +107,6 @@ class OllamaTest(unittest.TestCase):
                                 {
                                     "id": "txn_1",
                                     "category": "Transport",
-                                    "owner": "Household",
                                     "confidence": 0.95,
                                     "reason": "Ride hailing merchant",
                                 }
@@ -162,7 +159,6 @@ class OllamaTest(unittest.TestCase):
                             {
                                 "id": transaction["id"],
                                 "category": "Dining",
-                                "owner": "Household",
                                 "confidence": 0.91,
                                 "reason": "Restaurant-like merchant",
                             }
@@ -209,6 +205,78 @@ class OllamaTest(unittest.TestCase):
             [row["category"] for row in transactions], ["Dining", "Dining"]
         )
 
+    def test_unavailable_batch_reports_additive_partial_counts(self) -> None:
+        requests = 0
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self) -> None:
+                nonlocal requests
+                requests += 1
+                length = int(self.headers["Content-Length"])
+                request = json.loads(self.rfile.read(length))
+                if requests == 2:
+                    self.send_error(503, "Synthetic unavailable")
+                    return
+                transaction_id = json.loads(request["prompt"])["transactions"][0]["id"]
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(
+                    json.dumps(
+                        {
+                            "response": json.dumps(
+                                [
+                                    {
+                                        "id": transaction_id,
+                                        "category": "Dining",
+                                        "confidence": 0.91,
+                                        "reason": "Synthetic merchant",
+                                    }
+                                ]
+                            )
+                        }
+                    ).encode("utf-8")
+                )
+
+            def log_message(self, format: str, *args: object) -> None:
+                return
+
+        server = HTTPServer(("127.0.0.1", 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        self.addCleanup(server.shutdown)
+        self.addCleanup(server.server_close)
+        first = unresolved_transaction()
+        second = unresolved_transaction()
+        second["transaction_id"] = "txn_2"
+
+        report, warnings = apply_ollama_fallback(
+            [first, second],
+            {
+                "ollama": {
+                    "enabled": True,
+                    "url": f"http://127.0.0.1:{server.server_port}/api/generate",
+                    "batch_size": 1,
+                }
+            },
+        )
+
+        self.assertTrue(warnings[0].startswith("Ollama unavailable: HTTP 503"))
+        self.assertEqual(
+            {key: report[key] for key in report if key != "error"},
+            {
+                "status": "unavailable",
+                "candidate_count": 2,
+                "accepted_count": 1,
+                "reviewable_count": 0,
+                "rejected_count": 0,
+                "applied_count": 1,
+                "invalid_count": 0,
+            },
+        )
+        self.assertNotIn("ollama_unavailable", first["flags"])
+        self.assertIn("ollama_unavailable", second["flags"])
+
     def test_progress_callback_reports_each_batch(self) -> None:
         class Handler(BaseHTTPRequestHandler):
             def do_POST(self) -> None:
@@ -221,7 +289,6 @@ class OllamaTest(unittest.TestCase):
                             {
                                 "id": transaction["id"],
                                 "category": "Dining",
-                                "owner": "Household",
                                 "confidence": 0.91,
                                 "reason": "Restaurant-like merchant",
                             }
@@ -283,7 +350,6 @@ class OllamaTest(unittest.TestCase):
                             {
                                 "id": "txn_1",
                                 "category": "Dining",
-                                "owner": "Household",
                                 "confidence": 0.91,
                             }
                         ]
@@ -343,7 +409,6 @@ class OllamaTest(unittest.TestCase):
                 {
                     "id": "txn_1",
                     "category": "Dining",
-                    "owner": "Household",
                     "confidence": "NaN",
                     "reason": "Not finite",
                 }
@@ -440,7 +505,6 @@ class OllamaTest(unittest.TestCase):
                             {
                                 "id": "txn_1",
                                 "category": "Ride Sharing",
-                                "owner": "Household",
                                 "confidence": 0.9,
                                 "reason": "Uber trip",
                             }

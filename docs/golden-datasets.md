@@ -113,6 +113,9 @@ For Ollama behavior:
    - categorized rows are not sent
    - source-only fields are absent from the prompt payload
    - batches are sent in deterministic order
+   - protected categories are absent from the request and are rejected if a
+     malicious endpoint returns one
+   - owner is absent from the response contract and remains unchanged
 
 Run:
 
@@ -176,6 +179,10 @@ HONEYMONEY_OLLAMA_MODEL=qwen2.5:7b-instruct \
 
 The live smoke command is intentionally outside default test discovery because
 it depends on the local Ollama service and installed model.
+
+The tracked `tests/fixtures/categorization/ollama/live_benchmark.json` is a
+synthetic local-model benchmark. Its script reports safety compliance and
+ordinary spending accuracy, requiring 100% safety and at least 90% accuracy.
 
 ## Checking Real PDFs Locally
 
