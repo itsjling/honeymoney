@@ -60,7 +60,7 @@ correction, reconciliation, review, PDF, and JSON contracts.
 | [010](010-cross-import-duplicates.md) | Detect cross-import duplicates | P2 | TODO | [#25](https://github.com/itsjling/honeymoney/issues/25) |
 | [011](011-optimize-duplicate-window.md) | Optimize duplicate scanning | P2 | TODO | [#25](https://github.com/itsjling/honeymoney/issues/25) |
 | [012](012-safe-spreadsheet-exports.md) | Make CSV exports spreadsheet-safe | P2 | TODO | [#26](https://github.com/itsjling/honeymoney/issues/26) |
-| [013](013-pin-ci-toolchain.md) | Stabilize CI dependency resolution | P3 | TODO | [#28](https://github.com/itsjling/honeymoney/issues/28) |
+| [013](013-pin-ci-toolchain.md) | Stabilize CI dependency resolution | P3 | DONE | [#28](https://github.com/itsjling/honeymoney/issues/28) |
 | [014](014-single-ledger-read.md) | Read ledger once per import | P3 | SUPERSEDED | [#29](https://github.com/itsjling/honeymoney/issues/29) |
 | [015](015-local-categorization-memory.md) | Add local categorization memory | P2 | SUPERSEDED | — |
 | [016](016-profile-validation-command.md) | Add profile validation tooling | P2 | SUPERSEDED | [#20](https://github.com/itsjling/honeymoney/issues/20), [#16](https://github.com/itsjling/honeymoney/issues/16) |
@@ -250,20 +250,25 @@ python3 -m unittest tests.test_agent_cli tests.test_cli_bootstrap tests.test_wor
 Issue #26 covers every spreadsheet-facing CSV path after #22 stabilizes the
 writer boundary.
 
-### 013 — TODO
+### 013 — DONE
 
-Runtime PDF dependencies remain unbounded, bootstrap installs directly from
-`pyproject.toml`, and CI caches only against that file. There is no committed
-constraints/lock input or reviewed refresh workflow.
+Development and CI consume a reviewed exact dependency closure from
+`constraints/dev.txt` on Python 3.10 and 3.13, while wheel and sdist metadata
+retain bounded compatible PDF extras and exclude development constraints. CI
+cache keys include both `pyproject.toml` and the constraint file. The documented
+refresh command rebuilds the closure in a clean Python 3.10 environment and
+requires dual-version validation. Offline verification checks installed
+consistency, the exact closure, package builds, and distribution contents; a
+separate online job audits the reviewed package names and versions.
 
 ```sh
-sed -n '1,80p' pyproject.toml
-sed -n '1,40p' scripts/bootstrap.sh
-sed -n '1,80p' .github/workflows/ci.yml
+./scripts/bootstrap.sh
+python3 -m pip check
+python3 scripts/check_constraints.py
+python3 -m unittest tests.test_import_profiles
+./scripts/check.sh
+./scripts/dependency-health.sh  # online maintainer/CI phase only
 ```
-
-Issue #28 adds reproducible development resolution and dependency health while
-keeping end-user metadata appropriately compatible.
 
 ### 014 — SUPERSEDED
 
