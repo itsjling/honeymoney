@@ -1,7 +1,7 @@
 # Improvement plan reconciliation
 
 This index was reconciled on 2026-07-17 against `main` commit
-`96482747ac34b741c0b5de55c6c2bf1c3f44e3c1`. The original plans were written
+`db60208344310a541b6df39e1675dd94076ae6a4`. The original plans were written
 on 2026-07-11 against `aa0eedf`; their source excerpts, branch names, and line
 numbers are historical context, not execution instructions for the live
 architecture.
@@ -13,7 +13,7 @@ exit 1 for every local `codex/improve-plan-*` tip and `codex/improve-all`, which
 means none is an ancestor of the reconciled commit:
 
 ```sh
-git merge-base --is-ancestor BRANCH 96482747ac34b741c0b5de55c6c2bf1c3f44e3c1
+git merge-base --is-ancestor BRANCH db60208344310a541b6df39e1675dd94076ae6a4
 ```
 
 Do not merge, rebase, cherry-pick, publish, or delete those branches as part of
