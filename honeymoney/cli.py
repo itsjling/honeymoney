@@ -38,6 +38,7 @@ from honeymoney.corrections import (
     to_review_row,
     validate_correction,
 )
+from honeymoney.csv_artifacts import csv_document
 from honeymoney.ollama import (
     OllamaProgress,
     apply_ollama_fallback,
@@ -4007,10 +4008,7 @@ def _remove_flag(existing: str, flag: str) -> str:
 def _write_csv(
     path: Path, columns: list[str], rows: list[dict[str, str]] | None = None
 ) -> None:
-    with path.open("w", newline="", encoding="utf-8") as fh:
-        writer = csv.DictWriter(fh, fieldnames=columns, extrasaction="ignore")
-        writer.writeheader()
-        writer.writerows(rows or [])
+    path.write_text(csv_document(columns, rows or []), encoding="utf-8", newline="")
 
 
 def _write_report(path: Path, report: dict[str, Any]) -> None:

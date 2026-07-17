@@ -91,6 +91,9 @@ provides an explicit inspect/rewrite seam.
   selection, normalization, ledger management, review filtering, and JSON output.
 - `honeymoney/corrections.py`: correction validation, merge-by-transaction-ID,
   cumulative reconciliation, and correction/ledger/review/rule generation content.
+- `honeymoney/csv_artifacts.py`: reversible spreadsheet-safe serialization and
+  canonical read-back for public CSV text cells; see
+  [CSV compatibility](csv-compatibility.md).
 - `honeymoney/persistence.py`: staged filesystem generation commits, authoritative
   ledger replacement, directory synchronization, and retained-state recovery.
 - `honeymoney/rules.py`: deterministic rule validation and application.

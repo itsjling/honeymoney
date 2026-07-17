@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 import csv
-import io
 import json
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
+from honeymoney.csv_artifacts import canonical_csv_cell, csv_document
 from honeymoney.persistence import persist_generation, recover_generation
 from honeymoney.reconciliation import reconcile_ledger
 from honeymoney.rules import validate_rules
@@ -50,17 +50,24 @@ def load_corrections(config: dict[str, Any]) -> dict[str, dict[str, str]]:
     corrections: dict[str, dict[str, str]] = {}
     with Path(corrections_path).open(newline="", encoding="utf-8") as fh:
         for row in csv.DictReader(fh):
-            transaction_id = (row.get("transaction_id") or "").strip()
+            transaction_id = canonical_csv_cell(
+                "transaction_id", row.get("transaction_id") or ""
+            ).strip()
             if not transaction_id:
                 continue
-            meaningful = {
-                field: (row.get(field) or "").strip()
-                for field in CORRECTION_FIELDS
-                if (row.get(field) or "").strip()
-            }
+            meaningful = {}
+            for field in CORRECTION_FIELDS:
+                if field == "notes":
+                    continue
+                raw_value = row.get(field) or ""
+                value = _canonical_correction_csv_value(field, raw_value)
+                if value:
+                    meaningful[field] = value
             raw_notes = row.get("notes")
             if raw_notes is not None and raw_notes != "":
-                meaningful["notes"] = raw_notes.strip()
+                meaningful["notes"] = _canonical_correction_csv_value(
+                    "notes", raw_notes
+                )
             if meaningful:
                 validate_correction(transaction_id, meaningful, config)
                 corrections[transaction_id] = meaningful
@@ -181,7 +188,7 @@ def prepare_corrections_document(
     ]
     return (
         Path(corrections_value),
-        _csv_document(CORRECTION_COLUMNS, rows),
+        csv_document(CORRECTION_COLUMNS, rows),
         merged,
     )
 
@@ -193,8 +200,8 @@ def ledger_output_documents(
         to_review_row(row) for row in ledger_rows if row.get("needs_review") == "true"
     ]
     return {
-        categorized_path: _csv_document(CATEGORIZED_COLUMNS, ledger_rows),
-        categorized_path.parent / "review_needed.csv": _csv_document(
+        categorized_path: csv_document(CATEGORIZED_COLUMNS, ledger_rows),
+        categorized_path.parent / "review_needed.csv": csv_document(
             REVIEW_NEEDED_COLUMNS, review_rows
         ),
     }
@@ -274,7 +281,7 @@ def apply_correction_operation(
     ]
 
     files = ledger_output_documents(categorized_path, corrected_ledger)
-    files[corrections_path] = _csv_document(CORRECTION_COLUMNS, correction_rows)
+    files[corrections_path] = csv_document(CORRECTION_COLUMNS, correction_rows)
     rules_added = 0
     if remembered_rules:
         rules_path_value = config.get("rules")
@@ -348,13 +355,23 @@ def _correction_row(transaction_id: str, correction: dict[str, str]) -> dict[str
     return row
 
 
+def _canonical_correction_csv_value(field: str, raw_value: str) -> str:
+    canonical = canonical_csv_cell(field, raw_value)
+    # Honeymoney-authored escapes prove the leading character is canonical.
+    # Continue trimming unescaped hand-edited cells for compatibility.
+    return canonical if canonical != raw_value else canonical.strip()
+
+
 def read_ledger(path: Path) -> list[dict[str, str]]:
     recover_generation(path)
     if not path.exists():
         return []
     with path.open(newline="", encoding="utf-8") as fh:
         rows = [
-            {column: row.get(column) or "" for column in CATEGORIZED_COLUMNS}
+            {
+                column: canonical_csv_cell(column, row.get(column) or "")
+                for column in CATEGORIZED_COLUMNS
+            }
             for row in csv.DictReader(fh)
         ]
     for row in rows:
@@ -378,14 +395,6 @@ def to_review_row(row: dict[str, str]) -> dict[str, str]:
     review_row["owner"] = ""
     review_row["payment_method"] = ""
     return review_row
-
-
-def _csv_document(columns: list[str], rows: list[dict[str, str]]) -> str:
-    buffer = io.StringIO(newline="")
-    writer = csv.DictWriter(buffer, fieldnames=columns, extrasaction="ignore")
-    writer.writeheader()
-    writer.writerows(rows)
-    return buffer.getvalue()
 
 
 def _append_flag(existing: str, flag: str) -> str:
