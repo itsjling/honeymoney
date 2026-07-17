@@ -51,13 +51,17 @@ class WorkflowTest(unittest.TestCase):
         cwd: Path,
         input_text: str | None = None,
         extra_pythonpath: Path | None = None,
+        filesystem_fault: str | None = None,
     ) -> subprocess.CompletedProcess:
         env = dict(os.environ)
-        env["PYTHONPATH"] = (
-            f"{extra_pythonpath}{os.pathsep}{REPO_ROOT}"
-            if extra_pythonpath is not None
-            else str(REPO_ROOT)
-        )
+        python_paths = []
+        if filesystem_fault is not None:
+            python_paths.append(REPO_ROOT / "tests" / "fault_injection")
+            env["HONEYMONEY_TEST_FS_FAULT"] = filesystem_fault
+        if extra_pythonpath is not None:
+            python_paths.append(extra_pythonpath)
+        python_paths.append(REPO_ROOT)
+        env["PYTHONPATH"] = os.pathsep.join(map(str, python_paths))
         return subprocess.run(
             [sys.executable, "-m", "honeymoney.cli", *args],
             cwd=cwd,
@@ -191,6 +195,120 @@ def open(path):
                 "corrections.csv",
             ]
         }
+
+    def _import_artifact_bytes(self, root: Path) -> dict[str, bytes]:
+        return {
+            relative_path: (root / relative_path).read_bytes()
+            for relative_path in [
+                "output/categorized.csv",
+                "output/review_needed.csv",
+                "output/import_report.json",
+            ]
+        }
+
+    def test_first_import_failure_does_not_publish_a_partial_generation(self) -> None:
+        faults = [
+            "file-fsync",
+            "replace-before:review_needed.csv",
+            "replace-before:import_report.json",
+            "replace-before:categorized.csv",
+            "directory-fsync",
+        ]
+        for fault in faults:
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory() as tmp:
+                root = self._setup_workspace(tmp)
+                statement = root / "may.csv"
+                self._write_statement(
+                    statement, ["2026-05-04,SYNTHETIC MARKET,-12.00,HKD"]
+                )
+
+                result = self._run_cli(
+                    ["import", str(statement), "--no-interactive"],
+                    cwd=root,
+                    filesystem_fault=fault,
+                )
+
+                self.assertEqual(result.returncode, 2, result.stderr)
+                for name in (
+                    "categorized.csv",
+                    "review_needed.csv",
+                    "import_report.json",
+                ):
+                    self.assertFalse((root / "output" / name).exists())
+
+    def test_failed_replacement_restores_the_complete_old_generation(self) -> None:
+        faults = [
+            "file-fsync",
+            "replace-before:review_needed.csv",
+            "replace-before:import_report.json",
+            "replace-before:categorized.csv",
+            "directory-fsync",
+        ]
+        for fault in faults:
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory() as tmp:
+                root = self._setup_workspace(tmp)
+                statement = root / "may.csv"
+                self._write_statement(
+                    statement, ["2026-05-04,ORIGINAL MARKET,-12.00,HKD"]
+                )
+                first = self._run_cli(
+                    ["import", str(statement), "--no-interactive"], cwd=root
+                )
+                self.assertEqual(first.returncode, 0, first.stderr)
+                before = self._import_artifact_bytes(root)
+                self._write_statement(
+                    statement, ["2026-05-04,UPDATED MARKET,-15.00,HKD"]
+                )
+
+                result = self._run_cli(
+                    [
+                        "import",
+                        str(statement),
+                        "--replace",
+                        "--no-interactive",
+                    ],
+                    cwd=root,
+                    filesystem_fault=fault,
+                )
+
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertEqual(self._import_artifact_bytes(root), before)
+
+    def test_next_command_recovers_a_retained_committed_generation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._setup_workspace(tmp)
+            statement = root / "may.csv"
+            self._write_statement(
+                statement, ["2026-05-04,ORIGINAL MARKET,-12.00,HKD"]
+            )
+            first = self._run_cli(
+                ["import", str(statement), "--no-interactive"], cwd=root
+            )
+            self.assertEqual(first.returncode, 0, first.stderr)
+            self._write_statement(
+                statement, ["2026-05-04,UPDATED MARKET,-15.00,HKD"]
+            )
+
+            interrupted = self._run_cli(
+                ["import", str(statement), "--replace", "--no-interactive"],
+                cwd=root,
+                filesystem_fault="replace-after:categorized.csv",
+            )
+            self.assertEqual(interrupted.returncode, 75, interrupted.stderr)
+
+            recovered = self._run_cli(["status"], cwd=root)
+
+            self.assertEqual(recovered.returncode, 0, recovered.stderr)
+            with (root / "output" / "categorized.csv").open(
+                newline="", encoding="utf-8"
+            ) as fh:
+                [row] = list(csv.DictReader(fh))
+            self.assertEqual(row["merchant"], "UPDATED MARKET")
+            self.assertTrue((root / "output" / "review_needed.csv").exists())
+            self.assertTrue((root / "output" / "import_report.json").exists())
+            self.assertEqual(
+                list((root / "output").glob(".*honeymoney-state.json")), []
+            )
 
     def test_import_prompts_to_categorize_and_saves_correction(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
