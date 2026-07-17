@@ -253,6 +253,74 @@ class ConfigCliTest(unittest.TestCase):
             payload = json.loads(result.stdout)
             self.assertIn("cannot relax", payload["errors"][0]["message"])
 
+    def test_config_rejects_malformed_public_fields_with_structured_errors(
+        self,
+    ) -> None:
+        cases = [
+            ("profiles", {"profiles": "profile.json"}, "must be a JSON array"),
+            ("profiles item", {"profiles": [3]}, "profiles[0]"),
+            ("profile mappings", {"profile_mappings": []}, "non-empty string"),
+            ("rules", {"rules": {}}, "non-empty string"),
+            ("corrections", {"corrections": 4}, "non-empty string"),
+            ("pdf", {"pdf": []}, "must be a JSON object"),
+            ("pdf enabled", {"pdf": {"enabled": "yes"}}, "must be a boolean"),
+            ("exchange rates", {"exchange_rates": []}, "must be a JSON object"),
+            (
+                "exchange rate value",
+                {"exchange_rates": {"HKD": float("nan")}},
+                "finite number greater than 0",
+            ),
+            ("categories", {"categories": "Dining"}, "must be a JSON array"),
+            ("empty categories", {"categories": []}, "must not be empty"),
+            ("categories item", {"categories": [""]}, "categories[0]"),
+            ("empty owners", {"owners": []}, "must not be empty"),
+            ("owners", {"owners": [False]}, "owners[0]"),
+            (
+                "empty payment methods",
+                {"payment_methods": []},
+                "must not be empty",
+            ),
+            (
+                "payment methods",
+                {"payment_methods": ["Cash", "Cash"]},
+                "must not contain duplicates",
+            ),
+            ("base currency", {"base_currency": 1}, "non-empty string"),
+            (
+                "review threshold",
+                {"review_confidence_threshold": True},
+                "number from 0 to 1",
+            ),
+            (
+                "ollama batch",
+                {"ollama": {"batch_size": 0}},
+                "positive integer",
+            ),
+            (
+                "ollama timeout",
+                {"ollama": {"timeout_seconds": float("inf")}},
+                "finite number greater than 0",
+            ),
+            ("ollama think", {"ollama": {"think": 1}}, "boolean or string"),
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config_path = root / "config.json"
+            for label, config, message in cases:
+                with self.subTest(label=label):
+                    config_path.write_text(json.dumps(config), encoding="utf-8")
+
+                    result = self._run_cli(
+                        ["config", "--config", str(config_path), "--json"], cwd=root
+                    )
+
+                    self.assertEqual(result.returncode, 2, result.stderr)
+                    self.assertEqual(result.stderr, "")
+                    payload = json.loads(result.stdout)
+                    self.assertEqual(payload["command"], "config")
+                    self.assertEqual(payload["status"], "error")
+                    self.assertIn(message, payload["errors"][0]["message"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -434,6 +434,228 @@ class AgentCliTest(unittest.TestCase):
             )
             self.assertEqual(categorized_path.read_bytes(), before)
 
+    def test_correct_rejects_empty_non_note_fields_from_file_and_stdin(self) -> None:
+        fields = [
+            "category",
+            "flow_type",
+            "owner",
+            "payment_method",
+            "confidence",
+            "reason",
+            "needs_review",
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._setup_workspace(tmp)
+            statement = root / "may.csv"
+            self._write_statement(statement)
+            self.assertEqual(
+                self._run_cli(
+                    ["import", str(statement), "--json"], cwd=root
+                ).returncode,
+                0,
+            )
+            categorized_path = root / "output" / "categorized.csv"
+            review_path = root / "output" / "review_needed.csv"
+            corrections_path = root / "corrections.csv"
+            with categorized_path.open(newline="", encoding="utf-8") as fh:
+                [row] = list(csv.DictReader(fh))
+            before = {
+                path: path.read_bytes()
+                for path in (categorized_path, review_path, corrections_path)
+            }
+            for index, field in enumerate(fields):
+                with self.subTest(field=field):
+                    batch = json.dumps(
+                        [{"transaction_id": row["transaction_id"], field: " \t "}]
+                    )
+                    if index % 2:
+                        batch_path = root / "invalid-correction.json"
+                        batch_path.write_text(batch, encoding="utf-8")
+                        result = self._run_cli(
+                            ["correct", "--file", str(batch_path), "--json"],
+                            cwd=root,
+                        )
+                    else:
+                        result = self._run_cli(
+                            ["correct", "--file", "-", "--json"],
+                            cwd=root,
+                            input_text=batch,
+                        )
+
+                    self.assertEqual(result.returncode, 2, result.stderr)
+                    self.assertIn(
+                        f"Correction field {field}",
+                        self._json(result)["errors"][0]["message"],
+                    )
+                    for path, content in before.items():
+                        self.assertEqual(path.read_bytes(), content)
+
+    def test_empty_notes_clear_persists_across_correction_reload_and_import(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._setup_workspace(tmp)
+            rules_path = root / "rules.json"
+            rules = json.loads(rules_path.read_text(encoding="utf-8"))
+            rules["rules"].append(
+                {
+                    "id": "synthetic-note",
+                    "enabled": True,
+                    "priority": 100,
+                    "fields": ["original_description"],
+                    "match_type": "exact",
+                    "patterns": ["PARKNSHOP"],
+                    "category": "Groceries",
+                    "confidence": 1,
+                    "notes": "Rule-generated note",
+                }
+            )
+            rules_path.write_text(json.dumps(rules), encoding="utf-8")
+            statement = root / "may.csv"
+            self._write_statement(statement)
+            self.assertEqual(
+                self._run_cli(
+                    ["import", str(statement), "--json"], cwd=root
+                ).returncode,
+                0,
+            )
+            categorized_path = root / "output" / "categorized.csv"
+            with categorized_path.open(newline="", encoding="utf-8") as fh:
+                [row] = list(csv.DictReader(fh))
+            self.assertEqual(row["notes"], "Rule-generated note")
+
+            omitted = self._run_cli(
+                ["correct", "--file", "-", "--json"],
+                cwd=root,
+                input_text=json.dumps(
+                    [{"transaction_id": row["transaction_id"], "owner": "Household"}]
+                ),
+            )
+            self.assertEqual(omitted.returncode, 0, omitted.stderr)
+            omitted_rerun = self._run_cli(
+                ["import", str(statement), "--replace", "--json"], cwd=root
+            )
+            self.assertEqual(omitted_rerun.returncode, 0, omitted_rerun.stderr)
+            with categorized_path.open(newline="", encoding="utf-8") as fh:
+                [unchanged] = list(csv.DictReader(fh))
+            self.assertEqual(unchanged["notes"], "Rule-generated note")
+
+            clear = self._run_cli(
+                ["correct", "--file", "-", "--json"],
+                cwd=root,
+                input_text=json.dumps(
+                    [{"transaction_id": row["transaction_id"], "notes": ""}]
+                ),
+            )
+
+            self.assertEqual(clear.returncode, 0, clear.stderr)
+            with categorized_path.open(newline="", encoding="utf-8") as fh:
+                [cleared] = list(csv.DictReader(fh))
+            self.assertEqual(cleared["notes"], "")
+            rerun = self._run_cli(
+                ["import", str(statement), "--replace", "--json"], cwd=root
+            )
+            self.assertEqual(rerun.returncode, 0, rerun.stderr)
+            with categorized_path.open(newline="", encoding="utf-8") as fh:
+                [reimported] = list(csv.DictReader(fh))
+            self.assertEqual(reimported["notes"], "")
+
+    def test_correction_cannot_resolve_unknown_category_without_a_flow_decision(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._setup_workspace(tmp)
+            statement = root / "may.csv"
+            self._write_statement(statement)
+            self.assertEqual(
+                self._run_cli(
+                    ["import", str(statement), "--json"], cwd=root
+                ).returncode,
+                0,
+            )
+            categorized_path = root / "output" / "categorized.csv"
+            with categorized_path.open(newline="", encoding="utf-8") as fh:
+                [row] = list(csv.DictReader(fh))
+            before = categorized_path.read_bytes()
+
+            invalid = self._run_cli(
+                ["correct", "--file", "-", "--json"],
+                cwd=root,
+                input_text=json.dumps(
+                    [
+                        {
+                            "transaction_id": row["transaction_id"],
+                            "needs_review": False,
+                        }
+                    ]
+                ),
+            )
+
+            self.assertEqual(invalid.returncode, 2)
+            self.assertIn(
+                "Unknown category cannot be marked resolved",
+                self._json(invalid)["errors"][0]["message"],
+            )
+            self.assertEqual(categorized_path.read_bytes(), before)
+            explicit_flow = self._run_cli(
+                ["correct", "--file", "-", "--json"],
+                cwd=root,
+                input_text=json.dumps(
+                    [
+                        {
+                            "transaction_id": row["transaction_id"],
+                            "flow_type": "expense",
+                            "needs_review": False,
+                        }
+                    ]
+                ),
+            )
+            self.assertEqual(explicit_flow.returncode, 0, explicit_flow.stderr)
+
+    def test_correction_cannot_trust_unproven_existing_flow_to_resolve_unknown(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._setup_workspace(tmp)
+            statement = root / "may.csv"
+            self._write_statement(statement)
+            self.assertEqual(
+                self._run_cli(
+                    ["import", str(statement), "--json"], cwd=root
+                ).returncode,
+                0,
+            )
+            categorized_path = root / "output" / "categorized.csv"
+            with categorized_path.open(newline="", encoding="utf-8") as fh:
+                [row] = list(csv.DictReader(fh))
+            row["flow_type"] = "expense"
+            row["flow_source"] = "deterministic"
+            with categorized_path.open("w", newline="", encoding="utf-8") as fh:
+                writer = csv.DictWriter(fh, fieldnames=list(row))
+                writer.writeheader()
+                writer.writerow(row)
+            before = categorized_path.read_bytes()
+
+            result = self._run_cli(
+                ["correct", "--file", "-", "--json"],
+                cwd=root,
+                input_text=json.dumps(
+                    [
+                        {
+                            "transaction_id": row["transaction_id"],
+                            "needs_review": False,
+                        }
+                    ]
+                ),
+            )
+
+            self.assertEqual(result.returncode, 2)
+            self.assertIn(
+                "explicit accounting flow decision",
+                self._json(result)["errors"][0]["message"],
+            )
+            self.assertEqual(categorized_path.read_bytes(), before)
+
     def test_correct_json_requires_an_input_file_as_structured_error(self) -> None:
         result = self._run_cli(["correct", "--json"])
 
@@ -661,6 +883,205 @@ class AgentCliTest(unittest.TestCase):
                 "Could not detect profile",
                 self._json(ambiguous_result)["errors"][0]["message"],
             )
+
+    def test_import_rejects_incomplete_profiles_before_artifacts_change(self) -> None:
+        cases = [
+            ("identity", {"account": "Synthetic"}, "account_id"),
+            (
+                "parser mode",
+                {
+                    "id": "synthetic",
+                    "account_id": "synthetic",
+                    "account": "Synthetic",
+                    "account_type": "bank",
+                    "institution": "Local",
+                    "country": "HK",
+                    "account_currency": "HKD",
+                    "owner": "Household",
+                    "payment_method": "Bank Account",
+                },
+                "exactly one of csv or pdf",
+            ),
+            (
+                "date source",
+                {"columns": {"description": "Description", "amount": "Amount"}},
+                "columns.transaction_date",
+            ),
+            (
+                "amount source",
+                {
+                    "columns": {
+                        "transaction_date": "Date",
+                        "description": "Description",
+                    }
+                },
+                "amount strategy",
+            ),
+            (
+                "conflicting amount sources",
+                {
+                    "columns": {
+                        "transaction_date": "Date",
+                        "description": "Description",
+                        "amount": "Amount",
+                        "debit": "Debit",
+                        "credit": "Credit",
+                    }
+                },
+                "exactly one amount strategy",
+            ),
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._setup_workspace(tmp)
+            statement = root / "synthetic.csv"
+            self._write_statement(statement)
+            config_path = root / "config.json"
+            config = json.loads(config_path.read_text(encoding="utf-8"))
+            base_profile = json.loads(
+                (root / "profiles" / "starter_csv.json").read_text(encoding="utf-8")
+            )
+            protected = [
+                root / "corrections.csv",
+                root / "rules.json",
+                root / "profile_mappings.json",
+            ]
+            before = {path: path.read_bytes() for path in protected}
+            for label, replacement, message in cases:
+                with self.subTest(label=label):
+                    profile = dict(base_profile)
+                    if label == "identity":
+                        profile = replacement
+                    elif label == "parser mode":
+                        profile = replacement
+                    else:
+                        profile["csv"] = replacement
+                    profile_path = root / "profiles" / "invalid.json"
+                    profile_path.write_text(json.dumps(profile), encoding="utf-8")
+                    config["profiles"] = [str(profile_path)]
+                    config_path.write_text(json.dumps(config), encoding="utf-8")
+
+                    result = self._run_cli(
+                        [
+                            "import",
+                            str(statement),
+                            "--config",
+                            str(config_path),
+                            "--json",
+                        ],
+                        cwd=root,
+                    )
+
+                    self.assertEqual(result.returncode, 2, result.stderr)
+                    self.assertIn(message, self._json(result)["errors"][0]["message"])
+                    for path, content in before.items():
+                        self.assertEqual(path.read_bytes(), content)
+                    self.assertFalse((root / "output" / "categorized.csv").exists())
+
+    def test_import_rejects_missing_selected_csv_headers_before_writing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._setup_workspace(tmp)
+            statement = root / "synthetic.csv"
+            self._write_statement(statement)
+            profile_path = root / "profiles" / "starter_csv.json"
+            profile = json.loads(profile_path.read_text(encoding="utf-8"))
+            profile["csv"]["columns"]["amount"] = "Missing Amount"
+            profile_path.write_text(json.dumps(profile), encoding="utf-8")
+            config_path = root / "config.json"
+            config = json.loads(config_path.read_text(encoding="utf-8"))
+            config["profiles"] = [str(profile_path)]
+            config_path.write_text(json.dumps(config), encoding="utf-8")
+
+            result = self._run_cli(
+                ["import", str(statement), "--config", str(config_path), "--json"],
+                cwd=root,
+            )
+
+            self.assertEqual(result.returncode, 2, result.stderr)
+            message = self._json(result)["errors"][0]["message"]
+            self.assertIn("starter_csv", message)
+            self.assertIn("csv.columns.amount", message)
+            self.assertIn("Missing Amount", message)
+            self.assertFalse((root / "output" / "categorized.csv").exists())
+
+    def test_invalid_prompted_profile_does_not_save_a_filename_mapping(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._setup_workspace(tmp)
+            statement = root / "synthetic.csv"
+            self._write_statement(statement)
+            template_path = root / "profiles" / "starter_csv.json"
+            template = json.loads(template_path.read_text(encoding="utf-8"))
+            profile_paths = []
+            for index in (1, 2):
+                profile = json.loads(json.dumps(template))
+                profile["id"] = f"candidate_{index}"
+                profile["account_id"] = f"candidate_{index}"
+                if index == 1:
+                    profile["csv"]["columns"]["amount"] = "Missing Amount"
+                path = root / "profiles" / f"candidate_{index}.json"
+                path.write_text(json.dumps(profile), encoding="utf-8")
+                profile_paths.append(str(path))
+            config_path = root / "config.json"
+            config = json.loads(config_path.read_text(encoding="utf-8"))
+            config["profiles"] = profile_paths
+            config_path.write_text(json.dumps(config), encoding="utf-8")
+            mappings_path = root / "profile_mappings.json"
+            before = mappings_path.read_bytes()
+
+            result = self._run_cli(
+                ["import", str(statement), "--config", str(config_path)],
+                cwd=root,
+                input_text="1\n",
+            )
+
+            self.assertEqual(result.returncode, 2)
+            self.assertIn("csv.columns.amount", result.stderr)
+            self.assertEqual(mappings_path.read_bytes(), before)
+
+    def test_import_rejects_malformed_pdf_profile_and_mapping_documents(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._setup_workspace(tmp)
+            config_path = root / "config.json"
+            config = json.loads(config_path.read_text(encoding="utf-8"))
+            profile_path = root / "profiles" / "mox_bank_pdf.json"
+            profile = json.loads(profile_path.read_text(encoding="utf-8"))
+            profile["pdf"]["row_regex"] = "("
+            profile_path.write_text(json.dumps(profile), encoding="utf-8")
+            config["profiles"] = [str(profile_path)]
+            config_path.write_text(json.dumps(config), encoding="utf-8")
+            statement = root / "synthetic.pdf"
+            statement.write_bytes(b"%PDF-1.4 synthetic")
+
+            malformed_profile = self._run_cli(
+                ["import", str(statement), "--config", str(config_path), "--json"],
+                cwd=root,
+            )
+
+            self.assertEqual(malformed_profile.returncode, 2, malformed_profile.stderr)
+            self.assertIn(
+                "pdf.row_regex must be a valid regular expression",
+                self._json(malformed_profile)["errors"][0]["message"],
+            )
+            self.assertFalse((root / "output" / "categorized.csv").exists())
+
+            profile["pdf"]["row_regex"] = (
+                "^(?P<transaction_date>\\S+) (?P<posting_date>\\S+) "
+                "(?P<description>.+?) "
+                "(?P<amount>-?\\d+\\.\\d{2})$"
+            )
+            profile_path.write_text(json.dumps(profile), encoding="utf-8")
+            mappings_path = root / "profile_mappings.json"
+            mappings_path.write_text("[]", encoding="utf-8")
+            malformed_mapping = self._run_cli(
+                ["import", str(statement), "--config", str(config_path), "--json"],
+                cwd=root,
+            )
+
+            self.assertEqual(malformed_mapping.returncode, 2, malformed_mapping.stderr)
+            self.assertIn(
+                "Profile mappings document must be a JSON object",
+                self._json(malformed_mapping)["errors"][0]["message"],
+            )
+            self.assertFalse((root / "output" / "categorized.csv").exists())
 
     def test_report_json_never_opens_a_browser(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

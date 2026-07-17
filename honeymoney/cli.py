@@ -207,6 +207,8 @@ def _run_pipeline(
     output_dir.mkdir(parents=True, exist_ok=True)
 
     input_files = _discover_input_files(input_path)
+    profiles = _load_profiles(config)
+    profile_mappings = _load_profile_mappings(config)
     source_files = {
         _relative_source(input_file, input_path) for input_file in input_files
     }
@@ -218,16 +220,6 @@ def _run_pipeline(
             f"Already imported source file(s): {source_list}. "
             "Use --replace to re-import or --reset to re-import and clear corrections."
         )
-    if args.reset:
-        reset_ids = {
-            row["transaction_id"]
-            for row in existing_ledger_rows
-            if row.get("source_file") in source_files and row.get("transaction_id")
-        }
-        _remove_corrections(config, reset_ids)
-
-    profiles = _load_profiles(config)
-    profile_mappings = _load_profile_mappings(config)
     transactions, import_warnings, file_reports = _import_transactions(
         input_files,
         profiles,
@@ -237,6 +229,13 @@ def _run_pipeline(
         profile_mappings=profile_mappings,
         profile_mappings_path=config.get("profile_mappings"),
     )
+    if args.reset:
+        reset_ids = {
+            row["transaction_id"]
+            for row in existing_ledger_rows
+            if row.get("source_file") in source_files and row.get("transaction_id")
+        }
+        _remove_corrections(config, reset_ids)
     _status.update("Applying categorization rules...")
     rules = load_rules(config)
     apply_rules(transactions, rules, config)
@@ -261,7 +260,15 @@ def _run_pipeline(
     review_rows = [row for row in transactions if row["needs_review"] == "true"]
 
     _status.update("Writing output files...")
-    replace_sources = source_files if args.replace or args.reset else None
+    replace_sources = (
+        {
+            file_report["source_file"]
+            for file_report in file_reports
+            if file_report.get("status") == "processed"
+        }
+        if args.replace or args.reset
+        else None
+    )
     ledger_rows = _merge_into_ledger(categorized_path, transactions, replace_sources)
     reconciliation = reconcile_ledger(ledger_rows, config)
     _write_ledger_outputs(categorized_path, ledger_rows)
@@ -482,6 +489,60 @@ def _validate_config_document(config: dict[str, Any]) -> None:
                 f"Config field paths.{path_field} must be a non-empty string"
             )
 
+    profiles = config.get("profiles")
+    if profiles is not None:
+        _validate_non_empty_string_array("profiles", profiles)
+
+    for field in ("profile_mappings", "rules", "corrections"):
+        if field in config and (
+            not isinstance(config[field], str) or not config[field].strip()
+        ):
+            raise ValueError(f"Config field {field} must be a non-empty string")
+
+    pdf = config.get("pdf")
+    if pdf is not None:
+        if not isinstance(pdf, dict):
+            raise ValueError("Config field pdf must be a JSON object")
+        if "enabled" in pdf and not isinstance(pdf["enabled"], bool):
+            raise ValueError("Config field pdf.enabled must be a boolean")
+        if "parser" in pdf and (
+            not isinstance(pdf["parser"], str) or not pdf["parser"].strip()
+        ):
+            raise ValueError("Config field pdf.parser must be a non-empty string")
+
+    base_currency = config.get("base_currency")
+    if base_currency is not None and (
+        not isinstance(base_currency, str) or not base_currency.strip()
+    ):
+        raise ValueError("Config field base_currency must be a non-empty string")
+
+    exchange_rates = config.get("exchange_rates")
+    if exchange_rates is not None:
+        if not isinstance(exchange_rates, dict):
+            raise ValueError("Config field exchange_rates must be a JSON object")
+        for currency, rate in exchange_rates.items():
+            if not isinstance(currency, str) or not currency.strip():
+                raise ValueError(
+                    "Config field exchange_rates keys must be non-empty strings"
+                )
+            _validate_finite_number(
+                f"exchange_rates.{currency}", rate, minimum=Decimal("0"), exclusive=True
+            )
+
+    threshold = config.get("review_confidence_threshold")
+    if threshold is not None:
+        _validate_finite_number(
+            "review_confidence_threshold",
+            threshold,
+            minimum=Decimal("0"),
+            maximum=Decimal("1"),
+            range_message="must be a number from 0 to 1",
+        )
+
+    for field in ("categories", "owners", "payment_methods"):
+        if field in config:
+            _validate_non_empty_string_array(field, config[field], unique=True)
+
     ollama = config.get("ollama")
     if ollama is not None:
         if not isinstance(ollama, dict):
@@ -495,6 +556,23 @@ def _validate_config_document(config: dict[str, Any]) -> None:
                 raise ValueError(
                     f"Config field ollama.{field} must be a non-empty string"
                 )
+        if "batch_size" in ollama and (
+            isinstance(ollama["batch_size"], bool)
+            or not isinstance(ollama["batch_size"], int)
+            or ollama["batch_size"] < 1
+        ):
+            raise ValueError(
+                "Config field ollama.batch_size must be a positive integer"
+            )
+        if "timeout_seconds" in ollama:
+            _validate_finite_number(
+                "ollama.timeout_seconds",
+                ollama["timeout_seconds"],
+                minimum=Decimal("0"),
+                exclusive=True,
+            )
+        if "think" in ollama and not isinstance(ollama["think"], (bool, str)):
+            raise ValueError("Config field ollama.think must be a boolean or string")
 
     reconciliation = config.get("reconciliation")
     if reconciliation is not None:
@@ -502,6 +580,46 @@ def _validate_config_document(config: dict[str, Any]) -> None:
             raise ValueError("Config field reconciliation must be a JSON object")
         reconciliation_date_window(config)
     validate_category_policies(config)
+
+
+def _validate_non_empty_string_array(
+    field: str, value: Any, *, unique: bool = False
+) -> None:
+    if not isinstance(value, list):
+        raise ValueError(f"Config field {field} must be a JSON array")
+    if not value:
+        raise ValueError(f"Config field {field} must not be empty")
+    normalized: list[str] = []
+    for index, item in enumerate(value):
+        if not isinstance(item, str) or not item.strip():
+            raise ValueError(
+                f"Config field {field}[{index}] must be a non-empty string"
+            )
+        normalized.append(item.strip())
+    if unique and len(set(normalized)) != len(normalized):
+        raise ValueError(f"Config field {field} must not contain duplicates")
+
+
+def _validate_finite_number(
+    field: str,
+    value: Any,
+    *,
+    minimum: Decimal | None = None,
+    maximum: Decimal | None = None,
+    exclusive: bool = False,
+    range_message: str | None = None,
+) -> None:
+    message = range_message or "must be a finite number greater than 0"
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"Config field {field} {message}")
+    number = Decimal(str(value))
+    if not number.is_finite():
+        raise ValueError(f"Config field {field} {message}")
+    invalid_minimum = minimum is not None and (
+        number <= minimum if exclusive else number < minimum
+    )
+    if invalid_minimum or (maximum is not None and number > maximum):
+        raise ValueError(f"Config field {field} {message}")
 
 
 def _write_config_document(path: Path, config: dict[str, Any]) -> None:
@@ -1537,9 +1655,15 @@ def _normalize_json_correction(index: int, item: dict[str, Any]) -> dict[str, st
             if isinstance(value, bool):
                 correction[field] = str(value).lower()
                 continue
-            if isinstance(value, str) and value.casefold() in {"true", "false"}:
-                correction[field] = value.casefold()
-                continue
+            if isinstance(value, str):
+                normalized = value.strip().casefold()
+                if not normalized:
+                    raise ValueError(
+                        f"Correction field {field} at index {index} must not be empty"
+                    )
+                if normalized in {"true", "false"}:
+                    correction[field] = normalized
+                    continue
             raise ValueError(
                 f"Correction field needs_review at index {index} must be boolean"
             )
@@ -1554,7 +1678,12 @@ def _normalize_json_correction(index: int, item: dict[str, Any]) -> dict[str, st
             raise ValueError(
                 f"Correction field {field} at index {index} must be a string"
             )
-        correction[field] = value.strip()
+        normalized = value.strip()
+        if field != "notes" and not normalized:
+            raise ValueError(
+                f"Correction field {field} at index {index} must not be empty"
+            )
+        correction[field] = normalized
     return correction
 
 
@@ -1876,7 +2005,7 @@ def _write_starter_workspace(root: Path, force: bool) -> None:
     _write_json_file(rules_path, _starter_rules(), force)
     _write_text_file(
         corrections_path,
-        "transaction_id,category,flow_type,owner,payment_method,confidence,reason,notes\n",
+        "transaction_id,category,flow_type,owner,payment_method,confidence,reason,notes,needs_review\n",
         force,
     )
     _write_json_file(
@@ -2016,11 +2145,34 @@ def _load_profiles(config: dict[str, Any]) -> list[dict[str, Any]]:
 def _validate_profile(
     profile: dict[str, Any], profile_path: Path, config: dict[str, Any]
 ) -> None:
-    profile_id = profile.get("id") or profile.get("account_id") or profile_path.name
-    if not str(profile.get("account_id", "")).strip():
+    if not isinstance(profile, dict):
+        raise ValueError(f"Profile {profile_path.name} must be a JSON object")
+    raw_id = profile.get("id")
+    if raw_id is not None and (not isinstance(raw_id, str) or not raw_id.strip()):
+        raise ValueError(
+            f"Profile {profile_path.name} field profile.id must be a non-empty string"
+        )
+    profile_id = str(raw_id or profile.get("account_id") or profile_path.name)
+    if (
+        not isinstance(profile.get("account_id"), str)
+        or not profile["account_id"].strip()
+    ):
         raise ValueError(
             f"Missing required profile fields in profile {profile_id}: account_id"
         )
+    for field in (
+        "account",
+        "institution",
+        "country",
+        "account_currency",
+        "owner",
+        "payment_method",
+    ):
+        value = profile.get(field)
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(
+                f"Profile {profile_id} field profile.{field} must be a non-empty string"
+            )
     if profile.get("owner") and profile["owner"] not in allowed_owners(config):
         raise ValueError(
             f"Unsupported owner in profile {profile_id}: {profile['owner']}"
@@ -2040,6 +2192,370 @@ def _validate_profile(
             f"Unsupported account_type in profile {profile_id}: "
             f"{profile['account_type']}"
         )
+    parser_fields = [field for field in ("csv", "pdf") if field in profile]
+    if len(parser_fields) != 1:
+        raise ValueError(f"Profile {profile_id} must define exactly one of csv or pdf")
+    date_formats = profile.get("date_formats", ["%Y-%m-%d"])
+    if not isinstance(date_formats, list) or not date_formats:
+        raise ValueError(
+            f"Profile {profile_id} field profile.date_formats must be a non-empty JSON array"
+        )
+    for index, date_format in enumerate(date_formats):
+        if not isinstance(date_format, str) or not date_format.strip():
+            raise ValueError(
+                f"Profile {profile_id} field profile.date_formats[{index}] must be a non-empty string"
+            )
+        try:
+            rendered = datetime(2023, 2, 28).strftime(date_format)
+            datetime.strptime(rendered, date_format)
+        except ValueError as error:
+            raise ValueError(
+                f"Profile {profile_id} field profile.date_formats[{index}] must be a valid date format"
+            ) from error
+        if "%d" not in date_format or not any(
+            directive in date_format for directive in ("%m", "%b", "%B")
+        ):
+            raise ValueError(
+                f"Profile {profile_id} field profile.date_formats[{index}] must include day and month"
+            )
+        if (
+            "%Y" not in date_format
+            and "%y" not in date_format
+            and "statement_year" not in profile
+        ):
+            raise ValueError(
+                f"Profile {profile_id} date format {date_format!r} requires profile.statement_year"
+            )
+    if "statement_year" in profile and (
+        isinstance(profile["statement_year"], bool)
+        or not isinstance(profile["statement_year"], int)
+        or not 1 <= profile["statement_year"] <= 9999
+    ):
+        raise ValueError(
+            f"Profile {profile_id} field profile.statement_year must be an integer from 1 to 9999"
+        )
+
+    parser = parser_fields[0]
+    settings = profile[parser]
+    if not isinstance(settings, dict):
+        raise ValueError(
+            f"Profile {profile_id} field profile.{parser} must be a JSON object"
+        )
+    columns = settings.get("columns")
+    if not isinstance(columns, dict):
+        raise ValueError(
+            f"Profile {profile_id} field {parser}.columns must be a JSON object"
+        )
+    for field, source in columns.items():
+        if not isinstance(field, str) or not field.strip():
+            raise ValueError(
+                f"Profile {profile_id} field {parser}.columns keys must be non-empty strings"
+            )
+        if (
+            not isinstance(source, (str, int))
+            or isinstance(source, bool)
+            or str(source).strip() == ""
+        ):
+            raise ValueError(
+                f"Profile {profile_id} field {parser}.columns.{field} must be a non-empty string or column index"
+            )
+    if not any(
+        columns.get(field) not in (None, "")
+        for field in ("transaction_date", "posting_date")
+    ):
+        raise ValueError(
+            f"Profile {profile_id} field {parser}.columns.transaction_date or posting_date is required"
+        )
+    if not columns.get("description"):
+        raise ValueError(
+            f"Profile {profile_id} field {parser}.columns.description is required"
+        )
+    _validate_profile_amount_strategy(profile_id, parser, settings, columns)
+    _validate_profile_sign_settings(profile_id, parser, settings, columns)
+    if parser == "csv":
+        _validate_csv_profile(profile_id, settings)
+    else:
+        _validate_pdf_profile(profile_id, settings)
+
+
+def _validate_profile_amount_strategy(
+    profile_id: str,
+    parser: str,
+    settings: dict[str, Any],
+    columns: dict[str, Any],
+) -> None:
+    direct = bool(columns.get("amount"))
+    debit = bool(columns.get("debit"))
+    credit = bool(columns.get("credit"))
+    if not direct and not debit and not credit:
+        raise ValueError(
+            f"Profile {profile_id} field {parser}.columns must define an amount strategy"
+        )
+    if direct and (debit or credit):
+        raise ValueError(
+            f"Profile {profile_id} must define exactly one amount strategy in {parser}.columns"
+        )
+    if not direct and not (debit and credit):
+        raise ValueError(
+            f"Profile {profile_id} debit/credit amount strategy requires both {parser}.columns.debit and credit"
+        )
+
+
+def _validate_profile_sign_settings(
+    profile_id: str,
+    parser: str,
+    settings: dict[str, Any],
+    columns: dict[str, Any],
+) -> None:
+    default_sign = settings.get("amount_default_sign")
+    if default_sign is not None and default_sign not in {"", "expense", "income"}:
+        raise ValueError(
+            f"Profile {profile_id} field {parser}.amount_default_sign must be expense or income"
+        )
+    indicator = columns.get("credit_debit")
+    debit_values = settings.get("debit_values", [])
+    credit_values = settings.get("credit_values", [])
+    for field, values in (
+        ("debit_values", debit_values),
+        ("credit_values", credit_values),
+    ):
+        if not isinstance(values, list) or any(
+            not isinstance(value, str) or not value.strip() for value in values
+        ):
+            raise ValueError(
+                f"Profile {profile_id} field {parser}.{field} must be an array of non-empty strings"
+            )
+    if indicator and (not debit_values or not credit_values):
+        raise ValueError(
+            f"Profile {profile_id} field {parser}.columns.credit_debit requires debit_values and credit_values"
+        )
+    if not indicator and (debit_values or credit_values):
+        raise ValueError(
+            f"Profile {profile_id} fields {parser}.debit_values and credit_values require columns.credit_debit"
+        )
+
+
+def _validate_csv_profile(profile_id: str, settings: dict[str, Any]) -> None:
+    for field, source in settings["columns"].items():
+        if not isinstance(source, str) or not source.strip():
+            raise ValueError(
+                f"Profile {profile_id} field csv.columns.{field} must be a non-empty string"
+            )
+    headers = settings.get("detect_headers")
+    if headers is None:
+        return
+    if not isinstance(headers, list) or not headers:
+        raise ValueError(
+            f"Profile {profile_id} field csv.detect_headers must be a non-empty JSON array"
+        )
+    for index, header in enumerate(headers):
+        if not isinstance(header, str) or not header.strip():
+            raise ValueError(
+                f"Profile {profile_id} field csv.detect_headers[{index}] must be a non-empty string"
+            )
+
+
+def _validate_pdf_profile(profile_id: str, settings: dict[str, Any]) -> None:
+    if "parser" in settings and settings.get("parser") != "pdfplumber":
+        raise ValueError(f"Profile {profile_id} field pdf.parser must be pdfplumber")
+    for field in ("has_header", "word_rows_only", "split_multiline_rows"):
+        if field in settings and not isinstance(settings[field], bool):
+            raise ValueError(
+                f"Profile {profile_id} field pdf.{field} must be a boolean"
+            )
+    compiled_row_regex: re.Pattern[str] | None = None
+    row_regex = settings.get("row_regex")
+    if row_regex is not None:
+        if not isinstance(row_regex, str) or not row_regex.strip():
+            raise ValueError(
+                f"Profile {profile_id} field pdf.row_regex must be a non-empty string"
+            )
+        try:
+            compiled_row_regex = re.compile(row_regex)
+        except re.error as error:
+            raise ValueError(
+                f"Profile {profile_id} field pdf.row_regex must be a valid regular expression"
+            ) from error
+    word_rows = settings.get("word_rows", False)
+    if not (
+        isinstance(word_rows, bool)
+        or isinstance(word_rows, str)
+        and word_rows == "sectioned"
+    ):
+        raise ValueError(
+            f"Profile {profile_id} field pdf.word_rows must be a boolean or sectioned"
+        )
+    if word_rows is True:
+        _validate_pdf_bounds_map(
+            profile_id, "pdf.word_columns", settings.get("word_columns")
+        )
+        missing_sources = sorted(
+            str(source)
+            for source in settings["columns"].values()
+            if source not in settings["word_columns"]
+        )
+        if missing_sources:
+            raise ValueError(
+                f"Profile {profile_id} pdf.columns map missing word columns: "
+                + ", ".join(missing_sources)
+            )
+        markers = settings.get("word_header_markers")
+        if (
+            not isinstance(markers, list)
+            or not markers
+            or any(
+                not isinstance(marker, str) or not marker.strip() for marker in markers
+            )
+        ):
+            raise ValueError(
+                f"Profile {profile_id} field pdf.word_header_markers must be a non-empty JSON array"
+            )
+    elif word_rows == "sectioned":
+        _validate_sectioned_pdf_profile(profile_id, settings.get("sectioned_word_rows"))
+    elif compiled_row_regex is not None:
+        join_fields = settings.get("join_fields", {})
+        if not isinstance(join_fields, dict):
+            raise ValueError(
+                f"Profile {profile_id} field pdf.join_fields must be a JSON object"
+            )
+        for field, sources in join_fields.items():
+            if (
+                not isinstance(field, str)
+                or not field.strip()
+                or not isinstance(sources, list)
+                or not sources
+                or any(not isinstance(source, str) or not source for source in sources)
+            ):
+                raise ValueError(
+                    f"Profile {profile_id} field pdf.join_fields.{field} must be a non-empty string array"
+                )
+        available_sources = set(compiled_row_regex.groupindex) | set(join_fields)
+        missing_sources = sorted(
+            str(source)
+            for source in settings["columns"].values()
+            if isinstance(source, str) and source not in available_sources
+        )
+        if missing_sources:
+            raise ValueError(
+                f"Profile {profile_id} pdf.columns map missing row-regex groups: "
+                + ", ".join(missing_sources)
+            )
+
+
+def _validate_pdf_bounds_map(profile_id: str, field: str, value: Any) -> None:
+    if not isinstance(value, dict) or not value:
+        raise ValueError(f"Profile {profile_id} field {field} must be a JSON object")
+    for name, bounds in value.items():
+        if (
+            not isinstance(name, str)
+            or not name.strip()
+            or not isinstance(bounds, list)
+            or len(bounds) != 2
+            or any(
+                isinstance(item, bool)
+                or not isinstance(item, (int, float))
+                or not Decimal(str(item)).is_finite()
+                for item in bounds
+            )
+            or bounds[0] >= bounds[1]
+        ):
+            raise ValueError(
+                f"Profile {profile_id} field {field}.{name} must be two increasing numbers"
+            )
+
+
+def _validate_sectioned_pdf_profile(profile_id: str, value: Any) -> None:
+    field = "pdf.sectioned_word_rows"
+    if not isinstance(value, dict):
+        raise ValueError(f"Profile {profile_id} field {field} must be a JSON object")
+    accounts = value.get("accounts")
+    if not isinstance(accounts, dict) or not accounts:
+        raise ValueError(
+            f"Profile {profile_id} field {field}.accounts must be a non-empty JSON object"
+        )
+    for section, account in accounts.items():
+        account_field = f"{field}.accounts.{section}"
+        if (
+            not isinstance(section, str)
+            or not section.strip()
+            or not isinstance(account, dict)
+        ):
+            raise ValueError(
+                f"Profile {profile_id} field {account_field} must be a JSON object"
+            )
+        for account_key in ("account_id", "account"):
+            if (
+                not isinstance(account.get(account_key), str)
+                or not account[account_key].strip()
+            ):
+                raise ValueError(
+                    f"Profile {profile_id} field {account_field}.{account_key} must be a non-empty string"
+                )
+        currency_from_row = account.get("currency_from_row", False)
+        if not isinstance(currency_from_row, bool):
+            raise ValueError(
+                f"Profile {profile_id} field {account_field}.currency_from_row must be a boolean"
+            )
+        if not currency_from_row and (
+            not isinstance(account.get("currency"), str)
+            or not account["currency"].strip()
+        ):
+            raise ValueError(
+                f"Profile {profile_id} field {account_field}.currency must be a non-empty string"
+            )
+    _validate_pdf_bounds_map(profile_id, f"{field}.columns", value.get("columns"))
+    missing_columns = {"description", "deposit", "withdrawal"} - set(value["columns"])
+    if missing_columns:
+        raise ValueError(
+            f"Profile {profile_id} field {field}.columns is missing: "
+            + ", ".join(sorted(missing_columns))
+        )
+    markers = value.get("header_markers")
+    if (
+        not isinstance(markers, list)
+        or not markers
+        or any(not isinstance(marker, str) or not marker.strip() for marker in markers)
+    ):
+        raise ValueError(
+            f"Profile {profile_id} field {field}.header_markers must be a non-empty string array"
+        )
+    compiled: dict[str, re.Pattern[str]] = {}
+    for regex_field in (
+        "date_regex",
+        "currency_regex",
+        "statement_year_regex",
+        "statement_year_filename_regex",
+    ):
+        pattern = value.get(regex_field)
+        if pattern is None:
+            continue
+        if not isinstance(pattern, str) or not pattern.strip():
+            raise ValueError(
+                f"Profile {profile_id} field {field}.{regex_field} must be a non-empty string"
+            )
+        try:
+            compiled[regex_field] = re.compile(pattern)
+        except re.error as error:
+            raise ValueError(
+                f"Profile {profile_id} field {field}.{regex_field} must be a valid regular expression"
+            ) from error
+    if "date_regex" not in compiled or not {"day", "month"}.issubset(
+        compiled["date_regex"].groupindex
+    ):
+        raise ValueError(
+            f"Profile {profile_id} field {field}.date_regex must define day and month groups"
+        )
+    if not value.get("statement_year_regex") and not value.get(
+        "statement_year_filename_regex"
+    ):
+        raise ValueError(
+            f"Profile {profile_id} field {field} requires a statement-year regex"
+        )
+    for year_field in ("statement_year_regex", "statement_year_filename_regex"):
+        if year_field in compiled and "year" not in compiled[year_field].groupindex:
+            raise ValueError(
+                f"Profile {profile_id} field {field}.{year_field} must define a year group"
+            )
 
 
 def _load_profile_mappings(config: dict[str, Any]) -> dict[str, Any]:
@@ -2049,7 +2565,25 @@ def _load_profile_mappings(config: dict[str, Any]) -> dict[str, Any]:
     if not Path(mapping_path).exists():
         return {}
     with Path(mapping_path).open(encoding="utf-8") as fh:
-        return json.load(fh)
+        mappings = json.load(fh)
+    if not isinstance(mappings, dict):
+        raise ValueError("Profile mappings document must be a JSON object")
+    patterns = mappings.get("filename_patterns", [])
+    if not isinstance(patterns, list):
+        raise ValueError(
+            "Profile mappings field filename_patterns must be a JSON array"
+        )
+    for index, mapping in enumerate(patterns):
+        if not isinstance(mapping, dict):
+            raise ValueError(
+                f"Profile mappings field filename_patterns[{index}] must be a JSON object"
+            )
+        for field in ("pattern", "profile"):
+            if not isinstance(mapping.get(field), str) or not mapping[field].strip():
+                raise ValueError(
+                    f"Profile mappings field filename_patterns[{index}].{field} must be a non-empty string"
+                )
+    return mappings
 
 
 def _discover_input_files(input_path: Path) -> list[Path]:
@@ -2149,14 +2683,15 @@ def _import_transactions(
             continue
         if suffix != ".csv":
             continue
-        profile = _select_csv_profile(
+        profile, prompted_for_profile = _select_csv_profile(
             input_file,
             profiles,
             interactive,
             profile_mappings,
-            profile_mappings_path,
         )
         imported = _import_csv(input_file, profile, config, input_root)
+        if prompted_for_profile:
+            _maybe_save_profile_mapping(input_file, profile, profile_mappings_path)
         transactions.extend(imported)
         file_reports.append(
             {
@@ -2198,14 +2733,13 @@ def _select_csv_profile(
     profiles: list[dict[str, Any]],
     interactive: bool,
     profile_mappings: dict[str, Any],
-    profile_mappings_path: str | None,
-) -> dict[str, Any]:
+) -> tuple[dict[str, Any], bool]:
     if not profiles:
-        return _default_profile()
+        return _default_profile(), False
 
     mapped_profile = _mapped_profile(csv_path, profiles, profile_mappings)
     if mapped_profile is not None:
-        return mapped_profile
+        return mapped_profile, False
 
     headers = _csv_headers(csv_path)
     matching_profiles = []
@@ -2215,7 +2749,7 @@ def _select_csv_profile(
             matching_profiles.append(profile)
 
     if len(matching_profiles) == 1:
-        return matching_profiles[0]
+        return matching_profiles[0], False
     if len(matching_profiles) > 1:
         if not interactive:
             labels = ", ".join(
@@ -2225,14 +2759,17 @@ def _select_csv_profile(
             raise ValueError(
                 f"Ambiguous profile detection for {csv_path.name}: {labels}"
             )
-        return _prompt_for_profile(csv_path, matching_profiles, profile_mappings_path)
+        return (
+            _prompt_for_profile(csv_path, matching_profiles, None),
+            True,
+        )
 
     if len(profiles) > 1:
         if not interactive:
             raise ValueError(f"Could not detect profile for {csv_path.name}")
-        return _prompt_for_profile(csv_path, profiles, profile_mappings_path)
+        return _prompt_for_profile(csv_path, profiles, None), True
 
-    return profiles[0]
+    return profiles[0], False
 
 
 def _mapped_profile(
@@ -2351,6 +2888,7 @@ def _import_csv(
     input_root: Path,
 ) -> list[dict[str, str]]:
     csv_settings = profile.get("csv", {})
+    _validate_selected_csv_headers(csv_path, profile, csv_settings)
     columns = dict(csv_settings.get("columns", {}))
     columns["debit_values"] = csv_settings.get("debit_values", [])
     columns["credit_values"] = csv_settings.get("credit_values", [])
@@ -2375,6 +2913,19 @@ def _import_csv(
             rows.append(normalized)
 
     return rows
+
+
+def _validate_selected_csv_headers(
+    csv_path: Path, profile: dict[str, Any], settings: dict[str, Any]
+) -> None:
+    headers = _csv_headers(csv_path)
+    profile_id = str(profile.get("id") or profile.get("account_id") or "unknown")
+    for field, mapped_header in settings.get("columns", {}).items():
+        if str(mapped_header) not in headers:
+            raise ValueError(
+                f"Profile {profile_id} field csv.columns.{field} maps to missing "
+                f"header {mapped_header!r} in {csv_path.name}"
+            )
 
 
 def _import_pdf(

@@ -1,7 +1,7 @@
 # Improvement plan reconciliation
 
-This index was reconciled on 2026-07-17 against current `main` commit
-`a91db80fe5b3b20cccf3abf4b51f58ec199d3fde`. The original plans were written
+This index was reconciled on 2026-07-17 against `main` commit
+`96482747ac34b741c0b5de55c6c2bf1c3f44e3c1`. The original plans were written
 on 2026-07-11 against `aa0eedf`; their source excerpts, branch names, and line
 numbers are historical context, not execution instructions for the live
 architecture.
@@ -13,7 +13,7 @@ exit 1 for every local `codex/improve-plan-*` tip and `codex/improve-all`, which
 means none is an ancestor of the reconciled commit:
 
 ```sh
-git merge-base --is-ancestor BRANCH 5ef77af167be6dca2ceeb47ca4462d9538e83764
+git merge-base --is-ancestor BRANCH 96482747ac34b741c0b5de55c6c2bf1c3f44e3c1
 ```
 
 Do not merge, rebase, cherry-pick, publish, or delete those branches as part of
@@ -39,21 +39,19 @@ correction, reconciliation, review, PDF, and JSON contracts.
 ### Executed specifications
 
 - [018](018-accounting-safe-ollama-categorization.md) — Make Ollama
-  categorization accounting-safe and semantically constrained. **DONE** in
-  isolated execution: implementation commit `8d9a857` passed independent
-  offline review and the `qwen2.5:3b` benchmark passed with 100% accounting
-  safety and 100% ordinary-category accuracy. Worktree:
-  `/tmp/honeymoney-plan-018`; maintainer merge pending; not published to the
-  issue tracker.
+  categorization accounting-safe and semantically constrained. **DONE** on
+  `main` in merge commit `9648274`. Implementation commit `8d9a857` passed
+  independent offline review, and the `qwen2.5:3b` benchmark passed with 100%
+  accounting safety and 100% ordinary-category accuracy.
 
 ### Historical-plan reconciliation
 
 | Plan | Title | Priority | Reconciled status | Follow-up |
 |---|---|---:|---|---|
-| [001](001-preserve-failed-replacements.md) | Preserve failed replacement rows | P1 | TODO | [#19](https://github.com/itsjling/honeymoney/issues/19) |
-| [002](002-validate-public-config.md) | Validate public config | P1 | PARTIAL | [#20](https://github.com/itsjling/honeymoney/issues/20) |
-| [003](003-validate-profile-structure.md) | Validate profile structure | P1 | PARTIAL | [#20](https://github.com/itsjling/honeymoney/issues/20) |
-| [004](004-define-empty-corrections.md) | Define empty correction semantics | P1 | PARTIAL | [#21](https://github.com/itsjling/honeymoney/issues/21) |
+| [001](001-preserve-failed-replacements.md) | Preserve failed replacement rows | P1 | DONE | [#19](https://github.com/itsjling/honeymoney/issues/19) |
+| [002](002-validate-public-config.md) | Validate public config | P1 | DONE | [#20](https://github.com/itsjling/honeymoney/issues/20) |
+| [003](003-validate-profile-structure.md) | Validate profile structure | P1 | DONE | [#20](https://github.com/itsjling/honeymoney/issues/20) |
+| [004](004-define-empty-corrections.md) | Define empty correction semantics | P1 | DONE | [#21](https://github.com/itsjling/honeymoney/issues/21) |
 | [005](005-failure-atomic-persistence.md) | Make persistence recoverable | P1 | PARTIAL | [#22](https://github.com/itsjling/honeymoney/issues/22) |
 | [006](006-transactional-reset.md) | Make reset transactional | P1 | TODO | [#23](https://github.com/itsjling/honeymoney/issues/23) |
 | [007](007-enforce-local-ollama.md) | Enforce local-only Ollama | P1 | TODO | [#18](https://github.com/itsjling/honeymoney/issues/18) |
@@ -62,7 +60,7 @@ correction, reconciliation, review, PDF, and JSON contracts.
 | [010](010-cross-import-duplicates.md) | Detect cross-import duplicates | P2 | TODO | [#25](https://github.com/itsjling/honeymoney/issues/25) |
 | [011](011-optimize-duplicate-window.md) | Optimize duplicate scanning | P2 | TODO | [#25](https://github.com/itsjling/honeymoney/issues/25) |
 | [012](012-safe-spreadsheet-exports.md) | Make CSV exports spreadsheet-safe | P2 | TODO | [#26](https://github.com/itsjling/honeymoney/issues/26) |
-| [013](013-pin-ci-toolchain.md) | Stabilize CI dependency resolution | P3 | TODO | [#28](https://github.com/itsjling/honeymoney/issues/28) |
+| [013](013-pin-ci-toolchain.md) | Stabilize CI dependency resolution | P3 | DONE | [#28](https://github.com/itsjling/honeymoney/issues/28) |
 | [014](014-single-ledger-read.md) | Read ledger once per import | P3 | SUPERSEDED | [#29](https://github.com/itsjling/honeymoney/issues/29) |
 | [015](015-local-categorization-memory.md) | Add local categorization memory | P2 | SUPERSEDED | — |
 | [016](016-profile-validation-command.md) | Add profile validation tooling | P2 | SUPERSEDED | [#20](https://github.com/itsjling/honeymoney/issues/20), [#16](https://github.com/itsjling/honeymoney/issues/16) |
@@ -70,70 +68,66 @@ correction, reconciliation, review, PDF, and JSON contracts.
 
 ## Evidence by plan
 
-### 001 — TODO
+### 001 — DONE
 
-Current import orchestration builds `source_files` before parsing and passes the
-entire discovered set to `_merge_into_ledger` for `--replace` and `--reset`.
-Failed or skipped inputs can therefore delete their last known-good ledger
-rows. Verify the live flow with:
+Replacement deletion scope is now derived only from import file reports with
+status `processed`. Disabled PDFs and PDFs that fail dependency loading,
+profile selection, or parsing retain their last known-good ledger rows;
+successfully processed statements, including zero-transaction statements,
+still replace prior rows. Mixed-folder replacement updates processed sources
+while preserving failed sources, and import statuses, warnings, strict exits,
+and structured JSON remain compatible.
 
 ```sh
-sed -n '200,265p' honeymoney/cli.py
-python3 -m unittest tests.test_workflow tests.test_cli_bootstrap
+sed -n '250,275p' honeymoney/cli.py
+python3 -m unittest tests.test_workflow tests.test_cli_bootstrap tests.test_agent_cli
 ```
 
-The focused suites preserve successful replacement behavior but do not cover
-failed mixed-source replacement. Issue #19 adds that observable contract using
-synthetic CSV/PDF failures.
+### 002 — DONE
 
-### 002 — PARTIAL
-
-The versioned JSON error envelope and exit code 2 exist, and current validation
-covers `paths`, basic Ollama fields, and reconciliation settings. Public
-sections such as profiles, profile mappings, rules, corrections, PDF settings,
-exchange rates, categories, owners, payment methods, thresholds, and numeric
-Ollama limits do not have the complete structural/range validation matrix.
+Configuration loading now validates every public container and nested scalar
+used by the CLI, including path references, vocabularies, PDF settings,
+exchange rates, thresholds, reconciliation, category policies, and Ollama
+numeric limits. Boolean-as-number, non-finite, out-of-range, duplicate, and
+empty values fail with field-specific errors before statement processing.
 
 ```sh
-sed -n '450,525p' honeymoney/cli.py
-python3 -m unittest tests.test_agent_cli tests.test_cli_bootstrap
+python3 -m unittest tests.test_config_cli tests.test_agent_cli
 ```
 
-Issue #20 owns the remaining startup validation rather than restoring the old
-branch implementation around newer accounting configuration.
+Structured commands preserve the versioned single-document error envelope and
+exit 2 contract. Checked-in examples and starter configuration remain valid.
 
-### 003 — PARTIAL
+### 003 — DONE
 
-Profiles currently validate `account_id` and controlled owner, payment method,
-and account type values. They do not validate parser mode, coherent date and
-amount strategies, parser-specific structure, or selected CSV headers before
-normalization.
+Profiles now validate account metadata and controlled values, exactly one CSV
+or PDF parser mode, coherent date and amount strategies, sign configuration,
+regular expressions, and word/sectioned-word parser structure. The selected
+CSV profile's mapped headers are checked against the statement before row
+normalization, and profiles/mappings are loaded before reset can change saved
+corrections.
 
 ```sh
-sed -n '1998,2040p' honeymoney/cli.py
 python3 -m unittest tests.test_import_profiles tests.test_cli_bootstrap
 ```
 
-The bundled-profile goldens pass, but passing known profiles is weaker than
-rejecting malformed ones before output mutation. Issue #20 combines plans 002
-and 003 at their shared startup-validation seam.
+Malformed-profile regression cases assert field paths and unchanged artifacts;
+all bundled profile goldens pass unchanged.
 
-### 004 — PARTIAL
+### 004 — DONE
 
-Structured corrections already validate the batch before the correction
-operation writes and merge omitted fields with saved values. However JSON
-normalization strips empty strings, validation treats them as absent, and the
-CSV loader drops them. Explicit empty notes therefore cannot reliably mean
-"clear notes," while empty non-note fields are not consistently rejected.
+Structured corrections now reject empty or whitespace-only non-note fields
+before any artifact changes. Omitted fields preserve saved values and review
+state, while an explicit empty note is persisted as a durable clear operation
+that survives correction reload and later imports. Empty or `Unknown`
+categories cannot be marked resolved without an explicit accounting flow.
 
 ```sh
-sed -n '45,145p' honeymoney/corrections.py
-sed -n '1470,1530p' honeymoney/cli.py
-python3 -m unittest tests.test_agent_cli tests.test_cash_flow_review
+python3 -m unittest tests.test_agent_cli tests.test_workflow tests.test_cash_flow_review
 ```
 
-Issue #21 preserves the useful merge behavior and completes the public empty
-versus omitted contract.
+The machine and human documentation now states the omitted-versus-empty
+contract explicitly.
 
 ### 005 — PARTIAL
 
@@ -154,9 +148,10 @@ atomicity.
 
 ### 006 — TODO
 
-`--reset` calls `_remove_corrections` before profiles, rules, CSV/PDF parsing,
-Ollama, reconciliation, and output persistence. `_remove_corrections` rewrites
-the live CSV directly, so a later failure loses reviewed state.
+`--reset` now validates configuration, profiles, mappings, selected CSV headers,
+and statement parsing before calling `_remove_corrections`. It still removes
+saved corrections before rules, Ollama, reconciliation, and output persistence;
+a failure in those later phases can therefore lose reviewed state.
 
 ```sh
 sed -n '208,265p' honeymoney/cli.py
@@ -255,20 +250,25 @@ python3 -m unittest tests.test_agent_cli tests.test_cli_bootstrap tests.test_wor
 Issue #26 covers every spreadsheet-facing CSV path after #22 stabilizes the
 writer boundary.
 
-### 013 — TODO
+### 013 — DONE
 
-Runtime PDF dependencies remain unbounded, bootstrap installs directly from
-`pyproject.toml`, and CI caches only against that file. There is no committed
-constraints/lock input or reviewed refresh workflow.
+Development and CI consume a reviewed exact dependency closure from
+`constraints/dev.txt` on Python 3.10 and 3.13, while wheel and sdist metadata
+retain bounded compatible PDF extras and exclude development constraints. CI
+cache keys include both `pyproject.toml` and the constraint file. The documented
+refresh command rebuilds the closure in a clean Python 3.10 environment and
+requires dual-version validation. Offline verification checks installed
+consistency, the exact closure, package builds, and distribution contents; a
+separate online job audits the reviewed package names and versions.
 
 ```sh
-sed -n '1,80p' pyproject.toml
-sed -n '1,40p' scripts/bootstrap.sh
-sed -n '1,80p' .github/workflows/ci.yml
+./scripts/bootstrap.sh
+python3 -m pip check
+python3 scripts/check_constraints.py
+python3 -m unittest tests.test_import_profiles
+./scripts/check.sh
+./scripts/dependency-health.sh  # online maintainer/CI phase only
 ```
-
-Issue #28 adds reproducible development resolution and dependency health while
-keeping end-user metadata appropriately compatible.
 
 ### 014 — SUPERSEDED
 

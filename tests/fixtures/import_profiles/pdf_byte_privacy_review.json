@@ -1,0 +1,48 @@
+{
+  "review_date": "2026-07-17",
+  "review_policy": {
+    "embedded_content": "No attachments, images, forms, scripts, actions, encryption, or embedded files are present.",
+    "metadata": "The deterministic generator emits no document information or XMP metadata.",
+    "provenance": "Every PDF is generated clean-room from the adjacent invented JSON layout fixture.",
+    "visible_text": "Every extracted page was manually reviewed as invented statement-like content with no real identity, account identifier, address, transaction, or amount."
+  },
+  "version": 1,
+  "fixtures": {
+    "hsbc_hk_credit_card_pdf": {
+      "contains_private_data": false,
+      "embedded_content_reviewed": true,
+      "metadata_reviewed": true,
+      "page_count": 2,
+      "sha256": "869ef4dc98dc3bb740115279d6151ab9de9e9c7ecc4e4aba1c9374aa63fbcc8e",
+      "visible_text_reviewed": true,
+      "visible_text_sha256": "90c5b4a8e3284d187454204ef072a6c03bf447b19e83ff6a55695748e2ef292b"
+    },
+    "hsbc_one_pdf": {
+      "contains_private_data": false,
+      "embedded_content_reviewed": true,
+      "metadata_reviewed": true,
+      "page_count": 3,
+      "sha256": "c2baeb460f11585bf5fd692ed2856744cb69f6a91f7b3f325c11ecb7219c746e",
+      "visible_text_reviewed": true,
+      "visible_text_sha256": "6ced38048023e6adf1967609b86f4a185bf422dd66c6b7fe36959aa70794e315"
+    },
+    "mox_bank_pdf": {
+      "contains_private_data": false,
+      "embedded_content_reviewed": true,
+      "metadata_reviewed": true,
+      "page_count": 1,
+      "sha256": "2db5d70f8c1b6720a4e3544619809d3c1792c0c004a176dc4388754167598a37",
+      "visible_text_reviewed": true,
+      "visible_text_sha256": "7962528bb2ce5c04eab081184029ac21ee3e654a227d4df9fd8c24374ec06a72"
+    },
+    "mox_credit_card_pdf": {
+      "contains_private_data": false,
+      "embedded_content_reviewed": true,
+      "metadata_reviewed": true,
+      "page_count": 1,
+      "sha256": "7af90d8e388e2c6f9184443d0933f26b3c56ececa6d44e914ff7695f19d5bbc5",
+      "visible_text_reviewed": true,
+      "visible_text_sha256": "0b0a710f82421b48a36e20c6fa97252d3f775c3908457cfa823f39981d85314e"
+    }
+  }
+}

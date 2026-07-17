@@ -28,6 +28,7 @@
       "posted_amount": "2.50",
       "amount_hkd": "2.50",
       "account_id": "mox_bank_main",
+      "source_page": "1",
       "source_row": "3"
     },
     {
@@ -39,6 +40,7 @@
       "posted_amount": "8.75",
       "amount_hkd": "8.75",
       "account_id": "mox_bank_main",
+      "source_page": "1",
       "source_row": "4"
     },
     {
@@ -50,6 +52,7 @@
       "posted_amount": "-1234.50",
       "amount_hkd": "-1234.50",
       "account_id": "mox_bank_main",
+      "source_page": "1",
       "source_row": "5"
     },
     {
@@ -61,6 +64,7 @@
       "posted_amount": "15.00",
       "amount_hkd": "15.00",
       "account_id": "mox_bank_main",
+      "source_page": "1",
       "source_row": "6"
     }
   ]

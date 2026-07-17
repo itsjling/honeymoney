@@ -11,7 +11,8 @@
       "amount_hkd": "1000.00",
       "account_id": "hsbc_one_hkd_savings",
       "account": "HSBC One HKD Savings",
-      "source_page": "1"
+      "source_page": "1",
+      "source_row": "8"
     },
     {
       "date": "2025-12-31",
@@ -19,7 +20,8 @@
       "original_amount": "-25.00",
       "original_currency": "HKD",
       "account_id": "hsbc_one_hkd_savings",
-      "source_page": "1"
+      "source_page": "1",
+      "source_row": "9"
     },
     {
       "date": "2025-12-31",
@@ -28,7 +30,8 @@
       "original_currency": "HKD",
       "account_id": "hsbc_one_hkd_current",
       "account": "HSBC One HKD Current",
-      "source_page": "1"
+      "source_page": "1",
+      "source_row": "14"
     },
     {
       "date": "2026-01-02",
@@ -36,7 +39,8 @@
       "original_amount": "200.00",
       "original_currency": "HKD",
       "account_id": "hsbc_one_hkd_current",
-      "source_page": "1"
+      "source_page": "1",
+      "source_row": "16"
     },
     {
       "date": "2025-12-31",
@@ -47,6 +51,7 @@
       "account_id": "hsbc_one_fcy_savings",
       "account": "HSBC One Foreign Currency Savings",
       "source_page": "2",
+      "source_row": "3",
       "_flags_contains": ["missing_exchange_rate"]
     },
     {
@@ -57,6 +62,7 @@
       "amount_hkd": "",
       "account_id": "hsbc_one_fcy_savings",
       "source_page": "2",
+      "source_row": "4",
       "_flags_contains": ["missing_exchange_rate"]
     },
     {
@@ -67,6 +73,7 @@
       "amount_hkd": "",
       "account_id": "hsbc_one_fcy_savings",
       "source_page": "3",
+      "source_row": "1",
       "_flags_contains": ["missing_exchange_rate"]
     }
   ]

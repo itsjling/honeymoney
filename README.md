@@ -155,6 +155,17 @@ honeymoney config edit ollama --enable
 honeymoney config edit ollama --disable
 ```
 
+Configuration is validated completely when it is loaded, before statements are
+processed. Path fields and profile/rule/correction references must be non-empty
+strings; category, owner, and payment-method vocabularies must be arrays of
+unique non-empty strings; exchange rates and Ollama timeouts must be finite and
+positive; `review_confidence_threshold` must be from `0` to `1`; and Ollama
+batch size must be a positive integer. Invalid fields are reported by their
+full config path. Import profiles likewise require stable account metadata,
+exactly one CSV or PDF parser definition, usable date and amount mappings, and
+valid parser-specific settings. A selected CSV profile must map only headers
+present in the statement.
+
 Prints or edits the active `config.json`; pass `--config PATH` to target another file. `config edit` validates a temporary editor copy before replacing the original and uses `$VISUAL`, then `$EDITOR`, then `vi`. With no Ollama edit option, the guided editor lists models installed at the configured local endpoint. Selecting or passing a model also enables the Ollama fallback; `--enable` verifies that the configured model is installed before enabling it. Direct `--model`, `--enable`, and `--disable` edits can use `--json`.
 
 ## Structured agent commands
@@ -181,9 +192,12 @@ honeymoney correct --config ./money/config.json --file corrections.json --json
 ```
 
 The batch is validated in full before any output changes and merges fields by
-`transaction_id`; omitted fields remain unchanged. Use `--file -` to read the
-JSON array from stdin. The interactive `review` command remains available for
-human review.
+`transaction_id`; omitted fields remain unchanged. An explicit empty `notes`
+string clears notes. Empty or whitespace-only values for every other correction
+field are rejected. An `Unknown` or empty category cannot be marked resolved
+unless the correction also preserves or supplies an explicit accounting flow
+decision. Use `--file -` to read the JSON array from stdin. The interactive
+`review` command remains available for human review.
 
 ```bash
 honeymoney status
@@ -294,17 +308,58 @@ directory for manual approval and repeatable local checks.
 1. Run Honeymoney.
 2. Run `honeymoney review` to categorize transactions needing review, or use `honeymoney review --flow unresolved --direction inflow` for human cash-flow decisions.
 3. For manual review, open `review_needed.csv`.
-4. Fill correction fields such as `category`, `flow_type`, `owner`, `payment_method`, `confidence`, `reason`, or `notes`.
+4. Fill correction fields such as `category`, `flow_type`, `owner`, `payment_method`, `confidence`, `reason`, or `notes`. Blank cells are omitted patches; use structured `correct` with `"notes": ""` to explicitly clear notes.
 5. Save those rows as `corrections.csv` or point config at the edited file.
 6. Run Honeymoney again.
 
-Corrections apply by exact `transaction_id` and clear review by default.
+Corrections apply by exact `transaction_id`. Omitted fields, including review
+state, remain unchanged.
 
 ## Tests
 
+Development and CI installs use the reviewed resolution in
+`constraints/dev.txt` while published PDF requirements remain compatible
+ranges. Bootstrap from any directory with Python 3.10 or 3.13:
+
 ```bash
-./scripts/check.sh
+PYTHON=python3.10 ./scripts/bootstrap.sh
+PYTHON=python3.10 ./scripts/check.sh
 ```
+
+The offline verification command runs formatting, linting, unit tests,
+`pip check`, a wheel/source build, and distribution-metadata checks. Once the
+bootstrap install is available, it does not query dependency indexes or
+advisory services.
+
+Refresh the reviewed resolution intentionally on Python 3.10:
+
+```bash
+PYTHON=python3.10 ./scripts/refresh-constraints.sh
+git diff -- pyproject.toml constraints/dev.txt
+```
+
+The refresh uses a clean temporary environment and rewrites the complete direct
+and transitive resolution. Never hand-edit individual transitive pins. Before
+accepting the diff, bootstrap clean environments on both Python 3.10 and 3.13,
+run the import-profile goldens, and run the full verification command:
+
+```bash
+clean_python=/path/to/clean-environment/bin/python
+PYTHON="$clean_python" ./scripts/bootstrap.sh
+"$clean_python" -m unittest tests.test_import_profiles
+PYTHON="$clean_python" ./scripts/check.sh
+```
+
+Dependency advisory lookup is deliberately separate because it needs network
+access. It checks installed-package consistency first, then fails for any known
+advisory (which is stricter than checking only high-severity findings):
+
+```bash
+./scripts/dependency-health.sh
+```
+
+This command sends only package names and versions to the public advisory
+service; it never reads statement inputs or generated ledgers.
 
 Focused golden suites:
 

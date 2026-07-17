@@ -11,6 +11,8 @@ environment when desired, then run:
 ```
 
 Set `PYTHON=/path/to/python` when Codex should use a specific interpreter.
+Bootstrap resolves the reviewed direct and transitive versions from
+`constraints/dev.txt`; CI proves that resolution on Python 3.10 and 3.13.
 
 ## Codex cloud
 
@@ -22,6 +24,16 @@ with:
 - maintenance script: `./scripts/bootstrap.sh`;
 - no secrets;
 - agent-phase internet access disabled.
+
+Run `./scripts/bootstrap.sh` during environment setup while package-index access
+is available. The subsequent `./scripts/check.sh` agent phase is offline: it
+uses the installed environment for Ruff, tests, `pip check`, package builds,
+and distribution-metadata verification. It does not perform advisory lookup.
+
+Maintainers can run `./scripts/dependency-health.sh` separately when network
+access is allowed. That command audits package names and versions only; it does
+not open statement files. CI keeps this online audit in its own job after the
+offline-compatible Python-version matrix succeeds.
 
 Launch cloud work manually from a decision-complete GitHub issue carrying the
 `ready-for-agent` label. Cloud tasks must use only committed synthetic fixtures;
@@ -70,7 +82,12 @@ optional, but each item must set at least one correction:
 Use `--file -` to read the array from stdin. The entire batch is rejected before
 any files change if an ID, field, or value is invalid. Corrections are field-wise
 patches: omitted fields keep their saved values, and omitting `needs_review`
-preserves the transaction's current review state.
+preserves the transaction's current review state. An explicit `"notes": ""`
+clears notes and remains a clear operation after correction reload and later
+imports. Empty or whitespace-only `category`, `flow_type`, `owner`,
+`payment_method`, `confidence`, `reason`, and `needs_review` values are invalid.
+An empty or `Unknown` category may be marked resolved only when an explicit
+accounting flow decision already exists or is included in the patch.
 
 Human one-shot review uses the same validated correction merge and atomic
 ledger/review rewrite as `correct`. `--remember --yes` is valid for safe income
