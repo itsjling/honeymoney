@@ -1,13 +1,12 @@
 from __future__ import annotations
 
-import csv
 import json
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
-from honeymoney.csv_artifacts import canonical_csv_cell, csv_document
+from honeymoney.csv_artifacts import csv_document, read_csv_artifact
 from honeymoney.persistence import persist_generation, recover_generation
 from honeymoney.reconciliation import reconcile_ledger
 from honeymoney.rules import validate_rules
@@ -47,30 +46,29 @@ def load_corrections(config: dict[str, Any]) -> dict[str, dict[str, str]]:
     if not corrections_path or not Path(corrections_path).exists():
         return {}
 
+    artifact = read_csv_artifact(Path(corrections_path), CORRECTION_COLUMNS)
     corrections: dict[str, dict[str, str]] = {}
-    with Path(corrections_path).open(newline="", encoding="utf-8") as fh:
-        for row in csv.DictReader(fh):
-            transaction_id = canonical_csv_cell(
-                "transaction_id", row.get("transaction_id") or ""
-            ).strip()
-            if not transaction_id:
+    for row in artifact.rows:
+        transaction_id = row.get("transaction_id", "").strip()
+        if not transaction_id:
+            continue
+        meaningful = {}
+        for field in CORRECTION_FIELDS:
+            if field == "notes":
                 continue
-            meaningful = {}
-            for field in CORRECTION_FIELDS:
-                if field == "notes":
-                    continue
-                raw_value = row.get(field) or ""
-                value = _canonical_correction_csv_value(field, raw_value)
-                if value:
-                    meaningful[field] = value
-            raw_notes = row.get("notes")
-            if raw_notes is not None and raw_notes != "":
-                meaningful["notes"] = _canonical_correction_csv_value(
-                    "notes", raw_notes
-                )
-            if meaningful:
-                validate_correction(transaction_id, meaningful, config)
-                corrections[transaction_id] = meaningful
+            value = _correction_csv_value(
+                field, row.get(field, ""), artifact.safe_format
+            )
+            if value:
+                meaningful[field] = value
+        raw_notes = row.get("notes")
+        if raw_notes is not None and raw_notes != "":
+            meaningful["notes"] = _correction_csv_value(
+                "notes", raw_notes, artifact.safe_format
+            )
+        if meaningful:
+            validate_correction(transaction_id, meaningful, config)
+            corrections[transaction_id] = meaningful
     return corrections
 
 
@@ -355,25 +353,19 @@ def _correction_row(transaction_id: str, correction: dict[str, str]) -> dict[str
     return row
 
 
-def _canonical_correction_csv_value(field: str, raw_value: str) -> str:
-    canonical = canonical_csv_cell(field, raw_value)
-    # Honeymoney-authored escapes prove the leading character is canonical.
-    # Continue trimming unescaped hand-edited cells for compatibility.
-    return canonical if canonical != raw_value else canonical.strip()
+def _correction_csv_value(field: str, value: str, safe_format: bool) -> str:
+    if not safe_format:
+        return value.strip()
+    if field == "notes" and value == " ":
+        return ""
+    return value
 
 
 def read_ledger(path: Path) -> list[dict[str, str]]:
     recover_generation(path)
     if not path.exists():
         return []
-    with path.open(newline="", encoding="utf-8") as fh:
-        rows = [
-            {
-                column: canonical_csv_cell(column, row.get(column) or "")
-                for column in CATEGORIZED_COLUMNS
-            }
-            for row in csv.DictReader(fh)
-        ]
+    rows = read_csv_artifact(path, CATEGORIZED_COLUMNS).rows
     for row in rows:
         if not row["account_type"]:
             row["account_type"] = {

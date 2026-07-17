@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import csv
 import io
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Iterable, Mapping
 
 # These public columns carry canonical non-text representations. Every other
@@ -26,10 +28,21 @@ _CONTROL_MARKERS = ("\t", "\r")
 _ESCAPE_PREFIX = "'"
 
 
+@dataclass(frozen=True)
+class CsvArtifact:
+    rows: list[dict[str, str]]
+    safe_format: bool
+
+
 def csv_document(columns: list[str], rows: Iterable[Mapping[str, str]]) -> str:
     """Serialize a public CSV document with spreadsheet-safe text cells."""
     buffer = io.StringIO(newline="")
-    writer = csv.DictWriter(buffer, fieldnames=columns, extrasaction="ignore")
+    writer = csv.DictWriter(
+        buffer,
+        fieldnames=columns,
+        extrasaction="ignore",
+        quoting=csv.QUOTE_ALL,
+    )
     writer.writeheader()
     writer.writerows(
         {
@@ -42,6 +55,27 @@ def csv_document(columns: list[str], rows: Iterable[Mapping[str, str]]) -> str:
         for row in rows
     )
     return buffer.getvalue()
+
+
+def read_csv_artifact(path: Path, columns: list[str]) -> CsvArtifact:
+    """Read a public CSV and decode only the marked spreadsheet-safe format."""
+    with path.open(newline="", encoding="utf-8") as handle:
+        first_line = handle.readline()
+        safe_format = first_line.rstrip("\r\n") == _quoted_header(columns)
+        handle.seek(0)
+        rows = []
+        for row in csv.DictReader(handle):
+            rows.append(
+                {
+                    column: (
+                        canonical_csv_cell(column, row.get(column) or "")
+                        if safe_format
+                        else row.get(column) or ""
+                    )
+                    for column in columns
+                }
+            )
+    return CsvArtifact(rows, safe_format)
 
 
 def spreadsheet_safe_cell(column: str, value: str) -> str:
@@ -69,3 +103,9 @@ def _formula_triggering_text(value: str) -> bool:
     if any(marker in leading_whitespace for marker in _CONTROL_MARKERS):
         return True
     return stripped.startswith(_FORMULA_MARKERS)
+
+
+def _quoted_header(columns: list[str]) -> str:
+    buffer = io.StringIO(newline="")
+    csv.writer(buffer, quoting=csv.QUOTE_ALL).writerow(columns)
+    return buffer.getvalue().rstrip("\r\n")

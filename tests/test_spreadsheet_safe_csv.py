@@ -8,11 +8,14 @@ import unittest
 from pathlib import Path
 
 from honeymoney.corrections import (
+    CORRECTION_COLUMNS,
     ledger_output_documents,
     load_corrections,
     prepare_corrections_document,
     read_ledger,
 )
+from honeymoney.reconciliation import reconcile_ledger
+from honeymoney.rules import apply_rules
 from honeymoney.schema import (
     ALLOWED_CATEGORIES,
     ALLOWED_OWNERS,
@@ -51,6 +54,25 @@ class SpreadsheetSafeCsvTest(unittest.TestCase):
             writer = csv.writer(handle)
             writer.writerow(["Date", "Description", "Amount", "Currency"])
             writer.writerow(["2026-06-01", description, "-12.34", "HKD"])
+
+    def _ledger_row(self, transaction_id: str, **values: str) -> dict[str, str]:
+        row = {column: "" for column in CATEGORIZED_COLUMNS}
+        row.update(
+            {
+                "transaction_id": transaction_id,
+                "date": "2026-06-01",
+                "account_type": "bank",
+                "amount_hkd": "-12.34",
+                "category": "Unknown",
+                "flow_type": "unresolved",
+                "owner": "Household",
+                "confidence": "0.00",
+                "needs_review": "true",
+                "flags": "uncategorized",
+            }
+        )
+        row.update(values)
+        return row
 
     def test_ledger_and_review_exports_are_reversible_and_keep_amounts_numeric(
         self,
@@ -134,6 +156,151 @@ class SpreadsheetSafeCsvTest(unittest.TestCase):
             self.assertEqual(
                 ledger_output_documents(ledger_path, canonical_rows)[ledger_path],
                 ledger_text,
+            )
+
+    def test_legacy_unquoted_artifacts_preserve_literal_apostrophes_until_rewritten(
+        self,
+    ) -> None:
+        legacy_row = self._ledger_row(
+            "txn_legacy",
+            merchant="'=LEGACY MERCHANT",
+            original_description="''LEGACY DESCRIPTION",
+            notes="'=LEGACY NOTE",
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            ledger_path = root / "categorized.csv"
+            with ledger_path.open("w", newline="", encoding="utf-8") as handle:
+                writer = csv.DictWriter(handle, fieldnames=CATEGORIZED_COLUMNS)
+                writer.writeheader()
+                writer.writerow(legacy_row)
+            ledger_before = ledger_path.read_bytes()
+
+            [loaded] = read_ledger(ledger_path)
+
+            self.assertEqual(ledger_path.read_bytes(), ledger_before)
+            self.assertEqual(loaded["merchant"], "'=LEGACY MERCHANT")
+            self.assertEqual(loaded["original_description"], "''LEGACY DESCRIPTION")
+            self.assertEqual(loaded["notes"], "'=LEGACY NOTE")
+
+            migrated = ledger_output_documents(ledger_path, [loaded])[ledger_path]
+            self.assertTrue(migrated.startswith('"transaction_id","date"'))
+            ledger_path.write_text(migrated, encoding="utf-8", newline="")
+            [reloaded] = read_ledger(ledger_path)
+            self.assertEqual(reloaded["merchant"], "'=LEGACY MERCHANT")
+            self.assertEqual(reloaded["original_description"], "''LEGACY DESCRIPTION")
+
+            corrections_path = root / "corrections.csv"
+            with corrections_path.open("w", newline="", encoding="utf-8") as handle:
+                writer = csv.DictWriter(handle, fieldnames=CORRECTION_COLUMNS)
+                writer.writeheader()
+                writer.writerow(
+                    {
+                        "transaction_id": "txn_legacy",
+                        "category": "'=Legacy Category",
+                        "notes": "''Legacy note",
+                    }
+                )
+            corrections_before = corrections_path.read_bytes()
+            config = {
+                "corrections": str(corrections_path),
+                "categories": ["'=Legacy Category"],
+            }
+
+            loaded_corrections = load_corrections(config)
+
+            self.assertEqual(corrections_path.read_bytes(), corrections_before)
+            self.assertEqual(
+                loaded_corrections["txn_legacy"]["category"], "'=Legacy Category"
+            )
+            self.assertEqual(loaded_corrections["txn_legacy"]["notes"], "''Legacy note")
+            _, migrated_corrections, _ = prepare_corrections_document(config)
+            self.assertTrue(migrated_corrections.startswith('"transaction_id"'))
+            corrections_path.write_text(
+                migrated_corrections, encoding="utf-8", newline=""
+            )
+            self.assertEqual(load_corrections(config), loaded_corrections)
+
+    def test_decoded_formula_text_reaches_rule_matching(self) -> None:
+        row = self._ledger_row(
+            "txn_rule",
+            merchant="=PAYROLL",
+            original_description="=PAYROLL",
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger_path = Path(tmp) / "categorized.csv"
+            ledger_path.write_text(
+                ledger_output_documents(ledger_path, [row])[ledger_path],
+                encoding="utf-8",
+                newline="",
+            )
+            rows = read_ledger(ledger_path)
+
+            apply_rules(
+                rows,
+                [
+                    {
+                        "id": "formula-payroll",
+                        "match_type": "exact",
+                        "patterns": ["=PAYROLL"],
+                        "fields": ["original_description"],
+                        "category": "Income",
+                        "flow_type": "income",
+                        "confidence": 1.0,
+                    }
+                ],
+                {},
+            )
+
+            self.assertEqual(rows[0]["original_description"], "=PAYROLL")
+            self.assertEqual(rows[0]["category"], "Income")
+            self.assertEqual(rows[0]["flow_type"], "income")
+
+    def test_reconciliation_rewrite_preserves_decoded_formula_text(self) -> None:
+        rows = [
+            self._ledger_row(
+                "txn_bank",
+                account_id="bank_main",
+                account_type="bank",
+                amount_hkd="-500.00",
+                category="Other",
+                merchant="@BANK TRANSFER",
+                original_description="@BANK TRANSFER",
+            ),
+            self._ledger_row(
+                "txn_card",
+                account_id="card_main",
+                account_type="credit_card",
+                amount_hkd="500.00",
+                category="Other",
+                merchant="+CARD PAYMENT",
+                original_description="+CARD PAYMENT",
+            ),
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger_path = Path(tmp) / "categorized.csv"
+            ledger_path.write_text(
+                ledger_output_documents(ledger_path, rows)[ledger_path],
+                encoding="utf-8",
+                newline="",
+            )
+            canonical_rows = read_ledger(ledger_path)
+
+            summary = reconcile_ledger(
+                canonical_rows, {"reconciliation": {"date_window_days": 3}}
+            )
+            rewritten = ledger_output_documents(ledger_path, canonical_rows)[
+                ledger_path
+            ]
+            ledger_path.write_text(rewritten, encoding="utf-8", newline="")
+            reloaded = {row["transaction_id"]: row for row in read_ledger(ledger_path)}
+
+            self.assertEqual(summary["paired_groups"], 1)
+            self.assertEqual(reloaded["txn_bank"]["merchant"], "@BANK TRANSFER")
+            self.assertEqual(reloaded["txn_card"]["merchant"], "+CARD PAYMENT")
+            self.assertEqual(
+                {row["flow_type"] for row in reloaded.values()},
+                {"credit_card_payment"},
             )
 
     def test_correction_export_restores_configurable_text_without_double_escaping(

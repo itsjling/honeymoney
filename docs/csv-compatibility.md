@@ -5,6 +5,11 @@ artifacts—`categorized.csv`, `review_needed.csv`, and `corrections.csv`—appl
 display-only safety encoding to text cells so spreadsheet applications do not
 interpret statement-controlled text as formulas.
 
+New-format artifacts quote every header and data cell. The fully quoted header
+is the format marker: standard CSV readers still return the same public column
+names, while Honeymoney uses it to distinguish its reversible encoding from
+older unquoted artifacts.
+
 ## Reversible text encoding
 
 A text cell receives one leading apostrophe when:
@@ -28,6 +33,12 @@ encoding apostrophe. Rewriting an artifact therefore produces the same cells
 instead of accumulating prefixes. This decoding applies only at Honeymoney's
 own public-artifact read boundaries; statement input is never rewritten before
 normalization, transaction identity, matching, or accounting logic.
+
+Legacy artifacts with an unquoted header are read without decoding. Literal
+values such as `'=LEGACY` and `''LEGACY` therefore retain their apostrophes.
+The file remains byte-for-byte untouched when read and is migrated to the
+fully quoted safe format only when the normal import, correction, or reconcile
+workflow next rewrites it.
 
 ## Canonical non-text columns
 
