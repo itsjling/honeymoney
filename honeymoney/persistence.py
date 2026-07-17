@@ -44,7 +44,7 @@ def persist_generation(authoritative_path: Path, files: dict[Path, str]) -> None
             state["phase"] = "prepared"
             _write_state(state_path, state)
             for entry in entries:
-                os.replace(entry["staged"], entry["target"])
+                _replace_from_retained(entry, "staged")
             _fsync_directories(entries)
         except Exception as write_error:
             try:
@@ -110,6 +110,7 @@ def _entry_for(target: Path, content: str, generation: str) -> dict[str, Any]:
         "target": str(target),
         "staged": str(target.parent / f"{stem}.new"),
         "backup": str(target.parent / f"{stem}.old"),
+        "install": str(target.parent / f"{stem}.install"),
         "existed": existed,
         "mode": mode,
         "old_sha256": old_hash,
@@ -164,7 +165,7 @@ def _complete_new_generation(state_path: Path, state: dict[str, Any]) -> None:
         staged = Path(entry["staged"])
         if not staged.exists() or _path_hash(staged) != entry["new_sha256"]:
             raise OSError("Retained generation is missing staged output")
-        os.replace(staged, target)
+        _replace_from_retained(entry, "staged")
     _fsync_directories(entries)
     _finish_generation(state_path, state)
 
@@ -179,7 +180,7 @@ def _restore_old_generation(state_path: Path, state: dict[str, Any]) -> None:
             backup = Path(entry["backup"])
             if not backup.exists() or _path_hash(backup) != entry["old_sha256"]:
                 raise OSError("Retained generation is missing prior output")
-            os.replace(backup, target)
+            _replace_from_retained(entry, "backup")
         else:
             target.unlink(missing_ok=True)
     _fsync_directories(entries)
@@ -191,6 +192,7 @@ def _finish_generation(state_path: Path, state: dict[str, Any]) -> None:
     for entry in entries:
         Path(entry["staged"]).unlink(missing_ok=True)
         Path(entry["backup"]).unlink(missing_ok=True)
+        Path(entry["install"]).unlink(missing_ok=True)
     _fsync_directories(entries)
     state_path.unlink(missing_ok=True)
     _state_temporary_path(state_path).unlink(missing_ok=True)
@@ -219,6 +221,7 @@ def _validate_state(state: dict[str, Any], authoritative_path: Path) -> None:
         "target",
         "staged",
         "backup",
+        "install",
         "existed",
         "mode",
         "old_sha256",
@@ -238,6 +241,14 @@ def _fsync_directories(entries: list[dict[str, Any]]) -> None:
     }
     for directory in sorted(directories, key=str):
         _fsync_directory(directory)
+
+
+def _replace_from_retained(entry: dict[str, Any], source_field: str) -> None:
+    source = Path(entry[source_field])
+    install = Path(entry["install"])
+    install.unlink(missing_ok=True)
+    _copy_file(source, install, entry["mode"])
+    os.replace(install, entry["target"])
 
 
 def _fsync_directory(directory: Path) -> None:

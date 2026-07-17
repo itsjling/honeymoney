@@ -207,7 +207,7 @@ def apply_correction_operation(
     *,
     remembered_rules: list[dict[str, Any]] | None = None,
 ) -> CorrectionOperationResult:
-    """Validate, merge, reconcile, and atomically persist one correction operation."""
+    """Validate, merge, reconcile, and recoverably persist a correction operation."""
     corrections_value = config.get("corrections")
     if not corrections_value:
         raise ValueError("Config must define a corrections CSV path")
