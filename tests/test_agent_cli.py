@@ -317,9 +317,7 @@ class AgentCliTest(unittest.TestCase):
                 root = self._setup_workspace(tmp)
                 statement = root / "may.csv"
                 self._write_statement(statement)
-                imported = self._run_cli(
-                    ["import", str(statement), "--json"], cwd=root
-                )
+                imported = self._run_cli(["import", str(statement), "--json"], cwd=root)
                 self.assertEqual(imported.returncode, 0, imported.stderr)
                 categorized = root / "output" / "categorized.csv"
                 review = root / "output" / "review_needed.csv"
@@ -348,9 +346,7 @@ class AgentCliTest(unittest.TestCase):
                 )
 
                 self.assertEqual(result.returncode, 2, result.stderr)
-                self.assertEqual(
-                    {path: path.read_bytes() for path in before}, before
-                )
+                self.assertEqual({path: path.read_bytes() for path in before}, before)
 
     def test_correct_failure_restores_previously_absent_secondary_artifacts(
         self,
@@ -369,9 +365,7 @@ class AgentCliTest(unittest.TestCase):
                 root = self._setup_workspace(tmp)
                 statement = root / "may.csv"
                 self._write_statement(statement)
-                imported = self._run_cli(
-                    ["import", str(statement), "--json"], cwd=root
-                )
+                imported = self._run_cli(["import", str(statement), "--json"], cwd=root)
                 self.assertEqual(imported.returncode, 0, imported.stderr)
                 categorized = root / "output" / "categorized.csv"
                 with categorized.open(newline="", encoding="utf-8") as fh:
@@ -442,13 +436,13 @@ class AgentCliTest(unittest.TestCase):
                 newline="", encoding="utf-8"
             ) as fh:
                 self.assertEqual(list(csv.DictReader(fh)), [])
-            with (root / "corrections.csv").open(
-                newline="", encoding="utf-8"
-            ) as fh:
+            with (root / "corrections.csv").open(newline="", encoding="utf-8") as fh:
                 [saved] = list(csv.DictReader(fh))
             self.assertEqual(saved["category"], "Groceries")
 
-    def test_successful_correction_preserves_existing_artifact_permissions(self) -> None:
+    def test_successful_correction_preserves_existing_artifact_permissions(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = self._setup_workspace(tmp)
             statement = root / "may.csv"

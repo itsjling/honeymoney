@@ -293,16 +293,12 @@ def open(path):
         with tempfile.TemporaryDirectory() as tmp:
             root = self._setup_workspace(tmp)
             statement = root / "may.csv"
-            self._write_statement(
-                statement, ["2026-05-04,ORIGINAL MARKET,-12.00,HKD"]
-            )
+            self._write_statement(statement, ["2026-05-04,ORIGINAL MARKET,-12.00,HKD"])
             first = self._run_cli(
                 ["import", str(statement), "--no-interactive"], cwd=root
             )
             self.assertEqual(first.returncode, 0, first.stderr)
-            self._write_statement(
-                statement, ["2026-05-04,UPDATED MARKET,-15.00,HKD"]
-            )
+            self._write_statement(statement, ["2026-05-04,UPDATED MARKET,-15.00,HKD"])
 
             interrupted = self._run_cli(
                 ["import", str(statement), "--replace", "--no-interactive"],
@@ -329,9 +325,7 @@ def open(path):
         with tempfile.TemporaryDirectory() as tmp:
             root = self._setup_workspace(tmp)
             statement = root / "may.csv"
-            self._write_statement(
-                statement, ["2026-05-04,SYNTHETIC MARKET,-12.00,HKD"]
-            )
+            self._write_statement(statement, ["2026-05-04,SYNTHETIC MARKET,-12.00,HKD"])
 
             interrupted = self._run_cli(
                 ["import", str(statement), "--no-interactive"],
@@ -680,9 +674,7 @@ def open(path):
         with tempfile.TemporaryDirectory() as tmp:
             root = self._setup_workspace(tmp)
             statement = root / "may.csv"
-            self._write_statement(
-                statement, ["2026-05-04,SYNTHETIC MARKET,-12.00,HKD"]
-            )
+            self._write_statement(statement, ["2026-05-04,SYNTHETIC MARKET,-12.00,HKD"])
             first = self._run_cli(
                 ["import", str(statement)],
                 cwd=root,
@@ -727,11 +719,7 @@ def open(path):
                 if failure == "rules":
                     (root / "rules.json").write_text(
                         json.dumps(
-                            {
-                                "rules": [
-                                    {"id": "invalid", "category": "Not configured"}
-                                ]
-                            }
+                            {"rules": [{"id": "invalid", "category": "Not configured"}]}
                         ),
                         encoding="utf-8",
                     )
@@ -752,9 +740,7 @@ def open(path):
         with tempfile.TemporaryDirectory() as tmp:
             root = self._setup_workspace(tmp)
             statement = root / "may.csv"
-            self._write_statement(
-                statement, ["2026-05-04,SYNTHETIC MARKET,-12.00,HKD"]
-            )
+            self._write_statement(statement, ["2026-05-04,SYNTHETIC MARKET,-12.00,HKD"])
             first = self._run_cli(
                 ["import", str(statement)],
                 cwd=root,
@@ -779,9 +765,7 @@ def open(path):
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            root, fake_modules, statement, _ = self._seed_pdf_replacement_workspace(
-                tmp
-            )
+            root, fake_modules, statement, _ = self._seed_pdf_replacement_workspace(tmp)
             categorized = root / "output" / "categorized.csv"
             with categorized.open(newline="", encoding="utf-8") as fh:
                 [row] = list(csv.DictReader(fh))
@@ -832,8 +816,8 @@ def open(path):
 
     def test_mixed_reset_removes_corrections_only_for_processed_sources(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            root, fake_modules, pdf_statement, _ = (
-                self._seed_pdf_replacement_workspace(tmp)
+            root, fake_modules, pdf_statement, _ = self._seed_pdf_replacement_workspace(
+                tmp
             )
             statements = pdf_statement.parent
             csv_statement = statements / "may.csv"
@@ -864,9 +848,7 @@ def open(path):
             self.assertEqual(corrected.returncode, 0, corrected.stderr)
             pdf_id = rows["statement.pdf"]["transaction_id"]
             csv_id = rows["may.csv"]["transaction_id"]
-            self._write_statement(
-                csv_statement, ["2026-05-03,UPDATED SHOP,-30.00,HKD"]
-            )
+            self._write_statement(csv_statement, ["2026-05-03,UPDATED SHOP,-30.00,HKD"])
             (fake_modules / "pdfplumber.py").write_text(
                 "def open(path):\n    raise RuntimeError('synthetic parser failure')\n",
                 encoding="utf-8",
@@ -886,18 +868,12 @@ def open(path):
 
             self.assertEqual(reset.returncode, 0, reset.stderr)
             with categorized.open(newline="", encoding="utf-8") as fh:
-                reset_rows = {
-                    row["source_file"]: row for row in csv.DictReader(fh)
-                }
+                reset_rows = {row["source_file"]: row for row in csv.DictReader(fh)}
             self.assertEqual(reset_rows["statement.pdf"]["category"], "Groceries")
             self.assertEqual(reset_rows["may.csv"]["merchant"], "UPDATED SHOP")
             self.assertEqual(reset_rows["may.csv"]["category"], "Unknown")
-            with (root / "corrections.csv").open(
-                newline="", encoding="utf-8"
-            ) as fh:
-                correction_ids = {
-                    row["transaction_id"] for row in csv.DictReader(fh)
-                }
+            with (root / "corrections.csv").open(newline="", encoding="utf-8") as fh:
+                correction_ids = {row["transaction_id"] for row in csv.DictReader(fh)}
             self.assertIn(pdf_id, correction_ids)
             self.assertNotIn(csv_id, correction_ids)
             report = json.loads(
@@ -971,7 +947,10 @@ def open(path):
 
     def test_interactive_and_one_shot_review_share_persistence_rollback(self) -> None:
         for review_kind in ("interactive", "one-shot"):
-            with self.subTest(review_kind=review_kind), tempfile.TemporaryDirectory() as tmp:
+            with (
+                self.subTest(review_kind=review_kind),
+                tempfile.TemporaryDirectory() as tmp,
+            ):
                 root = self._setup_workspace(tmp)
                 statement = root / "may.csv"
                 self._write_statement(

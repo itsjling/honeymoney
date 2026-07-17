@@ -82,14 +82,11 @@ def recover_generation(authoritative_path: Path) -> None:
         _validate_state(state, authoritative_path)
         entries = state["entries"]
         authoritative = next(
-            entry
-            for entry in entries
-            if entry["target"] == str(authoritative_path)
+            entry for entry in entries if entry["target"] == str(authoritative_path)
         )
         ledger_committed = (
             state.get("phase") == "prepared"
-            and _path_hash(Path(authoritative["target"]))
-            == authoritative["new_sha256"]
+            and _path_hash(Path(authoritative["target"])) == authoritative["new_sha256"]
         )
         if ledger_committed:
             _complete_new_generation(state_path, state)
@@ -144,9 +141,10 @@ def _write_new_file(path: Path, content: str, mode: int) -> None:
 def _copy_file(source: Path, destination: Path, mode: int) -> None:
     descriptor = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
     try:
-        with source.open("rb") as source_handle, os.fdopen(
-            descriptor, "wb"
-        ) as destination_handle:
+        with (
+            source.open("rb") as source_handle,
+            os.fdopen(descriptor, "wb") as destination_handle,
+        ):
             while chunk := source_handle.read(1024 * 1024):
                 destination_handle.write(chunk)
             destination_handle.flush()
@@ -247,7 +245,9 @@ def _fsync_directory(directory: Path) -> None:
 
 
 def _state_path(authoritative_path: Path) -> Path:
-    return authoritative_path.parent / f".{authoritative_path.name}.honeymoney-state.json"
+    return (
+        authoritative_path.parent / f".{authoritative_path.name}.honeymoney-state.json"
+    )
 
 
 def _lock_path(authoritative_path: Path) -> Path:
@@ -287,7 +287,9 @@ def _acquire_lock(path: Path) -> None:
             _default_file_mode(),
         )
     except FileExistsError as error:
-        raise OSError("Another output persistence operation is already in progress") from error
+        raise OSError(
+            "Another output persistence operation is already in progress"
+        ) from error
     try:
         with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
             handle.write(f"{os.getpid()}\n")

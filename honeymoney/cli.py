@@ -283,9 +283,7 @@ def _run_pipeline(
     correction_documents: dict[Path, str] = {}
     if args.reset and config.get("corrections"):
         corrections_path, corrections_content, corrections = (
-            prepare_corrections_document(
-                config, removed_transaction_ids=reset_ids
-            )
+            prepare_corrections_document(config, removed_transaction_ids=reset_ids)
         )
         correction_documents[corrections_path] = corrections_content
     apply_corrections(transactions, corrections)

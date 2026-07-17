@@ -15,7 +15,9 @@ _real_replace = os.replace
 _descriptor_paths: dict[int, str] = {}
 
 
-def _open(path: object, flags: int, mode: int = 0o777, *, dir_fd: int | None = None) -> int:
+def _open(
+    path: object, flags: int, mode: int = 0o777, *, dir_fd: int | None = None
+) -> int:
     if dir_fd is None:
         descriptor = _real_open(path, flags, mode)
     else:
@@ -63,11 +65,7 @@ def _fsync(descriptor: int) -> None:
     ):
         _triggered = True
         raise OSError("synthetic staged-file synchronization failure")
-    if (
-        not _triggered
-        and _fault == "directory-fsync"
-        and stat.S_ISDIR(descriptor_mode)
-    ):
+    if not _triggered and _fault == "directory-fsync" and stat.S_ISDIR(descriptor_mode):
         _triggered = True
         raise OSError("synthetic directory synchronization failure")
     if not _triggered and _directory_fault_armed and stat.S_ISDIR(descriptor_mode):
