@@ -46,10 +46,18 @@ class WorkflowTest(unittest.TestCase):
         return root
 
     def _run_cli(
-        self, args: list[str], cwd: Path, input_text: str | None = None
+        self,
+        args: list[str],
+        cwd: Path,
+        input_text: str | None = None,
+        extra_pythonpath: Path | None = None,
     ) -> subprocess.CompletedProcess:
         env = dict(os.environ)
-        env["PYTHONPATH"] = str(REPO_ROOT)
+        env["PYTHONPATH"] = (
+            f"{extra_pythonpath}{os.pathsep}{REPO_ROOT}"
+            if extra_pythonpath is not None
+            else str(REPO_ROOT)
+        )
         return subprocess.run(
             [sys.executable, "-m", "honeymoney.cli", *args],
             cwd=cwd,
@@ -66,6 +74,113 @@ class WorkflowTest(unittest.TestCase):
             "\n".join(["Date,Description,Amount,Currency", *rows]),
             encoding="utf-8",
         )
+
+    def _seed_pdf_replacement_workspace(
+        self, tmp: str
+    ) -> tuple[Path, Path, Path, Path]:
+        root = self._setup_workspace(tmp)
+        fake_modules = root / "fake_modules"
+        fake_modules.mkdir()
+        (fake_modules / "pdfplumber.py").write_text(
+            """
+import builtins
+import json
+
+
+class Page:
+    def __init__(self, table):
+        self._table = table
+
+    def extract_table(self):
+        return self._table
+
+
+class Pdf:
+    def __init__(self, path):
+        self.path = path
+        self.pages = []
+
+    def __enter__(self):
+        data = json.loads(builtins.open(self.path, encoding="utf-8").read())
+        self.pages = [Page(page) for page in data["pages"]]
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+
+def open(path):
+    return Pdf(path)
+""",
+            encoding="utf-8",
+        )
+        statements_dir = root / "replacement-input"
+        statements_dir.mkdir()
+        statement = statements_dir / "statement.pdf"
+        statement.write_text(
+            json.dumps(
+                {
+                    "pages": [
+                        [
+                            ["Date", "Description", "Debit", "Credit"],
+                            ["2026-05-01", "SYNTHETIC MARKET", "10.00", ""],
+                        ]
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+        profile_path = root / "profiles" / "synthetic_pdf.json"
+        profile_path.write_text(
+            json.dumps(
+                {
+                    "id": "synthetic_pdf",
+                    "account_id": "synthetic_bank",
+                    "account": "Synthetic Bank",
+                    "account_type": "bank",
+                    "institution": "Synthetic",
+                    "country": "HK",
+                    "account_currency": "HKD",
+                    "owner": "Household",
+                    "payment_method": "Bank Account",
+                    "pdf": {
+                        "columns": {
+                            "transaction_date": "Date",
+                            "description": "Description",
+                            "debit": "Debit",
+                            "credit": "Credit",
+                        }
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        config_path = root / "config.json"
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+        config["profiles"] = [
+            str(root / "profiles" / "starter_csv.json"),
+            str(profile_path),
+        ]
+        config_path.write_text(json.dumps(config), encoding="utf-8")
+        (root / "profile_mappings.json").write_text(
+            json.dumps(
+                {
+                    "filename_patterns": [
+                        {"pattern": "statement.pdf", "profile": "synthetic_pdf"},
+                        {"pattern": "*.csv", "profile": "starter_csv"},
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        first = self._run_cli(
+            ["import", str(statement), "--no-interactive"],
+            cwd=root,
+            extra_pythonpath=fake_modules,
+        )
+        self.assertEqual(first.returncode, 0, first.stderr)
+        return root, fake_modules, statement, config_path
 
     def _review_artifact_bytes(self, root: Path) -> dict[str, bytes]:
         return {
@@ -220,6 +335,156 @@ class WorkflowTest(unittest.TestCase):
             ) as fh:
                 rows = list(csv.DictReader(fh))
             self.assertEqual([row["merchant"] for row in rows], ["PARKNSHOP"])
+
+    def test_import_replace_preserves_rows_for_disabled_pdf(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root, fake_modules, statement, config_path = (
+                self._seed_pdf_replacement_workspace(tmp)
+            )
+            config = json.loads(config_path.read_text(encoding="utf-8"))
+            categorized_path = root / "output" / "categorized.csv"
+            before = categorized_path.read_bytes()
+
+            config["pdf"]["enabled"] = False
+            config_path.write_text(json.dumps(config), encoding="utf-8")
+            replacement = self._run_cli(
+                ["import", str(statement), "--replace", "--no-interactive"],
+                cwd=root,
+                extra_pythonpath=fake_modules,
+            )
+
+            self.assertEqual(replacement.returncode, 0, replacement.stderr)
+            self.assertEqual(categorized_path.read_bytes(), before)
+            report = json.loads(
+                (root / "output" / "import_report.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(report["status"], "partial_success")
+            self.assertEqual(report["files"][0]["status"], "skipped")
+            self.assertIn("PDF parsing disabled", report["warnings"][0])
+
+    def test_import_replace_preserves_pdf_rows_for_each_failure_stage(self) -> None:
+        for failure_stage in [
+            "missing_parser_support",
+            "profile_selection",
+            "parsing",
+        ]:
+            with self.subTest(failure_stage=failure_stage):
+                with tempfile.TemporaryDirectory() as tmp:
+                    root, fake_modules, statement, _ = (
+                        self._seed_pdf_replacement_workspace(tmp)
+                    )
+                    categorized_path = root / "output" / "categorized.csv"
+                    before = categorized_path.read_bytes()
+
+                    if failure_stage == "missing_parser_support":
+                        (fake_modules / "pdfplumber.py").write_text(
+                            "raise ImportError('synthetic missing dependency')\n",
+                            encoding="utf-8",
+                        )
+                    elif failure_stage == "profile_selection":
+                        (root / "profile_mappings.json").write_text(
+                            json.dumps({"filename_patterns": []}), encoding="utf-8"
+                        )
+                    else:
+                        (fake_modules / "pdfplumber.py").write_text(
+                            "def open(path):\n"
+                            "    raise RuntimeError('synthetic parser failure')\n",
+                            encoding="utf-8",
+                        )
+
+                    replacement = self._run_cli(
+                        [
+                            "import",
+                            str(statement),
+                            "--replace",
+                            "--no-interactive",
+                        ],
+                        cwd=root,
+                        extra_pythonpath=fake_modules,
+                    )
+
+                    self.assertEqual(replacement.returncode, 0, replacement.stderr)
+                    self.assertEqual(categorized_path.read_bytes(), before)
+                    report = json.loads(
+                        (root / "output" / "import_report.json").read_text(
+                            encoding="utf-8"
+                        )
+                    )
+                    self.assertEqual(report["status"], "partial_success")
+                    self.assertEqual(report["files"][0]["status"], "failed")
+                    self.assertTrue(report["files"][0]["reason"])
+                    self.assertEqual(report["warnings"], [report["files"][0]["reason"]])
+
+    def test_import_replace_updates_processed_csv_and_preserves_failed_pdf(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root, fake_modules, statement, _ = self._seed_pdf_replacement_workspace(tmp)
+            statements_dir = statement.parent
+            csv_statement = statements_dir / "may.csv"
+            self._write_statement(
+                csv_statement, ["2026-05-02,ORIGINAL SYNTHETIC SHOP,-20.00,HKD"]
+            )
+            first_csv = self._run_cli(
+                ["import", str(csv_statement), "--no-interactive"], cwd=root
+            )
+            self.assertEqual(first_csv.returncode, 0, first_csv.stderr)
+            self._write_statement(
+                csv_statement, ["2026-05-03,UPDATED SYNTHETIC SHOP,-30.00,HKD"]
+            )
+            (fake_modules / "pdfplumber.py").write_text(
+                "def open(path):\n    raise RuntimeError('synthetic parser failure')\n",
+                encoding="utf-8",
+            )
+
+            replacement = self._run_cli(
+                ["import", str(statements_dir), "--replace", "--no-interactive"],
+                cwd=root,
+                extra_pythonpath=fake_modules,
+            )
+
+            self.assertEqual(replacement.returncode, 0, replacement.stderr)
+            with (root / "output" / "categorized.csv").open(
+                newline="", encoding="utf-8"
+            ) as fh:
+                rows = {row["source_file"]: row for row in csv.DictReader(fh)}
+            self.assertEqual(set(rows), {"statement.pdf", "may.csv"})
+            self.assertEqual(rows["statement.pdf"]["merchant"], "SYNTHETIC MARKET")
+            self.assertEqual(rows["may.csv"]["merchant"], "UPDATED SYNTHETIC SHOP")
+            report = json.loads(
+                (root / "output" / "import_report.json").read_text(encoding="utf-8")
+            )
+            statuses = {
+                file_report["source_file"]: file_report["status"]
+                for file_report in report["files"]
+            }
+            self.assertEqual(
+                statuses, {"may.csv": "processed", "statement.pdf": "failed"}
+            )
+
+    def test_import_replace_processed_empty_pdf_removes_prior_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root, fake_modules, statement, _ = self._seed_pdf_replacement_workspace(tmp)
+            statement.write_text(json.dumps({"pages": []}), encoding="utf-8")
+
+            replacement = self._run_cli(
+                ["import", str(statement), "--replace", "--no-interactive"],
+                cwd=root,
+                extra_pythonpath=fake_modules,
+            )
+
+            self.assertEqual(replacement.returncode, 0, replacement.stderr)
+            with (root / "output" / "categorized.csv").open(
+                newline="", encoding="utf-8"
+            ) as fh:
+                self.assertEqual(list(csv.DictReader(fh)), [])
+            report = json.loads(
+                (root / "output" / "import_report.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(report["status"], "success")
+            self.assertEqual(report["files"][0]["status"], "processed")
+            self.assertEqual(report["files"][0]["transaction_count"], "0")
+            self.assertEqual(report["warnings"], [])
 
     def test_import_reset_reprocesses_source_and_clears_old_corrections(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
