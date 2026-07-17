@@ -103,6 +103,12 @@ Failed or skipped sources retain both their ledger rows and corrections.
 Correction removal and the replacement ledger use one recoverable generation;
 `--reset` supersedes `--replace` if both are present.
 
+A failed reset attempt writes a truthful current `import_report.json` while
+preserving the prior ledger, review rows, and corrections. Optional Ollama
+unavailability is not a statement-processing failure: parsed rows are committed,
+left uncategorized for review, and their prior corrections are cleared as the
+requested reset specifies.
+
 ```bash
 honeymoney review
 honeymoney review --category Other

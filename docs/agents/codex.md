@@ -26,7 +26,9 @@ with:
 - agent-phase internet access disabled.
 
 Run `./scripts/bootstrap.sh` during environment setup while package-index access
-is available. The subsequent `./scripts/check.sh` agent phase is offline: it
+is available. The required editable-install extras are `pdf` and `dev`
+(`.[pdf,dev]`); the bootstrap script installs both under the reviewed
+constraints. The subsequent `./scripts/check.sh` agent phase is offline: it
 uses the installed environment for Ruff, tests, `pip check`, package builds,
 and distribution-metadata verification. Its default test runner rejects socket
 creation and non-local DNS lookup; Ollama tests inject fake transports rather

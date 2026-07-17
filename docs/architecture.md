@@ -53,8 +53,9 @@ recovery protocol, not a claim that several filesystem replacements are atomic.
 
 Hidden generation state beside `categorized.csv` contains only paths, modes,
 and content digests. If a write fails before the ledger commit point, the old
-files are restored. If interruption occurs after it, the next ledger-reading
-command completes the new generation. Recovery removes public files that were
+files are restored. If interruption occurs after it, the next command that
+loads the active workspace configuration completes the new generation before
+continuing. Recovery removes public files that were
 absent in the prior generation, preserves existing file permissions, and does
 not include transaction values in diagnostics. Retained state also prevents a
 new operation from silently proceeding when recovery cannot be completed.
@@ -66,6 +67,12 @@ generation as the replacement ledger. Failed and skipped sources therefore
 retain their rows and corrections; a persistence failure restores both inputs
 to the prior generation. Import reports record the requested action and the
 ledger action actually committed for each source.
+
+The current import report describes the latest attempted import even when a
+source fails, while the authoritative ledger, its derived review rows, and saved
+corrections remain on the prior financial generation. Ollama is an optional
+post-parse categorizer: its unavailability leaves parsed rows pending review and
+does not turn a successfully processed statement into a failed reset.
 
 `category` is the merchant/budget classification. `flow_type` is the accounting
 treatment used by cash-flow totals. Ollama is limited to configured spending

@@ -396,7 +396,7 @@ class AgentCliTest(unittest.TestCase):
                 self.assertFalse(review.exists())
                 self.assertFalse(corrections.exists())
 
-    def test_correct_retained_generation_is_completed_by_the_next_command(
+    def test_correct_retained_generation_is_completed_by_a_non_ledger_command(
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -426,9 +426,10 @@ class AgentCliTest(unittest.TestCase):
             )
             self.assertEqual(interrupted.returncode, 75, interrupted.stderr)
 
-            recovered = self._run_cli(["status", "--json"], cwd=root)
+            recovered = self._run_cli(["config", "--json"], cwd=root)
 
             self.assertEqual(recovered.returncode, 0, recovered.stderr)
+            self.assertEqual(self._json(recovered)["command"], "config")
             with categorized.open(newline="", encoding="utf-8") as fh:
                 [corrected] = list(csv.DictReader(fh))
             self.assertEqual(corrected["category"], "Groceries")
@@ -439,6 +440,9 @@ class AgentCliTest(unittest.TestCase):
             with (root / "corrections.csv").open(newline="", encoding="utf-8") as fh:
                 [saved] = list(csv.DictReader(fh))
             self.assertEqual(saved["category"], "Groceries")
+            self.assertEqual(
+                list((root / "output").glob(".*honeymoney-state.json")), []
+            )
 
     def test_successful_correction_preserves_existing_artifact_permissions(
         self,

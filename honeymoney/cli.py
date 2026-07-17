@@ -44,7 +44,7 @@ from honeymoney.ollama import (
     list_ollama_models,
     validate_ollama_endpoint,
 )
-from honeymoney.persistence import persist_generation
+from honeymoney.persistence import persist_generation, recover_generation
 from honeymoney.reconciliation import (
     reconcile_ledger,
     reconciliation_date_window,
@@ -426,6 +426,7 @@ def _config_command(argv: list[str]) -> int:
 
     config_path = _existing_config_path(args.config_path)
     config = _read_config_document(config_path)
+    _recover_config_generation(config)
     artifacts = {"config_json": str(config_path)}
 
     if args.action is None:
@@ -746,6 +747,9 @@ def _setup_command(argv: list[str]) -> int:
     if args.json and not args.root:
         raise ValueError("honeymoney setup --json requires --root")
     root = _setup_root(args.root)
+    existing_config_path = root / "config.json"
+    if existing_config_path.exists():
+        _recover_config_generation(_read_config_document(existing_config_path))
     _write_starter_workspace(root, force=args.force)
     if args.json:
         _emit_json(
@@ -2141,7 +2145,15 @@ def _load_config(config_path: str | None) -> dict[str, Any]:
     config.setdefault("paths", {})
     config["paths"].setdefault("input", "./input")
     config["paths"].setdefault("output", "./output/categorized.csv")
+    _recover_config_generation(config)
     return config
+
+
+def _recover_config_generation(config: dict[str, Any]) -> None:
+    paths = config.get("paths", {})
+    output = paths.get("output") if isinstance(paths, dict) else None
+    if isinstance(output, str) and output.strip():
+        recover_generation(Path(output))
 
 
 def _load_profiles(config: dict[str, Any]) -> list[dict[str, Any]]:

@@ -154,6 +154,13 @@ failures recover the prior generation, and repeated resets do not affect
 unrelated corrections. Import reports distinguish requested and committed
 source actions.
 
+The current issue contract supersedes the historical Plan-006 wording about
+preserving old report bytes: failed attempts publish a truthful failure report
+while preserving ledger, review, and correction state. Optional Ollama
+unavailability occurs after successful statement parsing, so rows remain
+processed and pending review; a requested reset still clears their prior
+corrections.
+
 ```sh
 python3 -m unittest tests.test_workflow tests.test_cli_bootstrap tests.test_agent_cli
 ./scripts/check.sh
