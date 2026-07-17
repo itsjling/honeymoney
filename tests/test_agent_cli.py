@@ -612,6 +612,50 @@ class AgentCliTest(unittest.TestCase):
             )
             self.assertEqual(explicit_flow.returncode, 0, explicit_flow.stderr)
 
+    def test_correction_cannot_trust_unproven_existing_flow_to_resolve_unknown(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._setup_workspace(tmp)
+            statement = root / "may.csv"
+            self._write_statement(statement)
+            self.assertEqual(
+                self._run_cli(
+                    ["import", str(statement), "--json"], cwd=root
+                ).returncode,
+                0,
+            )
+            categorized_path = root / "output" / "categorized.csv"
+            with categorized_path.open(newline="", encoding="utf-8") as fh:
+                [row] = list(csv.DictReader(fh))
+            row["flow_type"] = "expense"
+            row["flow_source"] = "deterministic"
+            with categorized_path.open("w", newline="", encoding="utf-8") as fh:
+                writer = csv.DictWriter(fh, fieldnames=list(row))
+                writer.writeheader()
+                writer.writerow(row)
+            before = categorized_path.read_bytes()
+
+            result = self._run_cli(
+                ["correct", "--file", "-", "--json"],
+                cwd=root,
+                input_text=json.dumps(
+                    [
+                        {
+                            "transaction_id": row["transaction_id"],
+                            "needs_review": False,
+                        }
+                    ]
+                ),
+            )
+
+            self.assertEqual(result.returncode, 2)
+            self.assertIn(
+                "explicit accounting flow decision",
+                self._json(result)["errors"][0]["message"],
+            )
+            self.assertEqual(categorized_path.read_bytes(), before)
+
     def test_correct_json_requires_an_input_file_as_structured_error(self) -> None:
         result = self._run_cli(["correct", "--json"])
 

@@ -271,8 +271,15 @@ class ConfigCliTest(unittest.TestCase):
                 "finite number greater than 0",
             ),
             ("categories", {"categories": "Dining"}, "must be a JSON array"),
+            ("empty categories", {"categories": []}, "must not be empty"),
             ("categories item", {"categories": [""]}, "categories[0]"),
+            ("empty owners", {"owners": []}, "must not be empty"),
             ("owners", {"owners": [False]}, "owners[0]"),
+            (
+                "empty payment methods",
+                {"payment_methods": []},
+                "must not be empty",
+            ),
             (
                 "payment methods",
                 {"payment_methods": ["Cash", "Cash"]},

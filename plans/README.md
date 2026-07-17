@@ -1,7 +1,7 @@
 # Improvement plan reconciliation
 
-This index was reconciled on 2026-07-17 against current `main` commit
-`a91db80fe5b3b20cccf3abf4b51f58ec199d3fde`. The original plans were written
+This index was reconciled on 2026-07-17 against `main` commit
+`96482747ac34b741c0b5de55c6c2bf1c3f44e3c1`. The original plans were written
 on 2026-07-11 against `aa0eedf`; their source excerpts, branch names, and line
 numbers are historical context, not execution instructions for the live
 architecture.
@@ -39,18 +39,16 @@ correction, reconciliation, review, PDF, and JSON contracts.
 ### Executed specifications
 
 - [018](018-accounting-safe-ollama-categorization.md) — Make Ollama
-  categorization accounting-safe and semantically constrained. **DONE** in
-  isolated execution: implementation commit `8d9a857` passed independent
-  offline review and the `qwen2.5:3b` benchmark passed with 100% accounting
-  safety and 100% ordinary-category accuracy. Worktree:
-  `/tmp/honeymoney-plan-018`; maintainer merge pending; not published to the
-  issue tracker.
+  categorization accounting-safe and semantically constrained. **DONE** on
+  `main` in merge commit `9648274`. Implementation commit `8d9a857` passed
+  independent offline review, and the `qwen2.5:3b` benchmark passed with 100%
+  accounting safety and 100% ordinary-category accuracy.
 
 ### Historical-plan reconciliation
 
 | Plan | Title | Priority | Reconciled status | Follow-up |
 |---|---|---:|---|---|
-| [001](001-preserve-failed-replacements.md) | Preserve failed replacement rows | P1 | TODO | [#19](https://github.com/itsjling/honeymoney/issues/19) |
+| [001](001-preserve-failed-replacements.md) | Preserve failed replacement rows | P1 | DONE | [#19](https://github.com/itsjling/honeymoney/issues/19) |
 | [002](002-validate-public-config.md) | Validate public config | P1 | DONE | [#20](https://github.com/itsjling/honeymoney/issues/20) |
 | [003](003-validate-profile-structure.md) | Validate profile structure | P1 | DONE | [#20](https://github.com/itsjling/honeymoney/issues/20) |
 | [004](004-define-empty-corrections.md) | Define empty correction semantics | P1 | DONE | [#21](https://github.com/itsjling/honeymoney/issues/21) |
@@ -70,21 +68,20 @@ correction, reconciliation, review, PDF, and JSON contracts.
 
 ## Evidence by plan
 
-### 001 — TODO
+### 001 — DONE
 
-Current import orchestration builds `source_files` before parsing and passes the
-entire discovered set to `_merge_into_ledger` for `--replace` and `--reset`.
-Failed or skipped inputs can therefore delete their last known-good ledger
-rows. Verify the live flow with:
+Replacement deletion scope is now derived only from import file reports with
+status `processed`. Disabled PDFs and PDFs that fail dependency loading,
+profile selection, or parsing retain their last known-good ledger rows;
+successfully processed statements, including zero-transaction statements,
+still replace prior rows. Mixed-folder replacement updates processed sources
+while preserving failed sources, and import statuses, warnings, strict exits,
+and structured JSON remain compatible.
 
 ```sh
-sed -n '200,265p' honeymoney/cli.py
-python3 -m unittest tests.test_workflow tests.test_cli_bootstrap
+sed -n '250,275p' honeymoney/cli.py
+python3 -m unittest tests.test_workflow tests.test_cli_bootstrap tests.test_agent_cli
 ```
-
-The focused suites preserve successful replacement behavior but do not cover
-failed mixed-source replacement. Issue #19 adds that observable contract using
-synthetic CSV/PDF failures.
 
 ### 002 — DONE
 

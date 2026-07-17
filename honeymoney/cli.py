@@ -587,6 +587,8 @@ def _validate_non_empty_string_array(
 ) -> None:
     if not isinstance(value, list):
         raise ValueError(f"Config field {field} must be a JSON array")
+    if not value:
+        raise ValueError(f"Config field {field} must not be empty")
     normalized: list[str] = []
     for index, item in enumerate(value):
         if not isinstance(item, str) or not item.strip():

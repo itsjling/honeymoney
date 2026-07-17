@@ -310,10 +310,14 @@ def _validate_resolved_state(
     ).casefold()
     category = correction.get("category", ledger_row.get("category", ""))
     flow_type = correction.get("flow_type", ledger_row.get("flow_type", ""))
+    explicit_flow = "flow_type" in correction or ledger_row.get("flow_source", "") in {
+        "rule",
+        "correction",
+    }
     if (
         needs_review == "false"
         and category in {"", "Unknown"}
-        and flow_type in {"", "unresolved"}
+        and (flow_type in {"", "unresolved"} or not explicit_flow)
     ):
         raise ValueError(
             f"Correction {transaction_id}: Unknown category cannot be marked resolved "
