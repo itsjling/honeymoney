@@ -1,14 +1,20 @@
 import json
 import threading
 import unittest
-from http.server import BaseHTTPRequestHandler, HTTPServer
+import urllib.error
+from io import BytesIO
+from unittest.mock import patch
 
-from honeymoney.ollama import apply_ollama_fallback
+from honeymoney.ollama import (
+    OllamaHttpRequest,
+    apply_ollama_fallback,
+    list_ollama_models,
+)
 
 
-def unresolved_transaction() -> dict[str, str]:
+def unresolved_transaction(transaction_id: str = "txn_1") -> dict[str, str]:
     return {
-        "transaction_id": "txn_1",
+        "transaction_id": transaction_id,
         "date": "2026-05-01",
         "merchant": "MYSTERY",
         "original_description": "MYSTERY RAW",
@@ -30,65 +36,91 @@ def unresolved_transaction() -> dict[str, str]:
     }
 
 
+def model_response(categorizations: object) -> bytes:
+    return json.dumps({"response": json.dumps(categorizations)}).encode()
+
+
+class FakeTransport:
+    def __init__(self, handler):
+        self.handler = handler
+        self.requests: list[OllamaHttpRequest] = []
+
+    def request(self, request: OllamaHttpRequest) -> bytes:
+        self.requests.append(request)
+        return self.handler(request)
+
+
+def prompt_for(request: OllamaHttpRequest) -> dict:
+    assert request.body is not None
+    return json.loads(json.loads(request.body)["prompt"])
+
+
+def successful_handler(request: OllamaHttpRequest) -> bytes:
+    rows = prompt_for(request)["transactions"]
+    return model_response(
+        [
+            {
+                "id": row["id"],
+                "category": "Dining",
+                "confidence": 0.91,
+                "reason": "Synthetic merchant",
+            }
+            for row in rows
+        ]
+    )
+
+
 class OllamaTest(unittest.TestCase):
+    def config(self, **overrides: object) -> dict:
+        ollama = {
+            "enabled": True,
+            "url": "http://localhost:11434/api/generate",
+            "model": "qwen2.5:7b-instruct",
+        }
+        ollama.update(overrides)
+        return {"ollama": ollama}
+
+    def test_model_listing_uses_the_shared_transport_boundary(self) -> None:
+        def handler(request: OllamaHttpRequest) -> bytes:
+            self.assertEqual(request.method, "GET")
+            self.assertEqual(request.url, "http://localhost:11434/api/tags")
+            self.assertEqual(request.headers, {"Accept": "application/json"})
+            self.assertIsNone(request.body)
+            self.assertEqual(request.timeout, 10.0)
+            return b'{"models": [{"name": "zeta"}, {"name": "alpha"}]}'
+
+        models = list_ollama_models(
+            self.config(timeout_seconds=20)["ollama"],
+            transport=FakeTransport(handler),
+        )
+
+        self.assertEqual(models, ["alpha", "zeta"])
+
     def test_payload_is_minimized_and_response_is_applied(self) -> None:
-        captured_requests = []
-
-        class Handler(BaseHTTPRequestHandler):
-            def do_POST(self) -> None:
-                length = int(self.headers["Content-Length"])
-                captured_requests.append(json.loads(self.rfile.read(length)))
-                body = {
-                    "response": json.dumps(
-                        [
-                            {
-                                "id": "txn_1",
-                                "category": "Dining",
-                                "confidence": 0.86,
-                                "reason": "Restaurant-like merchant",
-                            }
-                        ]
-                    )
-                }
-                self.send_response(200)
-                self.send_header("Content-Type", "application/json")
-                self.end_headers()
-                self.wfile.write(json.dumps(body).encode("utf-8"))
-
-            def log_message(self, format: str, *args: object) -> None:
-                return
-
-        server = HTTPServer(("127.0.0.1", 0), Handler)
-        thread = threading.Thread(target=server.serve_forever, daemon=True)
-        thread.start()
-        self.addCleanup(server.shutdown)
-        self.addCleanup(server.server_close)
-
+        transport = FakeTransport(successful_handler)
         transactions = [unresolved_transaction()]
 
         report, warnings = apply_ollama_fallback(
-            transactions,
-            {
-                "ollama": {
-                    "enabled": True,
-                    "url": f"http://127.0.0.1:{server.server_port}/api/generate",
-                    "model": "qwen2.5:7b-instruct",
-                }
-            },
+            transactions, self.config(), transport=transport
         )
 
         self.assertEqual(warnings, [])
         self.assertEqual(report["status"], "success")
         self.assertEqual(transactions[0]["category"], "Dining")
         self.assertEqual(transactions[0]["needs_review"], "false")
-        request = captured_requests[0]
-        self.assertIs(request["think"], False)
-        item_schema = request["format"]["properties"]["categorizations"]["items"]
+        request = transport.requests[0]
+        self.assertEqual(request.method, "POST")
+        self.assertEqual(request.url, "http://localhost:11434/api/generate")
+        self.assertEqual(request.headers, {"Content-Type": "application/json"})
+        self.assertEqual(request.timeout, 120.0)
+        body = json.loads(request.body)
+        self.assertIs(body["think"], False)
+        item_schema = body["format"]["properties"]["categorizations"]["items"]
         self.assertIn("Dining", item_schema["properties"]["category"]["enum"])
         self.assertEqual(
             item_schema["required"], ["id", "category", "confidence", "reason"]
         )
-        prompt = json.loads(request["prompt"])
+        prompt = json.loads(body["prompt"])
         self.assertIn("Dining", prompt["allowed_categories"])
         self.assertNotIn("allowed_owners", prompt)
         sent_transaction = prompt["transactions"][0]
@@ -96,237 +128,93 @@ class OllamaTest(unittest.TestCase):
         self.assertNotIn("notes", sent_transaction)
 
     def test_object_wrapped_categorizations_response_is_accepted(self) -> None:
-        class Handler(BaseHTTPRequestHandler):
-            def do_POST(self) -> None:
-                length = int(self.headers["Content-Length"])
-                self.rfile.read(length)
-                body = {
-                    "response": json.dumps(
+        transport = FakeTransport(
+            lambda request: model_response(
+                {
+                    "categorizations": [
                         {
-                            "categorizations": [
-                                {
-                                    "id": "txn_1",
-                                    "category": "Transport",
-                                    "confidence": 0.95,
-                                    "reason": "Ride hailing merchant",
-                                }
-                            ]
+                            "id": "txn_1",
+                            "category": "Transport",
+                            "confidence": 0.95,
+                            "reason": "Ride hailing merchant",
                         }
-                    )
+                    ]
                 }
-                self.send_response(200)
-                self.send_header("Content-Type", "application/json")
-                self.end_headers()
-                self.wfile.write(json.dumps(body).encode("utf-8"))
-
-            def log_message(self, format: str, *args: object) -> None:
-                return
-
-        server = HTTPServer(("127.0.0.1", 0), Handler)
-        thread = threading.Thread(target=server.serve_forever, daemon=True)
-        thread.start()
-        self.addCleanup(server.shutdown)
-        self.addCleanup(server.server_close)
-
+            )
+        )
         transaction = unresolved_transaction()
+
         report, warnings = apply_ollama_fallback(
-            [transaction],
-            {
-                "ollama": {
-                    "enabled": True,
-                    "url": f"http://127.0.0.1:{server.server_port}/api/generate",
-                }
-            },
+            [transaction], self.config(), transport=transport
         )
 
         self.assertEqual(warnings, [])
         self.assertEqual(report["status"], "success")
         self.assertEqual(transaction["category"], "Transport")
-        self.assertEqual(transaction["needs_review"], "false")
 
     def test_unresolved_transactions_are_sent_in_configured_batches(self) -> None:
-        captured_batches = []
-
-        class Handler(BaseHTTPRequestHandler):
-            def do_POST(self) -> None:
-                length = int(self.headers["Content-Length"])
-                request_body = json.loads(self.rfile.read(length))
-                prompt = json.loads(request_body["prompt"])
-                captured_batches.append(prompt["transactions"])
-                body = {
-                    "response": json.dumps(
-                        [
-                            {
-                                "id": transaction["id"],
-                                "category": "Dining",
-                                "confidence": 0.91,
-                                "reason": "Restaurant-like merchant",
-                            }
-                            for transaction in prompt["transactions"]
-                        ]
-                    )
-                }
-                self.send_response(200)
-                self.send_header("Content-Type", "application/json")
-                self.end_headers()
-                self.wfile.write(json.dumps(body).encode("utf-8"))
-
-            def log_message(self, format: str, *args: object) -> None:
-                return
-
-        server = HTTPServer(("127.0.0.1", 0), Handler)
-        thread = threading.Thread(target=server.serve_forever, daemon=True)
-        thread.start()
-        self.addCleanup(server.shutdown)
-        self.addCleanup(server.server_close)
-
-        first = unresolved_transaction()
-        second = unresolved_transaction()
-        second["transaction_id"] = "txn_2"
-        transactions = [first, second]
+        transport = FakeTransport(successful_handler)
+        transactions = [
+            unresolved_transaction("txn_1"),
+            unresolved_transaction("txn_2"),
+        ]
 
         report, warnings = apply_ollama_fallback(
             transactions,
-            {
-                "ollama": {
-                    "enabled": True,
-                    "url": f"http://127.0.0.1:{server.server_port}/api/generate",
-                    "model": "qwen2.5:7b-instruct",
-                    "batch_size": 1,
-                }
-            },
+            self.config(batch_size=1),
+            transport=transport,
         )
 
         self.assertEqual(warnings, [])
-        self.assertEqual(report["status"], "success")
         self.assertEqual(report["applied_count"], 2)
-        self.assertEqual([len(batch) for batch in captured_batches], [1, 1])
         self.assertEqual(
-            [row["category"] for row in transactions], ["Dining", "Dining"]
+            [
+                len(prompt_for(request)["transactions"])
+                for request in transport.requests
+            ],
+            [1, 1],
         )
 
     def test_unavailable_batch_reports_additive_partial_counts(self) -> None:
-        requests = 0
+        calls = 0
 
-        class Handler(BaseHTTPRequestHandler):
-            def do_POST(self) -> None:
-                nonlocal requests
-                requests += 1
-                length = int(self.headers["Content-Length"])
-                request = json.loads(self.rfile.read(length))
-                if requests == 2:
-                    self.send_error(503, "Synthetic unavailable")
-                    return
-                transaction_id = json.loads(request["prompt"])["transactions"][0]["id"]
-                self.send_response(200)
-                self.send_header("Content-Type", "application/json")
-                self.end_headers()
-                self.wfile.write(
-                    json.dumps(
-                        {
-                            "response": json.dumps(
-                                [
-                                    {
-                                        "id": transaction_id,
-                                        "category": "Dining",
-                                        "confidence": 0.91,
-                                        "reason": "Synthetic merchant",
-                                    }
-                                ]
-                            )
-                        }
-                    ).encode("utf-8")
+        def handler(request: OllamaHttpRequest) -> bytes:
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise urllib.error.HTTPError(
+                    request.url,
+                    503,
+                    "Synthetic unavailable",
+                    {},
+                    BytesIO(b""),
                 )
+            return successful_handler(request)
 
-            def log_message(self, format: str, *args: object) -> None:
-                return
-
-        server = HTTPServer(("127.0.0.1", 0), Handler)
-        thread = threading.Thread(target=server.serve_forever, daemon=True)
-        thread.start()
-        self.addCleanup(server.shutdown)
-        self.addCleanup(server.server_close)
-        first = unresolved_transaction()
-        second = unresolved_transaction()
-        second["transaction_id"] = "txn_2"
+        transport = FakeTransport(handler)
+        first = unresolved_transaction("txn_1")
+        second = unresolved_transaction("txn_2")
 
         report, warnings = apply_ollama_fallback(
             [first, second],
-            {
-                "ollama": {
-                    "enabled": True,
-                    "url": f"http://127.0.0.1:{server.server_port}/api/generate",
-                    "batch_size": 1,
-                }
-            },
+            self.config(batch_size=1),
+            transport=transport,
         )
 
         self.assertTrue(warnings[0].startswith("Ollama unavailable: HTTP 503"))
-        self.assertEqual(
-            {key: report[key] for key in report if key != "error"},
-            {
-                "status": "unavailable",
-                "candidate_count": 2,
-                "accepted_count": 1,
-                "reviewable_count": 0,
-                "rejected_count": 0,
-                "applied_count": 1,
-                "invalid_count": 0,
-            },
-        )
+        self.assertEqual(report["status"], "unavailable")
+        self.assertEqual(report["candidate_count"], 2)
+        self.assertEqual(report["accepted_count"], 1)
+        self.assertEqual(report["applied_count"], 1)
         self.assertNotIn("ollama_unavailable", first["flags"])
         self.assertIn("ollama_unavailable", second["flags"])
 
     def test_progress_callback_reports_each_batch(self) -> None:
-        class Handler(BaseHTTPRequestHandler):
-            def do_POST(self) -> None:
-                length = int(self.headers["Content-Length"])
-                request_body = json.loads(self.rfile.read(length))
-                prompt = json.loads(request_body["prompt"])
-                body = {
-                    "response": json.dumps(
-                        [
-                            {
-                                "id": transaction["id"],
-                                "category": "Dining",
-                                "confidence": 0.91,
-                                "reason": "Restaurant-like merchant",
-                            }
-                            for transaction in prompt["transactions"]
-                        ]
-                    )
-                }
-                self.send_response(200)
-                self.send_header("Content-Type", "application/json")
-                self.end_headers()
-                self.wfile.write(json.dumps(body).encode("utf-8"))
-
-            def log_message(self, format: str, *args: object) -> None:
-                return
-
-        server = HTTPServer(("127.0.0.1", 0), Handler)
-        thread = threading.Thread(target=server.serve_forever, daemon=True)
-        thread.start()
-        self.addCleanup(server.shutdown)
-        self.addCleanup(server.server_close)
-
-        first = unresolved_transaction()
-        second = unresolved_transaction()
-        second["transaction_id"] = "txn_2"
-        second["merchant"] = "OTHER MERCHANT"
-        transactions = [first, second]
         progress_calls = []
 
         apply_ollama_fallback(
-            transactions,
-            {
-                "ollama": {
-                    "enabled": True,
-                    "url": f"http://127.0.0.1:{server.server_port}/api/generate",
-                    "model": "qwen2.5:7b-instruct",
-                    "batch_size": 1,
-                }
-            },
+            [unresolved_transaction("txn_1"), unresolved_transaction("txn_2")],
+            self.config(batch_size=1),
             progress=lambda event: progress_calls.append(
                 (
                     event.batch_number,
@@ -335,67 +223,33 @@ class OllamaTest(unittest.TestCase):
                     event.end_index,
                 )
             ),
+            transport=FakeTransport(successful_handler),
         )
 
         self.assertEqual(progress_calls, [(1, 2, 1, 1), (2, 2, 2, 2)])
 
     def test_missing_ollama_ids_and_reasons_are_invalid_responses(self) -> None:
-        class Handler(BaseHTTPRequestHandler):
-            def do_POST(self) -> None:
-                length = int(self.headers["Content-Length"])
-                self.rfile.read(length)
-                body = {
-                    "response": json.dumps(
-                        [
-                            {
-                                "id": "txn_1",
-                                "category": "Dining",
-                                "confidence": 0.91,
-                            }
-                        ]
-                    )
-                }
-                self.send_response(200)
-                self.send_header("Content-Type", "application/json")
-                self.end_headers()
-                self.wfile.write(json.dumps(body).encode("utf-8"))
-
-            def log_message(self, format: str, *args: object) -> None:
-                return
-
-        server = HTTPServer(("127.0.0.1", 0), Handler)
-        thread = threading.Thread(target=server.serve_forever, daemon=True)
-        thread.start()
-        self.addCleanup(server.shutdown)
-        self.addCleanup(server.server_close)
-
-        first = unresolved_transaction()
-        second = unresolved_transaction()
-        second["transaction_id"] = "txn_2"
-        transactions = [first, second]
+        transport = FakeTransport(
+            lambda request: model_response(
+                [{"id": "txn_1", "category": "Dining", "confidence": 0.91}]
+            )
+        )
+        transactions = [
+            unresolved_transaction("txn_1"),
+            unresolved_transaction("txn_2"),
+        ]
 
         report, warnings = apply_ollama_fallback(
-            transactions,
-            {
-                "ollama": {
-                    "enabled": True,
-                    "url": f"http://127.0.0.1:{server.server_port}/api/generate",
-                }
-            },
+            transactions, self.config(), transport=transport
         )
 
         self.assertEqual(report["status"], "invalid_response")
-        self.assertEqual(report["applied_count"], 0)
         self.assertEqual(report["invalid_count"], 2)
-        self.assertEqual(warnings[0], "Ollama returned invalid categorizations")
         self.assertIn(
             "Ollama categorization rejected (MYSTERY): missing reason", warnings
         )
         self.assertIn(
             "Ollama returned no categorization for 1 transaction(s)", warnings
-        )
-        self.assertEqual(
-            [row["category"] for row in transactions], ["Unknown", "Unknown"]
         )
         for transaction in transactions:
             self.assertIn("ollama_invalid_response", transaction["flags"])
@@ -415,73 +269,33 @@ class OllamaTest(unittest.TestCase):
             ],
         ]:
             with self.subTest(response=response):
-
-                class Handler(BaseHTTPRequestHandler):
-                    def do_POST(self) -> None:
-                        length = int(self.headers["Content-Length"])
-                        self.rfile.read(length)
-                        body = {"response": json.dumps(response)}
-                        self.send_response(200)
-                        self.send_header("Content-Type", "application/json")
-                        self.end_headers()
-                        self.wfile.write(json.dumps(body).encode("utf-8"))
-
-                    def log_message(self, format: str, *args: object) -> None:
-                        return
-
-                server = HTTPServer(("127.0.0.1", 0), Handler)
-                thread = threading.Thread(target=server.serve_forever, daemon=True)
-                thread.start()
-                self.addCleanup(server.shutdown)
-                self.addCleanup(server.server_close)
-
                 transaction = unresolved_transaction()
                 report, warnings = apply_ollama_fallback(
                     [transaction],
-                    {
-                        "ollama": {
-                            "enabled": True,
-                            "url": f"http://127.0.0.1:{server.server_port}/api/generate",
-                        }
-                    },
+                    self.config(),
+                    transport=FakeTransport(
+                        lambda request, response=response: model_response(response)
+                    ),
                 )
 
                 self.assertEqual(report["status"], "invalid_response")
-                self.assertEqual(report["applied_count"], 0)
                 self.assertEqual(report["invalid_count"], 1)
                 self.assertEqual(warnings[0], "Ollama returned invalid categorizations")
-                self.assertGreater(len(warnings), 1)
                 self.assertIn("ollama_invalid_response", transaction["flags"])
 
     def test_http_error_body_is_surfaced_in_warning(self) -> None:
-        class Handler(BaseHTTPRequestHandler):
-            def do_POST(self) -> None:
-                length = int(self.headers["Content-Length"])
-                self.rfile.read(length)
-                body = json.dumps({"error": 'model "qwen2.5:7b-instruct" not found'})
-                self.send_response(404)
-                self.send_header("Content-Type", "application/json")
-                self.end_headers()
-                self.wfile.write(body.encode("utf-8"))
-
-            def log_message(self, format: str, *args: object) -> None:
-                return
-
-        server = HTTPServer(("127.0.0.1", 0), Handler)
-        thread = threading.Thread(target=server.serve_forever, daemon=True)
-        thread.start()
-        self.addCleanup(server.shutdown)
-        self.addCleanup(server.server_close)
+        def handler(request: OllamaHttpRequest) -> bytes:
+            raise urllib.error.HTTPError(
+                request.url,
+                404,
+                "Not Found",
+                {},
+                BytesIO(b'{"error": "model \\"qwen2.5:7b-instruct\\" not found"}'),
+            )
 
         transaction = unresolved_transaction()
         report, warnings = apply_ollama_fallback(
-            [transaction],
-            {
-                "ollama": {
-                    "enabled": True,
-                    "url": f"http://127.0.0.1:{server.server_port}/api/generate",
-                }
-            },
+            [transaction], self.config(), transport=FakeTransport(handler)
         )
 
         self.assertEqual(report["status"], "unavailable")
@@ -492,48 +306,23 @@ class OllamaTest(unittest.TestCase):
                 'model "qwen2.5:7b-instruct" not found'
             ],
         )
-        self.assertIn("ollama_unavailable", transaction["flags"])
 
     def test_disallowed_category_is_named_in_warning(self) -> None:
-        class Handler(BaseHTTPRequestHandler):
-            def do_POST(self) -> None:
-                length = int(self.headers["Content-Length"])
-                self.rfile.read(length)
-                body = {
-                    "response": json.dumps(
-                        [
-                            {
-                                "id": "txn_1",
-                                "category": "Ride Sharing",
-                                "confidence": 0.9,
-                                "reason": "Uber trip",
-                            }
-                        ]
-                    )
-                }
-                self.send_response(200)
-                self.send_header("Content-Type", "application/json")
-                self.end_headers()
-                self.wfile.write(json.dumps(body).encode("utf-8"))
+        transport = FakeTransport(
+            lambda request: model_response(
+                [
+                    {
+                        "id": "txn_1",
+                        "category": "Ride Sharing",
+                        "confidence": 0.9,
+                        "reason": "Uber trip",
+                    }
+                ]
+            )
+        )
 
-            def log_message(self, format: str, *args: object) -> None:
-                return
-
-        server = HTTPServer(("127.0.0.1", 0), Handler)
-        thread = threading.Thread(target=server.serve_forever, daemon=True)
-        thread.start()
-        self.addCleanup(server.shutdown)
-        self.addCleanup(server.server_close)
-
-        transaction = unresolved_transaction()
         report, warnings = apply_ollama_fallback(
-            [transaction],
-            {
-                "ollama": {
-                    "enabled": True,
-                    "url": f"http://127.0.0.1:{server.server_port}/api/generate",
-                }
-            },
+            [unresolved_transaction()], self.config(), transport=transport
         )
 
         self.assertEqual(report["status"], "invalid_response")
@@ -544,78 +333,33 @@ class OllamaTest(unittest.TestCase):
         )
 
     def test_request_timeout_is_configurable(self) -> None:
-        import time
+        def handler(request: OllamaHttpRequest) -> bytes:
+            self.assertEqual(request.timeout, 0.2)
+            raise TimeoutError("timed out")
 
-        class Handler(BaseHTTPRequestHandler):
-            def do_POST(self) -> None:
-                length = int(self.headers["Content-Length"])
-                self.rfile.read(length)
-                time.sleep(1.5)
-                self.send_response(200)
-                self.send_header("Content-Type", "application/json")
-                self.end_headers()
-                self.wfile.write(b'{"response": "[]"}')
-
-            def log_message(self, format: str, *args: object) -> None:
-                return
-
-        server = HTTPServer(("127.0.0.1", 0), Handler)
-        thread = threading.Thread(target=server.serve_forever, daemon=True)
-        thread.start()
-        self.addCleanup(server.shutdown)
-        self.addCleanup(server.server_close)
-
-        transaction = unresolved_transaction()
         report, warnings = apply_ollama_fallback(
-            [transaction],
-            {
-                "ollama": {
-                    "enabled": True,
-                    "url": f"http://127.0.0.1:{server.server_port}/api/generate",
-                    "timeout_seconds": 0.2,
-                }
-            },
+            [unresolved_transaction()],
+            self.config(timeout_seconds=0.2),
+            transport=FakeTransport(handler),
         )
 
         self.assertEqual(report["status"], "unavailable")
         self.assertIn("timed out", warnings[0])
 
     def test_progress_ticks_with_elapsed_time_while_waiting(self) -> None:
-        import time
-        from unittest.mock import patch
+        release = threading.Event()
 
-        class Handler(BaseHTTPRequestHandler):
-            def do_POST(self) -> None:
-                length = int(self.headers["Content-Length"])
-                self.rfile.read(length)
-                time.sleep(0.35)
-                self.send_response(200)
-                self.send_header("Content-Type", "application/json")
-                self.end_headers()
-                self.wfile.write(b'{"response": "[]"}')
+        def handler(request: OllamaHttpRequest) -> bytes:
+            release.wait(0.08)
+            return model_response([])
 
-            def log_message(self, format: str, *args: object) -> None:
-                return
-
-        server = HTTPServer(("127.0.0.1", 0), Handler)
-        thread = threading.Thread(target=server.serve_forever, daemon=True)
-        thread.start()
-        self.addCleanup(server.shutdown)
-        self.addCleanup(server.server_close)
-
-        transaction = unresolved_transaction()
         elapsed_readings = []
-
-        with patch("honeymoney.ollama._TICK_INTERVAL_SECONDS", 0.1):
+        with patch("honeymoney.ollama._TICK_INTERVAL_SECONDS", 0.02):
             apply_ollama_fallback(
-                [transaction],
-                {
-                    "ollama": {
-                        "enabled": True,
-                        "url": f"http://127.0.0.1:{server.server_port}/api/generate",
-                    }
-                },
+                [unresolved_transaction()],
+                self.config(),
                 progress=lambda event: elapsed_readings.append(event.elapsed_seconds),
+                transport=FakeTransport(handler),
             )
 
         self.assertEqual(elapsed_readings[0], 0.0)

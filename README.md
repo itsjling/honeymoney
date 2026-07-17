@@ -337,9 +337,10 @@ PYTHON=python3.10 ./scripts/check.sh
 ```
 
 The offline verification command runs formatting, linting, unit tests,
-`pip check`, a wheel/source build, and distribution-metadata checks. Once the
-bootstrap install is available, it does not query dependency indexes or
-advisory services.
+`pip check`, a wheel/source build, and distribution-metadata checks. The test
+runner forbids in-process socket creation and DNS lookups; Ollama behavior is
+exercised through injected in-memory transports. Once the bootstrap install is
+available, the command does not query dependency indexes or advisory services.
 
 Refresh the reviewed resolution intentionally on Python 3.10:
 

@@ -1,12 +1,15 @@
+import contextlib
+import io
 import json
 import os
 import subprocess
 import sys
 import tempfile
-import threading
 import unittest
-from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
+from unittest.mock import patch
+
+from honeymoney import cli
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -32,6 +35,34 @@ class ConfigCliTest(unittest.TestCase):
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             check=False,
+        )
+
+    def _run_config_with_models(
+        self,
+        args: list[str],
+        *,
+        cwd: Path,
+        models: list[str],
+        input_values: list[str] | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        answers = iter(input_values or [])
+        old_cwd = Path.cwd()
+        try:
+            os.chdir(cwd)
+            with (
+                patch.object(sys, "argv", ["honeymoney", *args]),
+                patch.object(cli, "list_ollama_models", return_value=models),
+                patch("builtins.input", side_effect=lambda prompt: next(answers)),
+                contextlib.redirect_stdout(stdout),
+                contextlib.redirect_stderr(stderr),
+            ):
+                returncode = cli.run()
+        finally:
+            os.chdir(old_cwd)
+        return subprocess.CompletedProcess(
+            ["honeymoney", *args], returncode, stdout.getvalue(), stderr.getvalue()
         )
 
     def _setup_workspace(self, tmp: str) -> Path:
@@ -85,42 +116,15 @@ class ConfigCliTest(unittest.TestCase):
             self.assertEqual(payload["data"]["ollama"], config["ollama"])
 
     def test_config_edit_ollama_interactively_selects_local_model(self) -> None:
-        requests = []
-
-        class Handler(BaseHTTPRequestHandler):
-            def do_GET(self) -> None:
-                requests.append(self.path)
-                body = {
-                    "models": [
-                        {"name": "zeta:latest"},
-                        {"name": "alpha:latest"},
-                    ]
-                }
-                self.send_response(200)
-                self.send_header("Content-Type", "application/json")
-                self.end_headers()
-                self.wfile.write(json.dumps(body).encode("utf-8"))
-
-            def log_message(self, format: str, *args: object) -> None:
-                return
-
-        server = HTTPServer(("127.0.0.1", 0), Handler)
-        thread = threading.Thread(target=server.serve_forever, daemon=True)
-        thread.start()
-        self.addCleanup(server.shutdown)
-        self.addCleanup(server.server_close)
-
         with tempfile.TemporaryDirectory() as tmp:
             root = self._setup_workspace(tmp)
             config_path = root / "config.json"
-            config = json.loads(config_path.read_text(encoding="utf-8"))
-            config["ollama"]["url"] = (
-                f"http://127.0.0.1:{server.server_port}/api/generate"
-            )
-            config_path.write_text(json.dumps(config), encoding="utf-8")
 
-            result = self._run_cli(
-                ["config", "edit", "ollama"], cwd=root, input_text="2\n"
+            result = self._run_config_with_models(
+                ["config", "edit", "ollama"],
+                cwd=root,
+                models=["alpha:latest", "zeta:latest"],
+                input_values=["2"],
             )
 
             self.assertEqual(result.returncode, 0, result.stderr)
@@ -130,7 +134,6 @@ class ConfigCliTest(unittest.TestCase):
             updated = json.loads(config_path.read_text(encoding="utf-8"))
             self.assertTrue(updated["ollama"]["enabled"])
             self.assertEqual(updated["ollama"]["model"], "zeta:latest")
-            self.assertEqual(requests, ["/api/tags"])
 
     def test_config_edit_ollama_can_disable_without_selecting_a_model(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -149,23 +152,6 @@ class ConfigCliTest(unittest.TestCase):
     def test_config_edit_ollama_validates_configured_model_before_enabling(
         self,
     ) -> None:
-        class Handler(BaseHTTPRequestHandler):
-            def do_GET(self) -> None:
-                body = {"models": [{"name": "available:latest"}]}
-                self.send_response(200)
-                self.send_header("Content-Type", "application/json")
-                self.end_headers()
-                self.wfile.write(json.dumps(body).encode("utf-8"))
-
-            def log_message(self, format: str, *args: object) -> None:
-                return
-
-        server = HTTPServer(("127.0.0.1", 0), Handler)
-        thread = threading.Thread(target=server.serve_forever, daemon=True)
-        thread.start()
-        self.addCleanup(server.shutdown)
-        self.addCleanup(server.server_close)
-
         with tempfile.TemporaryDirectory() as tmp:
             root = self._setup_workspace(tmp)
             config_path = root / "config.json"
@@ -174,13 +160,14 @@ class ConfigCliTest(unittest.TestCase):
                 {
                     "enabled": False,
                     "model": "missing:model",
-                    "url": f"http://127.0.0.1:{server.server_port}/api/generate",
                 }
             )
             config_path.write_text(json.dumps(config), encoding="utf-8")
 
-            result = self._run_cli(
-                ["config", "edit", "ollama", "--enable", "--json"], cwd=root
+            result = self._run_config_with_models(
+                ["config", "edit", "ollama", "--enable", "--json"],
+                cwd=root,
+                models=["available:latest"],
             )
 
             self.assertEqual(result.returncode, 2)

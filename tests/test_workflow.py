@@ -2,24 +2,23 @@ import csv
 import io
 import json
 import os
-import pty
 import subprocess
 import sys
 import tempfile
-import threading
 import unittest
 from contextlib import redirect_stdout
 from datetime import date
-from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from unittest.mock import patch
 
+from honeymoney import cli
 from honeymoney.cli import (
     _report_command,
     _resolve_period,
     _starter_csv_profile,
     _StatusLine,
 )
+from honeymoney.ollama import OllamaHttpRequest, apply_ollama_fallback
 from honeymoney.schema import ALLOWED_CATEGORIES
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -1897,38 +1896,33 @@ class StatusLineTest(unittest.TestCase):
 
 class StatusLineTtyTest(unittest.TestCase):
     def test_import_shows_status_line_with_ollama_progress_on_tty(self) -> None:
-        class Handler(BaseHTTPRequestHandler):
-            def do_POST(self) -> None:
-                length = int(self.headers["Content-Length"])
-                payload = json.loads(self.rfile.read(length))
-                prompt = json.loads(payload["prompt"])
-                body = {
-                    "response": json.dumps(
-                        [
-                            {
-                                "id": transaction["id"],
-                                "category": "Groceries",
-                                "owner": "Household",
-                                "confidence": 0.9,
-                                "reason": "Supermarket merchant",
-                            }
-                            for transaction in prompt["transactions"]
-                        ]
-                    )
-                }
-                self.send_response(200)
-                self.send_header("Content-Type", "application/json")
-                self.end_headers()
-                self.wfile.write(json.dumps(body).encode("utf-8"))
+        class FakeTransport:
+            def request(self, request: OllamaHttpRequest) -> bytes:
+                assert request.body is not None
+                prompt = json.loads(json.loads(request.body)["prompt"])
+                return json.dumps(
+                    {
+                        "response": json.dumps(
+                            [
+                                {
+                                    "id": transaction["id"],
+                                    "category": "Groceries",
+                                    "confidence": 0.9,
+                                    "reason": "Supermarket merchant",
+                                }
+                                for transaction in prompt["transactions"]
+                            ]
+                        )
+                    }
+                ).encode()
 
-            def log_message(self, format: str, *args: object) -> None:
-                return
-
-        server = HTTPServer(("127.0.0.1", 0), Handler)
-        thread = threading.Thread(target=server.serve_forever, daemon=True)
-        thread.start()
-        self.addCleanup(server.server_close)
-        self.addCleanup(server.shutdown)
+        def fake_apply(transactions, config, progress=None):
+            return apply_ollama_fallback(
+                transactions,
+                config,
+                progress=progress,
+                transport=FakeTransport(),
+            )
 
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "money"
@@ -1955,50 +1949,30 @@ class StatusLineTtyTest(unittest.TestCase):
             config = json.loads(config_path.read_text(encoding="utf-8"))
             config["ollama"] = {
                 "enabled": True,
-                "url": f"http://127.0.0.1:{server.server_address[1]}/api/generate",
+                "url": "http://localhost:11434/api/generate",
                 "model": "test",
                 "batch_size": 20,
             }
             config_path.write_text(json.dumps(config), encoding="utf-8")
 
-            env = dict(os.environ)
-            env["PYTHONPATH"] = str(REPO_ROOT)
-            master, slave = pty.openpty()
+            status_output = io.StringIO()
+            stdout = io.StringIO()
+            old_cwd = Path.cwd()
             try:
-                process = subprocess.Popen(
-                    [
-                        sys.executable,
-                        "-m",
-                        "honeymoney.cli",
-                        "import",
-                        str(statement),
-                    ],
-                    cwd=root,
-                    env=env,
-                    stdin=slave,
-                    stdout=slave,
-                    stderr=slave,
-                    close_fds=True,
-                )
-                os.close(slave)
-                output = b""
-                while True:
-                    try:
-                        chunk = os.read(master, 4096)
-                    except OSError:
-                        break
-                    if not chunk:
-                        break
-                    output += chunk
-                self.assertEqual(
-                    process.wait(timeout=60), 0, output.decode(errors="replace")
-                )
+                os.chdir(root)
+                with (
+                    patch.object(
+                        cli, "_status", _StatusLine(status_output, enabled=True)
+                    ),
+                    patch.object(cli, "apply_ollama_fallback", side_effect=fake_apply),
+                    redirect_stdout(stdout),
+                ):
+                    returncode = cli.main(["import", str(statement)])
             finally:
-                os.close(master)
-                if process.poll() is None:
-                    process.kill()
+                os.chdir(old_cwd)
 
-            text = output.decode(errors="replace")
+            self.assertEqual(returncode, 0)
+            text = status_output.getvalue() + stdout.getvalue()
             self.assertIn("\r", text)
             self.assertIn("Importing statements... (1/1) may.csv", text)
             self.assertIn(

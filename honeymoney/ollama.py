@@ -85,12 +85,12 @@ class LoopbackOllamaTransport:
     def __init__(
         self,
         *,
-        resolver: Callable[..., list[tuple[Any, ...]]] = socket.getaddrinfo,
-        sender: Callable[[OllamaHttpRequest], OllamaHttpResponse] = _default_sender,
+        resolver: Callable[..., list[tuple[Any, ...]]] | None = None,
+        sender: Callable[[OllamaHttpRequest], OllamaHttpResponse] | None = None,
         max_redirects: int = _MAX_REDIRECTS,
     ) -> None:
-        self._resolver = resolver
-        self._sender = sender
+        self._resolver = resolver or socket.getaddrinfo
+        self._sender = sender or _default_sender
         self._max_redirects = max_redirects
 
     def request(self, request: OllamaHttpRequest) -> bytes:
@@ -134,7 +134,7 @@ class LoopbackOllamaTransport:
 def validate_ollama_endpoint(
     url: str,
     *,
-    resolver: Callable[..., list[tuple[Any, ...]]] = socket.getaddrinfo,
+    resolver: Callable[..., list[tuple[Any, ...]]] | None = None,
 ) -> _ValidatedEndpoint:
     """Validate and pin an HTTP Ollama URL to one resolved loopback address."""
     try:
@@ -157,7 +157,7 @@ def validate_ollama_endpoint(
 
     resolved_port = port or 80
     try:
-        records = resolver(
+        records = (resolver or socket.getaddrinfo)(
             hostname,
             resolved_port,
             family=socket.AF_UNSPEC,
