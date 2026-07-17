@@ -522,6 +522,35 @@ class CashFlowWorkflowTest(unittest.TestCase):
             self.assertEqual(rows["txn_other"]["flow_type"], "unresolved")
             self.assertEqual(rows["txn_income"]["flow_type"], "income")
 
+    def test_model_provenance_cannot_establish_any_protected_flow(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._workspace(
+                tmp,
+                [
+                    {
+                        "transaction_id": f"txn_{category.lower().replace(' ', '_')}",
+                        "date": "2026-06-01",
+                        "account_id": "bank_primary",
+                        "account_type": "bank",
+                        "amount_hkd": "100.00",
+                        "category": category,
+                        "flags": "ollama_categorized",
+                    }
+                    for category in [
+                        "Income",
+                        "Credit Card Payment",
+                        "Internal Transfer",
+                        "Savings",
+                        "Investments",
+                    ]
+                ],
+            )
+            result = self._run_cli(["reconcile", "--json"], cwd=root)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(
+                {row["flow_type"] for row in self._ledger_rows(root)}, {"unresolved"}
+            )
+
     def test_report_headlines_net_refunds_and_show_unresolved_separately(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = self._workspace(

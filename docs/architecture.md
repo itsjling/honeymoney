@@ -16,7 +16,7 @@ profile detection and CSV/PDF parsing
 normalized rows + stable transaction IDs
                  |
                  v
-deterministic rules -> duplicate checks -> optional local Ollama
+deterministic rules -> duplicate checks -> structural classification -> optional local Ollama
                  |
                  v
 validated corrections
@@ -37,7 +37,10 @@ persistent overrides keyed by `transaction_id`; rules and Ollama suggestions
 run before corrections, so reviewed choices win.
 
 `category` is the merchant/budget classification. `flow_type` is the accounting
-treatment used by cash-flow totals. After rules, local Ollama, and corrections,
+treatment used by cash-flow totals. Ollama is limited to configured spending
+categories and cannot set an owner or protected accounting treatment. Protected
+categories are established only by rules, corrections, conservative structural
+classification, or reconciliation. After rules, local Ollama, and corrections,
 the cumulative ledger is reconciled across owned accounts. Unique opposite-sign,
 equal-base-currency candidates within the configured date window receive stable
 transfer links derived from their existing transaction IDs. Ambiguous candidates
@@ -79,9 +82,10 @@ form.
 Remembered income rules are deterministic exact matches on institution,
 account identity, normalized description, and the virtual inflow direction.
 Direction is derived from `amount_hkd` and is not part of transaction identity.
-Only a human correction or deterministic rule may establish `flow_type=income`;
-refunds and owned-account flows remain distinct, and Ollama cannot set flow
-treatment.
+Human corrections, deterministic rules, and conservative structural matching
+may establish protected flows; reconciliation may establish owned-account
+transfers. Refunds and owned-account flows remain distinct, and Ollama cannot
+set flow treatment.
 
 ## Privacy boundary
 

@@ -1,0 +1,21 @@
+[
+  {
+    "transaction_id": "txn_restaurant",
+    "date": "2026-05-01",
+    "merchant": "SYNTHETIC RESTAURANT",
+    "original_description": "SYNTHETIC RESTAURANT",
+    "original_amount": "-50.00",
+    "original_currency": "HKD",
+    "posted_amount": "-50.00",
+    "posted_currency": "HKD",
+    "amount_hkd": "-50.00",
+    "institution": "Synthetic",
+    "payment_method": "Credit Card",
+    "category": "Unknown",
+    "owner": "Household",
+    "confidence": "0.00",
+    "needs_review": "true",
+    "reason": "Unresolved",
+    "flags": "uncategorized"
+  }
+]

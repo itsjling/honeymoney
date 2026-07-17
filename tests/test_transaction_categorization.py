@@ -5,6 +5,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
 from honeymoney.ollama import apply_ollama_fallback
+from honeymoney.reconciliation import reconcile_ledger
 from honeymoney.rules import apply_rules
 from tests.golden_helpers import FIXTURE_DIR, assert_rows_match, base_config, load_json
 
@@ -105,6 +106,15 @@ class OllamaCategorizationTest(unittest.TestCase):
         sent = prompt["transactions"][0]
         for field in expected["request_absent_fields"]:
             self.assertNotIn(field, sent)
+        self.assertEqual(
+            prompt["accounting_boundaries"],
+            [
+                "A credit card is a payment method, not a purchase purpose.",
+                "Cashback or a cash rebate is not cash spending.",
+                "Food delivery belongs to Dining, not Transport.",
+                "Internet or broadband service belongs to Utilities, not Transport.",
+            ],
+        )
 
     def test_invalid_response_keeps_transaction_reviewable_and_flags_it(self) -> None:
         case_dir = categorization_case("ollama", "invalid_response")
@@ -180,6 +190,58 @@ class OllamaCategorizationTest(unittest.TestCase):
         ]
         self.assertEqual(batches, expected["request_batches"])
         assert_rows_match(self, rows, expected["rows"], context=str(case_dir))
+
+    def test_protected_model_categories_are_rejected_without_owner_changes(
+        self,
+    ) -> None:
+        case_dir = categorization_case("ollama", "accounting_safety")
+        base_row = load_json(case_dir / "rows.json")[0]
+        protected_categories = [
+            "Income",
+            "Credit Card Payment",
+            "Internal Transfer",
+            "Savings",
+            "Investments",
+        ]
+        rows = []
+        response = []
+        for index, category in enumerate(protected_categories, start=1):
+            row = dict(base_row)
+            row["transaction_id"] = f"txn_protected_{index}"
+            row["owner"] = "Justin"
+            row["flow_type"] = "unresolved"
+            rows.append(row)
+            response.append(
+                {
+                    "id": row["transaction_id"],
+                    "category": category,
+                    "confidence": 1.0,
+                    "reason": "Dangerous accounting suggestion",
+                }
+            )
+        with FakeOllamaServer(
+            lambda request: {"response": json.dumps(response)}
+        ) as server:
+            report, warnings = apply_ollama_fallback(
+                rows, {**base_config(), "ollama": {"enabled": True, "url": server.url}}
+            )
+        self.assertEqual(warnings, [])
+        self.assertEqual(report["rejected_count"], len(protected_categories))
+        self.assertEqual(report["applied_count"], 0)
+        reconcile_ledger(rows, {})
+        for row, category in zip(rows, protected_categories):
+            self.assertEqual(row["category"], "Unknown")
+            self.assertEqual(row["flow_type"], "unresolved")
+            self.assertEqual(row["needs_review"], "true")
+            self.assertEqual(row["owner"], "Justin")
+            self.assertIn("ollama_policy_rejected", row["flags"])
+            self.assertIn(category, row["reason"])
+        item_schema = server.requests[0]["format"]["properties"]["categorizations"][
+            "items"
+        ]
+        for category in protected_categories:
+            self.assertNotIn(category, item_schema["properties"]["category"]["enum"])
+        self.assertNotIn("owner", item_schema["properties"])
 
 
 if __name__ == "__main__":

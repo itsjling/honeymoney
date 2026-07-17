@@ -9,7 +9,12 @@ from decimal import Decimal, InvalidOperation
 from typing import Any, Callable, NamedTuple
 from urllib.parse import urlsplit, urlunsplit
 
-from honeymoney.schema import allowed_categories, allowed_owners
+from honeymoney.classification_policy import (
+    evaluate_model_suggestion,
+    model_boundary_guidance,
+    model_category_descriptions,
+)
+from honeymoney.schema import allowed_categories
 
 _TICK_INTERVAL_SECONDS = 1.0
 
@@ -67,12 +72,23 @@ def apply_ollama_fallback(
         and transaction.get("needs_review") == "true"
     ]
     if not unresolved:
-        return {"status": "skipped", "reason": "no unresolved transactions"}, []
+        return {
+            "status": "skipped",
+            "reason": "no unresolved transactions",
+            "candidate_count": 0,
+            "accepted_count": 0,
+            "reviewable_count": 0,
+            "rejected_count": 0,
+            "applied_count": 0,
+            "invalid_count": 0,
+        }, []
 
     batch_size = _batch_size(ollama_config)
     chunks = _chunks(unresolved, batch_size)
     batch_count = len(chunks)
-    applied = 0
+    accepted = 0
+    reviewable = 0
+    rejected = 0
     invalid = 0
     processed = 0
     details: list[str] = []
@@ -115,7 +131,8 @@ def apply_ollama_fallback(
         ) as error:
             error_text = _error_text(error)
             warning = f"Ollama unavailable: {error_text}"
-            for transaction in unresolved:
+            pending = unresolved[start_index - 1 :]
+            for transaction in pending:
                 if "ollama_categorized" in transaction.get("flags", ""):
                     continue
                 transaction["flags"] = _append_flag(
@@ -124,16 +141,28 @@ def apply_ollama_fallback(
                 transaction["reason"] = _append_reason(
                     transaction["reason"], "Ollama unavailable"
                 )
-            return {"status": "unavailable", "error": error_text}, [warning]
+            return {
+                "status": "unavailable",
+                "error": error_text,
+                "candidate_count": len(unresolved),
+                "accepted_count": accepted,
+                "reviewable_count": reviewable,
+                "rejected_count": rejected,
+                "applied_count": accepted + reviewable,
+                "invalid_count": invalid,
+            }, [warning]
 
-        batch_applied, batch_invalid, batch_details = _apply_ollama_response(
+        batch_counts, batch_invalid, batch_details = _apply_ollama_response(
             batch, response_body, config
         )
-        applied += batch_applied
+        accepted += batch_counts["accepted"]
+        reviewable += batch_counts["reviewable"]
+        rejected += batch_counts["rejected"]
         invalid += batch_invalid
         details.extend(batch_details)
 
-    status = "success" if applied and not invalid else "invalid_response"
+    applied = accepted + reviewable
+    status = "success" if not invalid else "invalid_response"
     warnings = []
     if invalid:
         warnings = ["Ollama returned invalid categorizations"]
@@ -158,6 +187,10 @@ def apply_ollama_fallback(
             )
     return {
         "status": status,
+        "candidate_count": len(unresolved),
+        "accepted_count": accepted,
+        "reviewable_count": reviewable,
+        "rejected_count": rejected,
         "applied_count": applied,
         "invalid_count": invalid,
     }, warnings
@@ -202,24 +235,27 @@ def _request_ollama(
     config: dict[str, Any],
     tick: Callable[[float], None] | None = None,
 ) -> dict[str, Any]:
-    categories = sorted(allowed_categories(config))
-    owners = sorted(allowed_owners(config))
+    descriptions = model_category_descriptions(config)
+    categories = sorted(descriptions)
     payload = {
         "model": ollama_config.get("model", "qwen2.5:7b-instruct"),
         "stream": False,
         "think": bool(ollama_config.get("think", False)),
-        "format": _response_format(categories, owners),
+        "format": _response_format(categories),
         "prompt": json.dumps(
             {
                 "task": (
                     "Categorize each household transaction. Reply with a JSON object "
                     '{"categorizations": [...]} containing one item per transaction '
                     "with: id copied from the transaction, category from "
-                    "allowed_categories, owner from allowed_owners, confidence "
-                    "between 0 and 1, and a short reason."
+                    "allowed_categories, confidence between 0 and 1, and a short "
+                    "reason. Categories are merchant spending labels only: never "
+                    "infer income, transfers, card payments, savings, investments, "
+                    "or an owner."
                 ),
                 "allowed_categories": categories,
-                "allowed_owners": owners,
+                "category_definitions": descriptions,
+                "accounting_boundaries": model_boundary_guidance(),
                 "transactions": [
                     _ollama_transaction_payload(row) for row in transactions
                 ],
@@ -261,7 +297,7 @@ def _request_ollama(
     return result["body"]
 
 
-def _response_format(categories: list[str], owners: list[str]) -> dict[str, Any]:
+def _response_format(categories: list[str]) -> dict[str, Any]:
     return {
         "type": "object",
         "properties": {
@@ -272,11 +308,10 @@ def _response_format(categories: list[str], owners: list[str]) -> dict[str, Any]
                     "properties": {
                         "id": {"type": "string"},
                         "category": {"type": "string", "enum": categories},
-                        "owner": {"type": "string", "enum": owners},
                         "confidence": {"type": "number", "minimum": 0, "maximum": 1},
                         "reason": {"type": "string"},
                     },
-                    "required": ["id", "category", "owner", "confidence", "reason"],
+                    "required": ["id", "category", "confidence", "reason"],
                 },
             }
         },
@@ -304,37 +339,42 @@ def _apply_ollama_response(
     unresolved: list[dict[str, str]],
     response_body: dict[str, Any],
     config: dict[str, Any],
-) -> tuple[int, int, list[str]]:
+) -> tuple[dict[str, int], int, list[str]]:
     raw_response = response_body.get("response", "")
     try:
         categorizations = json.loads(raw_response)
     except (TypeError, json.JSONDecodeError):
         detail = f"Ollama response was not JSON: {_snippet(raw_response)}"
-        return 0, len(unresolved), [detail]
+        return (
+            {"accepted": 0, "reviewable": 0, "rejected": 0},
+            len(unresolved),
+            [detail],
+        )
     if isinstance(categorizations, dict):
         categorizations = categorizations.get("categorizations")
     if not isinstance(categorizations, list):
         detail = f"Ollama response was not a JSON list: {_snippet(raw_response)}"
-        return 0, len(unresolved), [detail]
+        return (
+            {"accepted": 0, "reviewable": 0, "rejected": 0},
+            len(unresolved),
+            [detail],
+        )
 
     by_id = {transaction["transaction_id"]: transaction for transaction in unresolved}
-    threshold = Decimal(str(config.get("review_confidence_threshold", 0.8)))
     categories = allowed_categories(config)
-    owners = allowed_owners(config)
-    applied = 0
+    counts = {"accepted": 0, "reviewable": 0, "rejected": 0}
     invalid = 0
     details: list[str] = []
     handled_ids: set[str] = set()
-    seen_known_ids: set[str] = set()
+    mentioned_ids: set[str] = set()
     for categorization in categorizations:
         if not isinstance(categorization, dict):
             continue
         transaction_id = str(categorization.get("id", ""))
         transaction = by_id.get(transaction_id)
         if transaction is not None:
-            seen_known_ids.add(transaction_id)
+            mentioned_ids.add(transaction_id)
         category = str(categorization.get("category", ""))
-        owner = str(categorization.get("owner", ""))
         reason = str(categorization.get("reason", ""))
         try:
             confidence = Decimal(str(categorization.get("confidence", "")))
@@ -348,8 +388,6 @@ def _apply_ollama_response(
             problem = "duplicate categorization for the same transaction"
         elif category not in categories:
             problem = f"category {category or '(missing)'!r} is not allowed"
-        elif owner not in owners:
-            problem = f"owner {owner or '(missing)'!r} is not allowed"
         elif not reason:
             problem = "missing reason"
         elif (
@@ -367,26 +405,40 @@ def _apply_ollama_response(
             continue
 
         handled_ids.add(transaction_id)
+        outcome = evaluate_model_suggestion(transaction, category, confidence, config)
+        if outcome.outcome == "rejected":
+            transaction["flags"] = _append_flag(
+                transaction["flags"], "ollama_policy_rejected"
+            )
+            transaction["reason"] = _append_reason(
+                transaction["reason"], outcome.reason
+            )
+            transaction["needs_review"] = "true"
+            counts["rejected"] += 1
+            continue
+        if outcome.outcome == "invalid":
+            invalid += 1
+            details.append(
+                f"Ollama categorization rejected ({transaction.get('merchant', '') or transaction_id}): category {category!r} is not allowed"
+            )
+            continue
         transaction["category"] = category
-        transaction["owner"] = owner
         transaction["confidence"] = _format_decimal(confidence)
         transaction["reason"] = reason
         transaction["flags"] = _remove_flag(transaction["flags"], "uncategorized")
         transaction["flags"] = _append_flag(transaction["flags"], "ollama_categorized")
         transaction["needs_review"] = (
-            "false"
-            if confidence >= threshold and category not in {"Unknown"}
-            else "true"
+            "false" if outcome.outcome == "accepted" else "true"
         )
-        applied += 1
+        counts[outcome.outcome] += 1
 
-    unanswered = len(set(by_id) - handled_ids - seen_known_ids)
+    unanswered = len(set(by_id) - mentioned_ids)
     if unanswered:
         invalid += unanswered
         details.append(
             f"Ollama returned no categorization for {unanswered} transaction(s)"
         )
-    return applied, invalid, details
+    return counts, invalid, details
 
 
 def _snippet(value: Any, limit: int = 120) -> str:
