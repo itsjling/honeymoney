@@ -41,7 +41,6 @@ class OllamaHttpResponse(NamedTuple):
 
 
 class _ValidatedEndpoint(NamedTuple):
-    original_url: str
     pinned_url: str
     host_header: str
 
@@ -192,7 +191,7 @@ def validate_ollama_endpoint(
     pinned_netloc = f"{pinned_host}:{port}" if port is not None else pinned_host
     path = parsed.path or "/"
     pinned_url = urlunsplit(("http", pinned_netloc, path, parsed.query, ""))
-    return _ValidatedEndpoint(url, pinned_url, parsed.netloc)
+    return _ValidatedEndpoint(pinned_url, parsed.netloc)
 
 
 def _header(headers: Mapping[str, str], name: str) -> str:

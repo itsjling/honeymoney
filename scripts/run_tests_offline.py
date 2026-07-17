@@ -62,12 +62,12 @@ def _offline_getaddrinfo(
 
 
 def main() -> int:
-    suite = unittest.defaultTestLoader.discover(str(REPO_ROOT / "tests"))
     with (
         patch("socket.socket", side_effect=_forbid_socket),
         patch("socket.create_connection", side_effect=_forbid_socket),
         patch("socket.getaddrinfo", side_effect=_offline_getaddrinfo),
     ):
+        suite = unittest.defaultTestLoader.discover(str(REPO_ROOT / "tests"))
         result = unittest.TextTestRunner(verbosity=1).run(suite)
     return 0 if result.wasSuccessful() else 1
 
