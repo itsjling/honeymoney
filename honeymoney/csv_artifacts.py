@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import codecs
 import csv
 import io
 from dataclasses import dataclass
@@ -26,6 +27,7 @@ CANONICAL_CSV_COLUMNS = frozenset(
 _FORMULA_MARKERS = ("=", "+", "-", "@")
 _CONTROL_MARKERS = ("\t", "\r")
 _ESCAPE_PREFIX = "'"
+_CSV_SIGNATURE = "\ufeff"
 
 
 @dataclass(frozen=True)
@@ -41,7 +43,6 @@ def csv_document(columns: list[str], rows: Iterable[Mapping[str, str]]) -> str:
         buffer,
         fieldnames=columns,
         extrasaction="ignore",
-        quoting=csv.QUOTE_ALL,
     )
     writer.writeheader()
     writer.writerows(
@@ -54,15 +55,14 @@ def csv_document(columns: list[str], rows: Iterable[Mapping[str, str]]) -> str:
         }
         for row in rows
     )
-    return buffer.getvalue()
+    return f"{_CSV_SIGNATURE}{buffer.getvalue()}"
 
 
 def read_csv_artifact(path: Path, columns: list[str]) -> CsvArtifact:
     """Read a public CSV and decode only the marked spreadsheet-safe format."""
-    with path.open(newline="", encoding="utf-8") as handle:
-        first_line = handle.readline()
-        safe_format = first_line.rstrip("\r\n") == _quoted_header(columns)
-        handle.seek(0)
+    with path.open("rb") as handle:
+        safe_format = handle.read(len(codecs.BOM_UTF8)) == codecs.BOM_UTF8
+    with path.open(newline="", encoding="utf-8-sig") as handle:
         rows = []
         for row in csv.DictReader(handle):
             rows.append(
@@ -103,9 +103,3 @@ def _formula_triggering_text(value: str) -> bool:
     if any(marker in leading_whitespace for marker in _CONTROL_MARKERS):
         return True
     return stripped.startswith(_FORMULA_MARKERS)
-
-
-def _quoted_header(columns: list[str]) -> str:
-    buffer = io.StringIO(newline="")
-    csv.writer(buffer, quoting=csv.QUOTE_ALL).writerow(columns)
-    return buffer.getvalue().rstrip("\r\n")

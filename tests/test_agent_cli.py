@@ -253,7 +253,7 @@ class AgentCliTest(unittest.TestCase):
             )
             self.assertEqual(import_result.returncode, 0, import_result.stderr)
             with (root / "output" / "categorized.csv").open(
-                newline="", encoding="utf-8"
+                newline="", encoding="utf-8-sig"
             ) as fh:
                 [row] = list(csv.DictReader(fh))
 
@@ -284,7 +284,7 @@ class AgentCliTest(unittest.TestCase):
             self.assertEqual(payload["data"]["applied_count"], 1)
             self.assertEqual(payload["data"]["remaining_review_count"], 0)
             with (root / "output" / "categorized.csv").open(
-                newline="", encoding="utf-8"
+                newline="", encoding="utf-8-sig"
             ) as fh:
                 [corrected] = list(csv.DictReader(fh))
             self.assertEqual(corrected["category"], "Groceries")
@@ -293,10 +293,12 @@ class AgentCliTest(unittest.TestCase):
             self.assertEqual(corrected["needs_review"], "false")
             self.assertIn("manual_correction", corrected["flags"])
             with (root / "output" / "review_needed.csv").open(
-                newline="", encoding="utf-8"
+                newline="", encoding="utf-8-sig"
             ) as fh:
                 self.assertEqual(list(csv.DictReader(fh)), [])
-            with (root / "corrections.csv").open(newline="", encoding="utf-8") as fh:
+            with (root / "corrections.csv").open(
+                newline="", encoding="utf-8-sig"
+            ) as fh:
                 [saved] = list(csv.DictReader(fh))
             self.assertEqual(saved["transaction_id"], row["transaction_id"])
             self.assertEqual(saved["category"], "Groceries")
@@ -322,7 +324,7 @@ class AgentCliTest(unittest.TestCase):
                 categorized = root / "output" / "categorized.csv"
                 review = root / "output" / "review_needed.csv"
                 corrections = root / "corrections.csv"
-                with categorized.open(newline="", encoding="utf-8") as fh:
+                with categorized.open(newline="", encoding="utf-8-sig") as fh:
                     [row] = list(csv.DictReader(fh))
                 before = {
                     path: path.read_bytes()
@@ -368,7 +370,7 @@ class AgentCliTest(unittest.TestCase):
                 imported = self._run_cli(["import", str(statement), "--json"], cwd=root)
                 self.assertEqual(imported.returncode, 0, imported.stderr)
                 categorized = root / "output" / "categorized.csv"
-                with categorized.open(newline="", encoding="utf-8") as fh:
+                with categorized.open(newline="", encoding="utf-8-sig") as fh:
                     [row] = list(csv.DictReader(fh))
                 before = categorized.read_bytes()
                 review = root / "output" / "review_needed.csv"
@@ -406,7 +408,7 @@ class AgentCliTest(unittest.TestCase):
             imported = self._run_cli(["import", str(statement), "--json"], cwd=root)
             self.assertEqual(imported.returncode, 0, imported.stderr)
             categorized = root / "output" / "categorized.csv"
-            with categorized.open(newline="", encoding="utf-8") as fh:
+            with categorized.open(newline="", encoding="utf-8-sig") as fh:
                 [row] = list(csv.DictReader(fh))
             correction = json.dumps(
                 [
@@ -430,14 +432,16 @@ class AgentCliTest(unittest.TestCase):
 
             self.assertEqual(recovered.returncode, 0, recovered.stderr)
             self.assertEqual(self._json(recovered)["command"], "config")
-            with categorized.open(newline="", encoding="utf-8") as fh:
+            with categorized.open(newline="", encoding="utf-8-sig") as fh:
                 [corrected] = list(csv.DictReader(fh))
             self.assertEqual(corrected["category"], "Groceries")
             with (root / "output" / "review_needed.csv").open(
-                newline="", encoding="utf-8"
+                newline="", encoding="utf-8-sig"
             ) as fh:
                 self.assertEqual(list(csv.DictReader(fh)), [])
-            with (root / "corrections.csv").open(newline="", encoding="utf-8") as fh:
+            with (root / "corrections.csv").open(
+                newline="", encoding="utf-8-sig"
+            ) as fh:
                 [saved] = list(csv.DictReader(fh))
             self.assertEqual(saved["category"], "Groceries")
             self.assertEqual(
@@ -459,7 +463,7 @@ class AgentCliTest(unittest.TestCase):
             modes = {categorized: 0o640, review: 0o600, corrections: 0o644}
             for path, mode in modes.items():
                 path.chmod(mode)
-            with categorized.open(newline="", encoding="utf-8") as fh:
+            with categorized.open(newline="", encoding="utf-8-sig") as fh:
                 [row] = list(csv.DictReader(fh))
 
             result = self._run_cli(
@@ -497,7 +501,7 @@ class AgentCliTest(unittest.TestCase):
             )
             self.assertEqual(imported.returncode, 0, imported.stderr)
             categorized = root / "output" / "categorized.csv"
-            with categorized.open(newline="", encoding="utf-8") as fh:
+            with categorized.open(newline="", encoding="utf-8-sig") as fh:
                 [row] = list(csv.DictReader(fh))
             paths = (
                 categorized,
@@ -537,7 +541,7 @@ class AgentCliTest(unittest.TestCase):
             categorized_path = root / "output" / "categorized.csv"
             review_path = root / "output" / "review_needed.csv"
             corrections_path = root / "corrections.csv"
-            with categorized_path.open(newline="", encoding="utf-8") as fh:
+            with categorized_path.open(newline="", encoding="utf-8-sig") as fh:
                 [row] = list(csv.DictReader(fh))
             before = {
                 path: path.read_bytes()
@@ -580,7 +584,7 @@ class AgentCliTest(unittest.TestCase):
                 0,
             )
             with (root / "output" / "categorized.csv").open(
-                newline="", encoding="utf-8"
+                newline="", encoding="utf-8-sig"
             ) as fh:
                 [row] = list(csv.DictReader(fh))
             duplicate_batch = json.dumps(
@@ -613,7 +617,7 @@ class AgentCliTest(unittest.TestCase):
                 0,
             )
             with (root / "output" / "categorized.csv").open(
-                newline="", encoding="utf-8"
+                newline="", encoding="utf-8-sig"
             ) as fh:
                 [row] = list(csv.DictReader(fh))
 
@@ -640,7 +644,7 @@ class AgentCliTest(unittest.TestCase):
                 0,
             )
             categorized_path = root / "output" / "categorized.csv"
-            with categorized_path.open(newline="", encoding="utf-8") as fh:
+            with categorized_path.open(newline="", encoding="utf-8-sig") as fh:
                 [row] = list(csv.DictReader(fh))
             before = categorized_path.read_bytes()
 
@@ -686,7 +690,7 @@ class AgentCliTest(unittest.TestCase):
             categorized_path = root / "output" / "categorized.csv"
             review_path = root / "output" / "review_needed.csv"
             corrections_path = root / "corrections.csv"
-            with categorized_path.open(newline="", encoding="utf-8") as fh:
+            with categorized_path.open(newline="", encoding="utf-8-sig") as fh:
                 [row] = list(csv.DictReader(fh))
             before = {
                 path: path.read_bytes()
@@ -749,7 +753,7 @@ class AgentCliTest(unittest.TestCase):
                 0,
             )
             categorized_path = root / "output" / "categorized.csv"
-            with categorized_path.open(newline="", encoding="utf-8") as fh:
+            with categorized_path.open(newline="", encoding="utf-8-sig") as fh:
                 [row] = list(csv.DictReader(fh))
             self.assertEqual(row["notes"], "Rule-generated note")
 
@@ -765,7 +769,7 @@ class AgentCliTest(unittest.TestCase):
                 ["import", str(statement), "--replace", "--json"], cwd=root
             )
             self.assertEqual(omitted_rerun.returncode, 0, omitted_rerun.stderr)
-            with categorized_path.open(newline="", encoding="utf-8") as fh:
+            with categorized_path.open(newline="", encoding="utf-8-sig") as fh:
                 [unchanged] = list(csv.DictReader(fh))
             self.assertEqual(unchanged["notes"], "Rule-generated note")
 
@@ -778,14 +782,14 @@ class AgentCliTest(unittest.TestCase):
             )
 
             self.assertEqual(clear.returncode, 0, clear.stderr)
-            with categorized_path.open(newline="", encoding="utf-8") as fh:
+            with categorized_path.open(newline="", encoding="utf-8-sig") as fh:
                 [cleared] = list(csv.DictReader(fh))
             self.assertEqual(cleared["notes"], "")
             rerun = self._run_cli(
                 ["import", str(statement), "--replace", "--json"], cwd=root
             )
             self.assertEqual(rerun.returncode, 0, rerun.stderr)
-            with categorized_path.open(newline="", encoding="utf-8") as fh:
+            with categorized_path.open(newline="", encoding="utf-8-sig") as fh:
                 [reimported] = list(csv.DictReader(fh))
             self.assertEqual(reimported["notes"], "")
 
@@ -803,7 +807,7 @@ class AgentCliTest(unittest.TestCase):
                 0,
             )
             categorized_path = root / "output" / "categorized.csv"
-            with categorized_path.open(newline="", encoding="utf-8") as fh:
+            with categorized_path.open(newline="", encoding="utf-8-sig") as fh:
                 [row] = list(csv.DictReader(fh))
             before = categorized_path.read_bytes()
 
@@ -855,7 +859,7 @@ class AgentCliTest(unittest.TestCase):
                 0,
             )
             categorized_path = root / "output" / "categorized.csv"
-            with categorized_path.open(newline="", encoding="utf-8") as fh:
+            with categorized_path.open(newline="", encoding="utf-8-sig") as fh:
                 [row] = list(csv.DictReader(fh))
             row["flow_type"] = "expense"
             row["flow_source"] = "deterministic"
@@ -991,7 +995,7 @@ class AgentCliTest(unittest.TestCase):
                 0,
             )
             with (root / "output" / "categorized.csv").open(
-                newline="", encoding="utf-8"
+                newline="", encoding="utf-8-sig"
             ) as fh:
                 [row] = list(csv.DictReader(fh))
             transaction_id = row["transaction_id"]
@@ -1021,7 +1025,9 @@ class AgentCliTest(unittest.TestCase):
             )
 
             self.assertEqual(result.returncode, 0, result.stderr)
-            with (root / "corrections.csv").open(newline="", encoding="utf-8") as fh:
+            with (root / "corrections.csv").open(
+                newline="", encoding="utf-8-sig"
+            ) as fh:
                 [saved] = list(csv.DictReader(fh))
             self.assertEqual(saved["category"], "Groceries")
             self.assertEqual(saved["owner"], "Household")
@@ -1032,7 +1038,7 @@ class AgentCliTest(unittest.TestCase):
             )
             self.assertEqual(rerun.returncode, 0, rerun.stderr)
             with (root / "output" / "categorized.csv").open(
-                newline="", encoding="utf-8"
+                newline="", encoding="utf-8-sig"
             ) as fh:
                 [reimported] = list(csv.DictReader(fh))
             self.assertEqual(reimported["category"], "Groceries")
@@ -1052,7 +1058,7 @@ class AgentCliTest(unittest.TestCase):
                 0,
             )
             with (root / "output" / "categorized.csv").open(
-                newline="", encoding="utf-8"
+                newline="", encoding="utf-8-sig"
             ) as fh:
                 [row] = list(csv.DictReader(fh))
 
@@ -1071,7 +1077,7 @@ class AgentCliTest(unittest.TestCase):
 
             self.assertEqual(result.returncode, 0, result.stderr)
             with (root / "output" / "categorized.csv").open(
-                newline="", encoding="utf-8"
+                newline="", encoding="utf-8-sig"
             ) as fh:
                 [corrected] = list(csv.DictReader(fh))
             self.assertEqual(corrected["needs_review"], "true")

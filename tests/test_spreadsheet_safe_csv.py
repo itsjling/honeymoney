@@ -1,3 +1,4 @@
+import codecs
 import csv
 import json
 import os
@@ -117,14 +118,22 @@ class SpreadsheetSafeCsvTest(unittest.TestCase):
             ledger_text = documents[ledger_path]
             ledger_path.write_text(ledger_text, encoding="utf-8", newline="")
 
-            with ledger_path.open(newline="", encoding="utf-8") as handle:
+            ledger_bytes = ledger_path.read_bytes()
+            self.assertTrue(ledger_bytes.startswith(codecs.BOM_UTF8))
+            first_data_line = ledger_bytes.splitlines()[1]
+            self.assertEqual(first_data_line.count(b",-12.34,"), 3)
+            self.assertIn(b",0.25,true,", first_data_line)
+            self.assertNotIn(b'"-12.34"', first_data_line)
+            self.assertNotIn(b'"0.25"', first_data_line)
+
+            with ledger_path.open(newline="", encoding="utf-8-sig") as handle:
                 exported_rows = list(csv.DictReader(handle))
             with (ledger_path.parent / "review_needed.csv").open(
                 "w", newline="", encoding="utf-8"
             ) as handle:
                 handle.write(documents[ledger_path.parent / "review_needed.csv"])
             with (ledger_path.parent / "review_needed.csv").open(
-                newline="", encoding="utf-8"
+                newline="", encoding="utf-8-sig"
             ) as handle:
                 review_rows = list(csv.DictReader(handle))
 
@@ -158,7 +167,7 @@ class SpreadsheetSafeCsvTest(unittest.TestCase):
                 ledger_text,
             )
 
-    def test_legacy_unquoted_artifacts_preserve_literal_apostrophes_until_rewritten(
+    def test_legacy_quote_all_artifacts_preserve_literal_apostrophes_until_rewritten(
         self,
     ) -> None:
         legacy_row = self._ledger_row(
@@ -171,7 +180,11 @@ class SpreadsheetSafeCsvTest(unittest.TestCase):
             root = Path(tmp)
             ledger_path = root / "categorized.csv"
             with ledger_path.open("w", newline="", encoding="utf-8") as handle:
-                writer = csv.DictWriter(handle, fieldnames=CATEGORIZED_COLUMNS)
+                writer = csv.DictWriter(
+                    handle,
+                    fieldnames=CATEGORIZED_COLUMNS,
+                    quoting=csv.QUOTE_ALL,
+                )
                 writer.writeheader()
                 writer.writerow(legacy_row)
             ledger_before = ledger_path.read_bytes()
@@ -184,7 +197,7 @@ class SpreadsheetSafeCsvTest(unittest.TestCase):
             self.assertEqual(loaded["notes"], "'=LEGACY NOTE")
 
             migrated = ledger_output_documents(ledger_path, [loaded])[ledger_path]
-            self.assertTrue(migrated.startswith('"transaction_id","date"'))
+            self.assertTrue(migrated.startswith("\ufefftransaction_id,date"))
             ledger_path.write_text(migrated, encoding="utf-8", newline="")
             [reloaded] = read_ledger(ledger_path)
             self.assertEqual(reloaded["merchant"], "'=LEGACY MERCHANT")
@@ -192,7 +205,11 @@ class SpreadsheetSafeCsvTest(unittest.TestCase):
 
             corrections_path = root / "corrections.csv"
             with corrections_path.open("w", newline="", encoding="utf-8") as handle:
-                writer = csv.DictWriter(handle, fieldnames=CORRECTION_COLUMNS)
+                writer = csv.DictWriter(
+                    handle,
+                    fieldnames=CORRECTION_COLUMNS,
+                    quoting=csv.QUOTE_ALL,
+                )
                 writer.writeheader()
                 writer.writerow(
                     {
@@ -215,7 +232,7 @@ class SpreadsheetSafeCsvTest(unittest.TestCase):
             )
             self.assertEqual(loaded_corrections["txn_legacy"]["notes"], "''Legacy note")
             _, migrated_corrections, _ = prepare_corrections_document(config)
-            self.assertTrue(migrated_corrections.startswith('"transaction_id"'))
+            self.assertTrue(migrated_corrections.startswith("\ufefftransaction_id"))
             corrections_path.write_text(
                 migrated_corrections, encoding="utf-8", newline=""
             )
@@ -333,11 +350,8 @@ class SpreadsheetSafeCsvTest(unittest.TestCase):
             )
 
             self.assertEqual(merged, {"=txn_safe": correction})
-            with tempfile.NamedTemporaryFile(
-                mode="w+", newline="", encoding="utf-8"
-            ) as handle:
-                handle.write(content)
-                handle.seek(0)
+            corrections_path.write_text(content, encoding="utf-8", newline="")
+            with corrections_path.open(newline="", encoding="utf-8-sig") as handle:
                 [exported] = list(csv.DictReader(handle))
             self.assertEqual(exported["transaction_id"], "'=txn_safe")
             self.assertEqual(exported["category"], "'=Custom Category")
@@ -348,7 +362,6 @@ class SpreadsheetSafeCsvTest(unittest.TestCase):
             self.assertEqual(exported["confidence"], "0.75")
             self.assertEqual(exported["needs_review"], "true")
 
-            corrections_path.write_text(content, encoding="utf-8", newline="")
             self.assertEqual(load_corrections(config), {"=txn_safe": correction})
             _, rewritten, _ = prepare_corrections_document(config)
             self.assertEqual(rewritten, content)
@@ -367,10 +380,10 @@ class SpreadsheetSafeCsvTest(unittest.TestCase):
 
             self.assertEqual(result.returncode, 0, result.stderr)
             ledger_path = root / "output" / "categorized.csv"
-            with ledger_path.open(newline="", encoding="utf-8") as handle:
+            with ledger_path.open(newline="", encoding="utf-8-sig") as handle:
                 [ledger_row] = list(csv.DictReader(handle))
             with (root / "output" / "review_needed.csv").open(
-                newline="", encoding="utf-8"
+                newline="", encoding="utf-8-sig"
             ) as handle:
                 [review_row] = list(csv.DictReader(handle))
             self.assertEqual(ledger_row["merchant"], "'=SUM(A1:A2)")
@@ -397,7 +410,7 @@ class SpreadsheetSafeCsvTest(unittest.TestCase):
 
             self.assertEqual(repeated.returncode, 0, repeated.stderr)
             self.assertEqual(ledger_path.read_bytes(), before)
-            with ledger_path.open(newline="", encoding="utf-8") as handle:
+            with ledger_path.open(newline="", encoding="utf-8-sig") as handle:
                 [repeated_row] = list(csv.DictReader(handle))
             self.assertEqual(
                 repeated_row["transaction_id"], ledger_row["transaction_id"]
@@ -418,7 +431,7 @@ class SpreadsheetSafeCsvTest(unittest.TestCase):
             )
             self.assertEqual(imported.returncode, 0, imported.stderr)
             ledger_path = root / "output" / "categorized.csv"
-            with ledger_path.open(newline="", encoding="utf-8") as handle:
+            with ledger_path.open(newline="", encoding="utf-8-sig") as handle:
                 [imported_row] = list(csv.DictReader(handle))
 
             config_path = root / "config.json"
@@ -457,10 +470,10 @@ class SpreadsheetSafeCsvTest(unittest.TestCase):
                 root / "corrections.csv",
             ]
             before = {path: path.read_bytes() for path in artifact_paths}
-            with ledger_path.open(newline="", encoding="utf-8") as handle:
+            with ledger_path.open(newline="", encoding="utf-8-sig") as handle:
                 [ledger_row] = list(csv.DictReader(handle))
             with (root / "corrections.csv").open(
-                newline="", encoding="utf-8"
+                newline="", encoding="utf-8-sig"
             ) as handle:
                 [correction_row] = list(csv.DictReader(handle))
             self.assertEqual(ledger_row["category"], "'=Custom Category")
@@ -491,12 +504,12 @@ class SpreadsheetSafeCsvTest(unittest.TestCase):
                 input_text=f"{category_number}\n",
             )
             self.assertEqual(interactive.returncode, 0, interactive.stderr)
-            with ledger_path.open(newline="", encoding="utf-8") as handle:
+            with ledger_path.open(newline="", encoding="utf-8-sig") as handle:
                 rows_by_merchant = {
                     row["merchant"]: row for row in csv.DictReader(handle)
                 }
             with (root / "corrections.csv").open(
-                newline="", encoding="utf-8"
+                newline="", encoding="utf-8-sig"
             ) as handle:
                 correction_rows = list(csv.DictReader(handle))
             self.assertEqual(

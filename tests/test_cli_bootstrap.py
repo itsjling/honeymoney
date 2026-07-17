@@ -245,7 +245,7 @@ class CliBootstrapTest(unittest.TestCase):
 
             self.assertEqual(run_result.returncode, 0, run_result.stderr)
             with (root / "output" / "categorized.csv").open(
-                newline="", encoding="utf-8"
+                newline="", encoding="utf-8-sig"
             ) as fh:
                 [row] = list(csv.DictReader(fh))
             self.assertEqual(row["merchant"], "PARKNSHOP")
@@ -302,7 +302,7 @@ class CliBootstrapTest(unittest.TestCase):
                 import_result.stdout,
             )
             with (root / "output" / "categorized.csv").open(
-                newline="", encoding="utf-8"
+                newline="", encoding="utf-8-sig"
             ) as fh:
                 [row] = list(csv.DictReader(fh))
             self.assertEqual(row["merchant"], "PARKNSHOP")
@@ -416,13 +416,13 @@ class CliBootstrapTest(unittest.TestCase):
             self.assertTrue((output_dir / "review_needed.csv").exists())
             self.assertTrue((output_dir / "import_report.json").exists())
 
-            with categorized_path.open(newline="", encoding="utf-8") as fh:
+            with categorized_path.open(newline="", encoding="utf-8-sig") as fh:
                 reader = csv.reader(fh)
                 self.assertEqual(next(reader), EXPECTED_CATEGORIZED_COLUMNS)
                 self.assertEqual(list(reader), [])
 
             with (output_dir / "review_needed.csv").open(
-                newline="", encoding="utf-8"
+                newline="", encoding="utf-8-sig"
             ) as fh:
                 reader = csv.reader(fh)
                 review_header = next(reader)
@@ -530,7 +530,7 @@ class CliBootstrapTest(unittest.TestCase):
 
             self.assertEqual(result.returncode, 0, result.stderr)
 
-            with categorized_path.open(newline="", encoding="utf-8") as fh:
+            with categorized_path.open(newline="", encoding="utf-8-sig") as fh:
                 rows = list(csv.DictReader(fh))
 
             self.assertEqual(len(rows), 3)
@@ -677,7 +677,7 @@ class CliBootstrapTest(unittest.TestCase):
 
             self.assertEqual(result.returncode, 0, result.stderr)
             with (output_dir / "categorized.csv").open(
-                newline="", encoding="utf-8"
+                newline="", encoding="utf-8-sig"
             ) as fh:
                 [row] = list(csv.DictReader(fh))
             report = json.loads((output_dir / "import_report.json").read_text())
@@ -915,7 +915,7 @@ class CliBootstrapTest(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn("Select profile for ambiguous.csv", result.stdout)
             with (output_dir / "categorized.csv").open(
-                newline="", encoding="utf-8"
+                newline="", encoding="utf-8-sig"
             ) as fh:
                 [row] = list(csv.DictReader(fh))
             self.assertEqual(row["account_id"], "second")
@@ -1096,7 +1096,7 @@ class CliBootstrapTest(unittest.TestCase):
 
             self.assertEqual(result.returncode, 0, result.stderr)
             with (output_dir / "categorized.csv").open(
-                newline="", encoding="utf-8"
+                newline="", encoding="utf-8-sig"
             ) as fh:
                 [row] = list(csv.DictReader(fh))
             self.assertEqual(row["account_id"], "mox")
@@ -1175,7 +1175,7 @@ class CliBootstrapTest(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
 
             with (output_dir / "categorized.csv").open(
-                newline="", encoding="utf-8"
+                newline="", encoding="utf-8-sig"
             ) as fh:
                 [row] = list(csv.DictReader(fh))
 
@@ -1262,7 +1262,7 @@ class CliBootstrapTest(unittest.TestCase):
 
                     self.assertEqual(result.returncode, 0, result.stderr)
                     with (output_dir / "categorized.csv").open(
-                        newline="", encoding="utf-8"
+                        newline="", encoding="utf-8-sig"
                     ) as fh:
                         [row] = list(csv.DictReader(fh))
                     report = json.loads((output_dir / "import_report.json").read_text())
@@ -1359,7 +1359,7 @@ class CliBootstrapTest(unittest.TestCase):
 
             self.assertEqual(result.returncode, 0, result.stderr)
             with (output_dir / "categorized.csv").open(
-                newline="", encoding="utf-8"
+                newline="", encoding="utf-8-sig"
             ) as fh:
                 rows = list(csv.DictReader(fh))
 
@@ -1443,7 +1443,7 @@ class CliBootstrapTest(unittest.TestCase):
 
             self.assertEqual(result.returncode, 0, result.stderr)
             with (output_dir / "categorized.csv").open(
-                newline="", encoding="utf-8"
+                newline="", encoding="utf-8-sig"
             ) as fh:
                 [row] = list(csv.DictReader(fh))
 
@@ -1528,7 +1528,7 @@ class CliBootstrapTest(unittest.TestCase):
 
             self.assertEqual(result.returncode, 0, result.stderr)
             with (output_dir / "categorized.csv").open(
-                newline="", encoding="utf-8"
+                newline="", encoding="utf-8-sig"
             ) as fh:
                 [row] = list(csv.DictReader(fh))
 
@@ -1608,7 +1608,7 @@ class CliBootstrapTest(unittest.TestCase):
 
             self.assertEqual(result.returncode, 0, result.stderr)
             with (output_dir / "categorized.csv").open(
-                newline="", encoding="utf-8"
+                newline="", encoding="utf-8-sig"
             ) as fh:
                 [row] = list(csv.DictReader(fh))
 
@@ -1688,7 +1688,7 @@ class CliBootstrapTest(unittest.TestCase):
 
             self.assertEqual(result.returncode, 0, result.stderr)
             with (output_dir / "categorized.csv").open(
-                newline="", encoding="utf-8"
+                newline="", encoding="utf-8-sig"
             ) as fh:
                 [row] = list(csv.DictReader(fh))
 
@@ -1815,7 +1815,7 @@ class CliBootstrapTest(unittest.TestCase):
 
             self.assertEqual(result.returncode, 0, result.stderr)
             with (output_dir / "categorized.csv").open(
-                newline="", encoding="utf-8"
+                newline="", encoding="utf-8-sig"
             ) as fh:
                 rows = list(csv.DictReader(fh))
 
@@ -1921,7 +1921,7 @@ class CliBootstrapTest(unittest.TestCase):
 
             self.assertEqual(result.returncode, 0, result.stderr)
             with (output_dir / "categorized.csv").open(
-                newline="", encoding="utf-8"
+                newline="", encoding="utf-8-sig"
             ) as fh:
                 rows = list(csv.DictReader(fh))
 
@@ -2024,7 +2024,7 @@ class CliBootstrapTest(unittest.TestCase):
 
             self.assertEqual(result.returncode, 0, result.stderr)
             with (output_dir / "categorized.csv").open(
-                newline="", encoding="utf-8"
+                newline="", encoding="utf-8-sig"
             ) as fh:
                 [row] = list(csv.DictReader(fh))
 
@@ -2122,7 +2122,7 @@ class CliBootstrapTest(unittest.TestCase):
 
             self.assertEqual(result.returncode, 0, result.stderr)
             with (output_dir / "categorized.csv").open(
-                newline="", encoding="utf-8"
+                newline="", encoding="utf-8-sig"
             ) as fh:
                 [row] = list(csv.DictReader(fh))
 
@@ -2252,7 +2252,7 @@ class CliBootstrapTest(unittest.TestCase):
 
             self.assertEqual(result.returncode, 0, result.stderr)
             with (output_dir / "categorized.csv").open(
-                newline="", encoding="utf-8"
+                newline="", encoding="utf-8-sig"
             ) as fh:
                 rows = list(csv.DictReader(fh))
 
@@ -2559,7 +2559,7 @@ class CliBootstrapTest(unittest.TestCase):
 
             self.assertEqual(result.returncode, 0, result.stderr)
             with (output_dir / "categorized.csv").open(
-                newline="", encoding="utf-8"
+                newline="", encoding="utf-8-sig"
             ) as fh:
                 [row] = list(csv.DictReader(fh))
 
@@ -2757,7 +2757,7 @@ class CliBootstrapTest(unittest.TestCase):
             )
             self.assertEqual(first_result.returncode, 0, first_result.stderr)
             with (first_output_dir / "categorized.csv").open(
-                newline="", encoding="utf-8"
+                newline="", encoding="utf-8-sig"
             ) as fh:
                 [first_row] = list(csv.DictReader(fh))
 
@@ -2799,11 +2799,11 @@ class CliBootstrapTest(unittest.TestCase):
 
             self.assertEqual(second_result.returncode, 0, second_result.stderr)
             with (second_output_dir / "categorized.csv").open(
-                newline="", encoding="utf-8"
+                newline="", encoding="utf-8-sig"
             ) as fh:
                 [corrected_row] = list(csv.DictReader(fh))
             with (second_output_dir / "review_needed.csv").open(
-                newline="", encoding="utf-8"
+                newline="", encoding="utf-8-sig"
             ) as fh:
                 review_rows = list(csv.DictReader(fh))
 
@@ -2880,7 +2880,7 @@ class CliBootstrapTest(unittest.TestCase):
             )
             self.assertEqual(first_result.returncode, 0, first_result.stderr)
             with (first_output_dir / "categorized.csv").open(
-                newline="", encoding="utf-8"
+                newline="", encoding="utf-8-sig"
             ) as fh:
                 [first_row] = list(csv.DictReader(fh))
 
@@ -2921,11 +2921,11 @@ class CliBootstrapTest(unittest.TestCase):
             )
             self.assertEqual(second_result.returncode, 0, second_result.stderr)
             with (second_output_dir / "categorized.csv").open(
-                newline="", encoding="utf-8"
+                newline="", encoding="utf-8-sig"
             ) as fh:
                 [corrected_row] = list(csv.DictReader(fh))
             with (second_output_dir / "review_needed.csv").open(
-                newline="", encoding="utf-8"
+                newline="", encoding="utf-8-sig"
             ) as fh:
                 review_rows = list(csv.DictReader(fh))
 
@@ -3161,11 +3161,11 @@ class CliBootstrapTest(unittest.TestCase):
 
             self.assertEqual(result.returncode, 0, result.stderr)
             with (output_dir / "categorized.csv").open(
-                newline="", encoding="utf-8"
+                newline="", encoding="utf-8-sig"
             ) as fh:
                 rows = list(csv.DictReader(fh))
             with (output_dir / "review_needed.csv").open(
-                newline="", encoding="utf-8"
+                newline="", encoding="utf-8-sig"
             ) as fh:
                 review_rows = list(csv.DictReader(fh))
 
@@ -3280,7 +3280,7 @@ class CliBootstrapTest(unittest.TestCase):
 
             self.assertEqual(result.returncode, 0, result.stderr)
             with (output_dir / "categorized.csv").open(
-                newline="", encoding="utf-8"
+                newline="", encoding="utf-8-sig"
             ) as fh:
                 rows = list(csv.DictReader(fh))
 
@@ -3383,7 +3383,7 @@ class CliBootstrapTest(unittest.TestCase):
 
             self.assertEqual(result.returncode, 0, result.stderr)
             with (output_dir / "categorized.csv").open(
-                newline="", encoding="utf-8"
+                newline="", encoding="utf-8-sig"
             ) as fh:
                 rows = list(csv.DictReader(fh))
 
@@ -3474,7 +3474,7 @@ class CliBootstrapTest(unittest.TestCase):
 
             self.assertEqual(result.returncode, 0, result.stderr)
             with (output_dir / "categorized.csv").open(
-                newline="", encoding="utf-8"
+                newline="", encoding="utf-8-sig"
             ) as fh:
                 [row] = list(csv.DictReader(fh))
             report = json.loads((output_dir / "import_report.json").read_text())
@@ -3564,7 +3564,7 @@ class CliBootstrapTest(unittest.TestCase):
 
             self.assertEqual(result.returncode, 0, result.stderr)
             with (output_dir / "categorized.csv").open(
-                newline="", encoding="utf-8"
+                newline="", encoding="utf-8-sig"
             ) as fh:
                 [row] = list(csv.DictReader(fh))
             report = json.loads((output_dir / "import_report.json").read_text())
@@ -3708,9 +3708,9 @@ class CliBootstrapTest(unittest.TestCase):
             review_text = review_path.read_text(encoding="utf-8")
             report_path = output.parent / "import_report.json"
             report_text = report_path.read_text(encoding="utf-8")
-            with output.open(newline="", encoding="utf-8") as fh:
+            with output.open(newline="", encoding="utf-8-sig") as fh:
                 rows = {row["merchant"]: row for row in csv.DictReader(fh)}
-            with review_path.open(newline="", encoding="utf-8") as fh:
+            with review_path.open(newline="", encoding="utf-8-sig") as fh:
                 review_rows = {row["merchant"]: row for row in csv.DictReader(fh)}
             report = json.loads(report_text)
 
@@ -3831,7 +3831,7 @@ class CliBootstrapTest(unittest.TestCase):
 
             self.assertEqual(result.returncode, 0, result.stderr)
             with (output_dir / "categorized.csv").open(
-                newline="", encoding="utf-8"
+                newline="", encoding="utf-8-sig"
             ) as fh:
                 [row] = list(csv.DictReader(fh))
             report = json.loads((output_dir / "import_report.json").read_text())
@@ -3878,7 +3878,7 @@ class CliBootstrapTest(unittest.TestCase):
 
             self.assertEqual(result.returncode, 0, result.stderr)
             with (output_dir / "categorized.csv").open(
-                newline="", encoding="utf-8"
+                newline="", encoding="utf-8-sig"
             ) as fh:
                 rows = list(csv.DictReader(fh))
             report = json.loads((output_dir / "import_report.json").read_text())
@@ -3927,7 +3927,7 @@ class CliBootstrapTest(unittest.TestCase):
 
             self.assertEqual(result.returncode, 0, result.stderr)
             with (output_dir / "categorized.csv").open(
-                newline="", encoding="utf-8"
+                newline="", encoding="utf-8-sig"
             ) as fh:
                 rows = list(csv.DictReader(fh))
             report = json.loads((output_dir / "import_report.json").read_text())
@@ -4056,7 +4056,7 @@ def open(path):
 
             self.assertEqual(result.returncode, 0, result.stderr)
             with (output_dir / "categorized.csv").open(
-                newline="", encoding="utf-8"
+                newline="", encoding="utf-8-sig"
             ) as fh:
                 [row] = list(csv.DictReader(fh))
             report = json.loads((output_dir / "import_report.json").read_text())
@@ -4206,7 +4206,7 @@ def open(path):
 
             self.assertEqual(result.returncode, 0, result.stderr)
             with (output_dir / "categorized.csv").open(
-                newline="", encoding="utf-8"
+                newline="", encoding="utf-8-sig"
             ) as fh:
                 [row] = list(csv.DictReader(fh))
             report = json.loads((output_dir / "import_report.json").read_text())
@@ -4345,7 +4345,7 @@ def open(path):
 
             self.assertEqual(result.returncode, 0, result.stderr)
             with (output_dir / "categorized.csv").open(
-                newline="", encoding="utf-8"
+                newline="", encoding="utf-8-sig"
             ) as fh:
                 rows = list(csv.DictReader(fh))
 
@@ -4475,7 +4475,7 @@ def open(path):
 
             self.assertEqual(result.returncode, 0, result.stderr)
             with (output_dir / "categorized.csv").open(
-                newline="", encoding="utf-8"
+                newline="", encoding="utf-8-sig"
             ) as fh:
                 rows = list(csv.DictReader(fh))
 
@@ -4616,7 +4616,7 @@ def open(path):
 
             self.assertEqual(result.returncode, 0, result.stderr)
             with (output_dir / "categorized.csv").open(
-                newline="", encoding="utf-8"
+                newline="", encoding="utf-8-sig"
             ) as fh:
                 rows = list(csv.DictReader(fh))
 
@@ -4774,7 +4774,7 @@ def open(path):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertNotIn("Could not get FontBBox", result.stderr)
             with (output_dir / "categorized.csv").open(
-                newline="", encoding="utf-8"
+                newline="", encoding="utf-8-sig"
             ) as fh:
                 [row] = list(csv.DictReader(fh))
 
@@ -4963,7 +4963,7 @@ def open(path):
 
                     self.assertEqual(result.returncode, 0, result.stderr)
                     with (output_dir / "categorized.csv").open(
-                        newline="", encoding="utf-8"
+                        newline="", encoding="utf-8-sig"
                     ) as fh:
                         rows = list(csv.DictReader(fh))
 
@@ -5132,7 +5132,7 @@ def open(path):
 
             self.assertEqual(result.returncode, 0, result.stderr)
             with (output_dir / "categorized.csv").open(
-                newline="", encoding="utf-8"
+                newline="", encoding="utf-8-sig"
             ) as fh:
                 rows = list(csv.DictReader(fh))
 
@@ -5265,7 +5265,7 @@ def open(path):
 
             self.assertEqual(result.returncode, 0, result.stderr)
             with (output_dir / "categorized.csv").open(
-                newline="", encoding="utf-8"
+                newline="", encoding="utf-8-sig"
             ) as fh:
                 rows = list(csv.DictReader(fh))
             report = json.loads((output_dir / "import_report.json").read_text())
@@ -5670,7 +5670,7 @@ def open(path):
             )
             self.assertEqual(first_result.returncode, 0, first_result.stderr)
             with (first_output_dir / "categorized.csv").open(
-                newline="", encoding="utf-8"
+                newline="", encoding="utf-8-sig"
             ) as fh:
                 first_rows = list(csv.DictReader(fh))
             manual_id = next(
@@ -5716,11 +5716,11 @@ def open(path):
 
             self.assertEqual(final_result.returncode, 0, final_result.stderr)
             with (final_output_dir / "categorized.csv").open(
-                newline="", encoding="utf-8"
+                newline="", encoding="utf-8-sig"
             ) as fh:
                 rows = list(csv.DictReader(fh))
             with (final_output_dir / "review_needed.csv").open(
-                newline="", encoding="utf-8"
+                newline="", encoding="utf-8-sig"
             ) as fh:
                 review_rows = list(csv.DictReader(fh))
             report = json.loads((final_output_dir / "import_report.json").read_text())
@@ -5787,7 +5787,9 @@ def open(path):
         )
 
         self.assertEqual(result.returncode, 0, result.stderr)
-        with (output_dir / "categorized.csv").open(newline="", encoding="utf-8") as fh:
+        with (output_dir / "categorized.csv").open(
+            newline="", encoding="utf-8-sig"
+        ) as fh:
             [row] = list(csv.DictReader(fh))
         return row["transaction_id"]
 

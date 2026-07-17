@@ -334,7 +334,7 @@ def open(path):
 
             self.assertEqual(recovered.returncode, 0, recovered.stderr)
             with (root / "output" / "categorized.csv").open(
-                newline="", encoding="utf-8"
+                newline="", encoding="utf-8-sig"
             ) as fh:
                 [row] = list(csv.DictReader(fh))
             self.assertEqual(row["merchant"], "UPDATED MARKET")
@@ -387,14 +387,16 @@ def open(path):
             self.assertIn("PARKNSHOP", result.stdout)
             self.assertNotIn("(may.csv)", result.stdout)
             with (root / "output" / "categorized.csv").open(
-                newline="", encoding="utf-8"
+                newline="", encoding="utf-8-sig"
             ) as fh:
                 [row] = list(csv.DictReader(fh))
             self.assertEqual(row["category"], "Groceries")
             self.assertEqual(row["needs_review"], "false")
             self.assertIn("manual_correction", row["flags"])
 
-            with (root / "corrections.csv").open(newline="", encoding="utf-8") as fh:
+            with (root / "corrections.csv").open(
+                newline="", encoding="utf-8-sig"
+            ) as fh:
                 [correction] = list(csv.DictReader(fh))
             self.assertEqual(correction["transaction_id"], row["transaction_id"])
             self.assertEqual(correction["category"], "Groceries")
@@ -405,7 +407,7 @@ def open(path):
             )
             self.assertEqual(rerun.returncode, 0, rerun.stderr)
             with (root / "output" / "categorized.csv").open(
-                newline="", encoding="utf-8"
+                newline="", encoding="utf-8-sig"
             ) as fh:
                 [row] = list(csv.DictReader(fh))
             self.assertEqual(row["category"], "Groceries")
@@ -429,7 +431,7 @@ def open(path):
 
             self.assertEqual(result.returncode, 0, result.stderr)
             with (root / "output" / "categorized.csv").open(
-                newline="", encoding="utf-8"
+                newline="", encoding="utf-8-sig"
             ) as fh:
                 rows = list(csv.DictReader(fh))
             self.assertEqual([row["category"] for row in rows], ["Unknown"] * 3)
@@ -509,7 +511,7 @@ def open(path):
 
             self.assertEqual(replacement.returncode, 0, replacement.stderr)
             with (root / "output" / "categorized.csv").open(
-                newline="", encoding="utf-8"
+                newline="", encoding="utf-8-sig"
             ) as fh:
                 rows = list(csv.DictReader(fh))
             self.assertEqual([row["merchant"] for row in rows], ["PARKNSHOP"])
@@ -623,7 +625,7 @@ def open(path):
 
             self.assertEqual(replacement.returncode, 0, replacement.stderr)
             with (root / "output" / "categorized.csv").open(
-                newline="", encoding="utf-8"
+                newline="", encoding="utf-8-sig"
             ) as fh:
                 rows = {row["source_file"]: row for row in csv.DictReader(fh)}
             self.assertEqual(set(rows), {"statement.pdf", "may.csv"})
@@ -653,7 +655,7 @@ def open(path):
 
             self.assertEqual(replacement.returncode, 0, replacement.stderr)
             with (root / "output" / "categorized.csv").open(
-                newline="", encoding="utf-8"
+                newline="", encoding="utf-8-sig"
             ) as fh:
                 self.assertEqual(list(csv.DictReader(fh)), [])
             report = json.loads(
@@ -683,7 +685,7 @@ def open(path):
 
             self.assertEqual(reset.returncode, 0, reset.stderr)
             with (root / "output" / "categorized.csv").open(
-                newline="", encoding="utf-8"
+                newline="", encoding="utf-8-sig"
             ) as fh:
                 [row] = list(csv.DictReader(fh))
             self.assertEqual(row["category"], "Unknown")
@@ -713,11 +715,13 @@ def open(path):
 
             self.assertEqual(reset.returncode, 0, reset.stderr)
             with (root / "output" / "categorized.csv").open(
-                newline="", encoding="utf-8"
+                newline="", encoding="utf-8-sig"
             ) as fh:
                 [row] = list(csv.DictReader(fh))
             self.assertEqual(row["category"], "Dining")
-            with (root / "corrections.csv").open(newline="", encoding="utf-8") as fh:
+            with (root / "corrections.csv").open(
+                newline="", encoding="utf-8-sig"
+            ) as fh:
                 [correction] = list(csv.DictReader(fh))
             self.assertEqual(correction["transaction_id"], row["transaction_id"])
             self.assertEqual(correction["category"], "Dining")
@@ -790,7 +794,7 @@ def open(path):
         with tempfile.TemporaryDirectory() as tmp:
             root, fake_modules, statement, _ = self._seed_pdf_replacement_workspace(tmp)
             categorized = root / "output" / "categorized.csv"
-            with categorized.open(newline="", encoding="utf-8") as fh:
+            with categorized.open(newline="", encoding="utf-8-sig") as fh:
                 [row] = list(csv.DictReader(fh))
             corrected = self._run_cli(
                 ["correct", "--file", "-", "--json"],
@@ -852,7 +856,7 @@ def open(path):
             )
             self.assertEqual(imported.returncode, 0, imported.stderr)
             categorized = root / "output" / "categorized.csv"
-            with categorized.open(newline="", encoding="utf-8") as fh:
+            with categorized.open(newline="", encoding="utf-8-sig") as fh:
                 rows = {row["source_file"]: row for row in csv.DictReader(fh)}
             corrected = self._run_cli(
                 ["correct", "--file", "-", "--json"],
@@ -890,12 +894,14 @@ def open(path):
             )
 
             self.assertEqual(reset.returncode, 0, reset.stderr)
-            with categorized.open(newline="", encoding="utf-8") as fh:
+            with categorized.open(newline="", encoding="utf-8-sig") as fh:
                 reset_rows = {row["source_file"]: row for row in csv.DictReader(fh)}
             self.assertEqual(reset_rows["statement.pdf"]["category"], "Groceries")
             self.assertEqual(reset_rows["may.csv"]["merchant"], "UPDATED SHOP")
             self.assertEqual(reset_rows["may.csv"]["category"], "Unknown")
-            with (root / "corrections.csv").open(newline="", encoding="utf-8") as fh:
+            with (root / "corrections.csv").open(
+                newline="", encoding="utf-8-sig"
+            ) as fh:
                 correction_ids = {row["transaction_id"] for row in csv.DictReader(fh)}
             self.assertIn(pdf_id, correction_ids)
             self.assertNotIn(csv_id, correction_ids)
@@ -949,7 +955,7 @@ def open(path):
                 "Review complete: 1 updated, 0 still need review", review_result.stdout
             )
             with (root / "output" / "categorized.csv").open(
-                newline="", encoding="utf-8"
+                newline="", encoding="utf-8-sig"
             ) as fh:
                 [row] = list(csv.DictReader(fh))
             self.assertEqual(row["category"], "Groceries")
@@ -958,12 +964,14 @@ def open(path):
             self.assertIn("manual_correction", row["flags"])
 
             with (root / "output" / "review_needed.csv").open(
-                newline="", encoding="utf-8"
+                newline="", encoding="utf-8-sig"
             ) as fh:
                 review_rows = list(csv.DictReader(fh))
             self.assertEqual(review_rows, [])
 
-            with (root / "corrections.csv").open(newline="", encoding="utf-8") as fh:
+            with (root / "corrections.csv").open(
+                newline="", encoding="utf-8-sig"
+            ) as fh:
                 [correction] = list(csv.DictReader(fh))
             self.assertEqual(correction["transaction_id"], row["transaction_id"])
             self.assertEqual(correction["category"], "Groceries")
@@ -984,7 +992,7 @@ def open(path):
                 )
                 self.assertEqual(imported.returncode, 0, imported.stderr)
                 with (root / "output" / "categorized.csv").open(
-                    newline="", encoding="utf-8"
+                    newline="", encoding="utf-8-sig"
                 ) as fh:
                     [row] = list(csv.DictReader(fh))
                 before = self._review_artifact_bytes(root)
@@ -1068,7 +1076,7 @@ def open(path):
                 review_result.stdout,
             )
             with (root / "output" / "categorized.csv").open(
-                newline="", encoding="utf-8"
+                newline="", encoding="utf-8-sig"
             ) as fh:
                 rows = {row["merchant"]: row for row in csv.DictReader(fh)}
             self.assertEqual(rows["GENERAL STORE"]["category"], "Groceries")
@@ -1078,7 +1086,9 @@ def open(path):
             self.assertEqual(rows["UNSORTED PURCHASE"]["category"], "Unknown")
             self.assertEqual(rows["UNSORTED PURCHASE"]["needs_review"], "true")
 
-            with (root / "corrections.csv").open(newline="", encoding="utf-8") as fh:
+            with (root / "corrections.csv").open(
+                newline="", encoding="utf-8-sig"
+            ) as fh:
                 corrections = list(csv.DictReader(fh))
             self.assertEqual(
                 corrections[-1]["transaction_id"],
@@ -1115,7 +1125,7 @@ def open(path):
             self.assertIn("PENDING PURCHASE", review_result.stdout)
             self.assertNotIn("REVIEWED PURCHASE", review_result.stdout)
             with (root / "output" / "categorized.csv").open(
-                newline="", encoding="utf-8"
+                newline="", encoding="utf-8-sig"
             ) as fh:
                 rows = {row["merchant"]: row for row in csv.DictReader(fh)}
             self.assertEqual(rows["REVIEWED PURCHASE"]["category"], "Other")
@@ -1222,7 +1232,7 @@ def open(path):
             )
             self.assertEqual(import_result.returncode, 0, import_result.stderr)
             ledger_path = root / "output" / "categorized.csv"
-            with ledger_path.open(newline="", encoding="utf-8") as fh:
+            with ledger_path.open(newline="", encoding="utf-8-sig") as fh:
                 rows = list(csv.DictReader(fh))
                 fieldnames = list(rows[0])
             rows[1]["account_id"] = "secondary_bank"
@@ -1233,7 +1243,7 @@ def open(path):
                 writer.writerows(rows)
             reconcile_result = self._run_cli(["reconcile"], cwd=root)
             self.assertEqual(reconcile_result.returncode, 0, reconcile_result.stderr)
-            with ledger_path.open(newline="", encoding="utf-8") as fh:
+            with ledger_path.open(newline="", encoding="utf-8-sig") as fh:
                 rows = list(csv.DictReader(fh))
                 fieldnames = list(rows[0])
             rows[2]["flow_type"] = "unresolved"
@@ -1263,7 +1273,7 @@ def open(path):
             )
 
             self.assertEqual(review_result.returncode, 0, review_result.stderr)
-            with ledger_path.open(newline="", encoding="utf-8") as fh:
+            with ledger_path.open(newline="", encoding="utf-8-sig") as fh:
                 after = {row["merchant"]: row for row in csv.DictReader(fh)}
             self.assertEqual(after["INCOMING TRANSFER"]["category"], "Income")
             self.assertEqual(after["INCOMING TRANSFER"]["flow_type"], "income")
@@ -1282,7 +1292,9 @@ def open(path):
             )
             self.assertEqual(after["OUTGOING TRANSFER"]["paired_transaction_id"], "")
             self.assertEqual(after["UNRELATED PURCHASE"], before["UNRELATED PURCHASE"])
-            with (root / "corrections.csv").open(newline="", encoding="utf-8") as fh:
+            with (root / "corrections.csv").open(
+                newline="", encoding="utf-8-sig"
+            ) as fh:
                 corrections = list(csv.DictReader(fh))
             outgoing_id = after["OUTGOING TRANSFER"]["transaction_id"]
             self.assertEqual(
@@ -1391,7 +1403,7 @@ def open(path):
 
             self.assertEqual(result.returncode, 0, result.stderr)
             with (root / "output" / "categorized.csv").open(
-                newline="", encoding="utf-8"
+                newline="", encoding="utf-8-sig"
             ) as fh:
                 rows = list(csv.DictReader(fh))
             merchants = {row["merchant"] for row in rows}
@@ -1419,7 +1431,7 @@ def open(path):
 
             self.assertEqual(result.returncode, 0, result.stderr)
             with (root / "output" / "categorized.csv").open(
-                newline="", encoding="utf-8"
+                newline="", encoding="utf-8-sig"
             ) as fh:
                 rows = list(csv.DictReader(fh))
             self.assertEqual([row["merchant"] for row in rows], ["PARKNSHOP"])
@@ -1562,7 +1574,7 @@ def open(path):
 
             self.assertEqual(result.returncode, 0, result.stderr)
             with (output_dir / "categorized.csv").open(
-                newline="", encoding="utf-8"
+                newline="", encoding="utf-8-sig"
             ) as fh:
                 rows = {row["merchant"]: row for row in csv.DictReader(fh)}
             self.assertNotIn("PREVIOUS BALANCE", rows)
@@ -1589,7 +1601,7 @@ def open(path):
 
             self.assertIn("Ledger now has 2 records", result.stdout)
             with (root / "output" / "categorized.csv").open(
-                newline="", encoding="utf-8"
+                newline="", encoding="utf-8-sig"
             ) as fh:
                 rows = list(csv.DictReader(fh))
             self.assertEqual(len(rows), 2)
@@ -1618,7 +1630,7 @@ def open(path):
 
             self.assertEqual(result.returncode, 0, result.stderr)
             with (root / "output" / "categorized.csv").open(
-                newline="", encoding="utf-8"
+                newline="", encoding="utf-8-sig"
             ) as fh:
                 [row] = list(csv.DictReader(fh))
             self.assertEqual(row["account_id"], "mox_credit_card")

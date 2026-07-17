@@ -5,10 +5,12 @@ artifacts—`categorized.csv`, `review_needed.csv`, and `corrections.csv`—appl
 display-only safety encoding to text cells so spreadsheet applications do not
 interpret statement-controlled text as formulas.
 
-New-format artifacts quote every header and data cell. The fully quoted header
-is the format marker: standard CSV readers still return the same public column
-names, while Honeymoney uses it to distinguish its reversible encoding from
-older unquoted artifacts.
+New-format artifacts start with a UTF-8 byte-order mark (BOM). Honeymoney uses
+that signature as required safe-format metadata to distinguish its reversible
+encoding from older artifacts. Data otherwise uses normal minimal CSV quoting,
+so numeric cells remain unquoted unless CSV syntax itself requires quoting.
+Consumers should read these artifacts as `utf-8-sig` (or otherwise discard the
+BOM before parsing the header).
 
 ## Reversible text encoding
 
@@ -34,11 +36,19 @@ instead of accumulating prefixes. This decoding applies only at Honeymoney's
 own public-artifact read boundaries; statement input is never rewritten before
 normalization, transaction identity, matching, or accounting logic.
 
-Legacy artifacts with an unquoted header are read without decoding. Literal
-values such as `'=LEGACY` and `''LEGACY` therefore retain their apostrophes.
-The file remains byte-for-byte untouched when read and is migrated to the
-fully quoted safe format only when the normal import, correction, or reconcile
-workflow next rewrites it.
+Artifacts without the BOM are read as legacy files without decoding, regardless
+of whether their CSV cells are minimally quoted or quote-all. Literal values
+such as `'=LEGACY` and `''LEGACY` therefore retain their apostrophes. The file
+remains byte-for-byte untouched when read and is migrated to the signed safe
+format only when the normal import, correction, or reconcile workflow next
+rewrites it.
+
+The BOM must survive any external edit or reserialization. An external tool
+that strips it has removed the only unambiguous safe-format discriminator, so
+the resulting file is outside Honeymoney's supported reversible round trip and
+is conservatively treated as legacy. Because an unsigned safe file is
+indistinguishable from a legitimate legacy file, Honeymoney cannot reliably
+reject every such case without risking rejection of valid legacy data.
 
 ## Canonical non-text columns
 

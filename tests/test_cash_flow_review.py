@@ -44,7 +44,7 @@ class CashFlowReviewTest(unittest.TestCase):
 
     def _ledger(self, root: Path) -> list[dict[str, str]]:
         with (root / "output" / "categorized.csv").open(
-            newline="", encoding="utf-8"
+            newline="", encoding="utf-8-sig"
         ) as fh:
             return list(csv.DictReader(fh))
 
@@ -158,7 +158,9 @@ class CashFlowReviewTest(unittest.TestCase):
                     payload["data"]["transaction_ids"], [row["transaction_id"]]
                 )
 
-            with (root / "corrections.csv").open(newline="", encoding="utf-8") as fh:
+            with (root / "corrections.csv").open(
+                newline="", encoding="utf-8-sig"
+            ) as fh:
                 corrections = list(csv.DictReader(fh))
             self.assertEqual(len(corrections), 1)
             self.assertEqual(corrections[0]["category"], "Income")
