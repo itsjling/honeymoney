@@ -301,6 +301,16 @@ class ConfigCliTest(unittest.TestCase):
                 {"ollama": {"timeout_seconds": float("inf")}},
                 "finite number greater than 0",
             ),
+            (
+                "ollama remote endpoint",
+                {"ollama": {"url": "http://192.0.2.10:11434/api/generate"}},
+                "local loopback",
+            ),
+            (
+                "ollama endpoint credentials",
+                {"ollama": {"url": "http://user:secret@localhost:11434/api/generate"}},
+                "must not include credentials",
+            ),
             ("ollama think", {"ollama": {"think": 1}}, "boolean or string"),
         ]
         with tempfile.TemporaryDirectory() as tmp:

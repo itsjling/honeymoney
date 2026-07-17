@@ -273,6 +273,10 @@ Rules may assign `flow_type` as well as `category`. For institution-specific tre
 
 Set `ollama.enabled` to `true` to categorize remaining unknown transactions with a local Ollama model. Options in the `ollama` config section:
 
+- `url`: an `http` URL whose hostname resolves only to loopback addresses
+  (`localhost`, `127.0.0.1`, or `[::1]` are typical). Remote/LAN addresses,
+  URL credentials, malformed URLs, and redirects away from loopback are
+  rejected before transaction data is sent.
 - `model`: must be a model you have pulled locally (check with `ollama list`).
 - `timeout_seconds`: request timeout per batch (default 120).
 - `batch_size`: transactions per request (default 5). Local inference is generation-bound, so total time is roughly constant regardless of batch size (~1-2s per transaction); a smaller batch just means the status line updates more often and any one request has less to lose if it fails.

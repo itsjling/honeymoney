@@ -87,7 +87,11 @@ provides an explicit inspect/rewrite seam.
 - `honeymoney/persistence.py`: staged filesystem generation commits, authoritative
   ledger replacement, directory synchronization, and retained-state recovery.
 - `honeymoney/rules.py`: deterministic rule validation and application.
-- `honeymoney/ollama.py`: optional local-only categorization fallback.
+- `honeymoney/ollama.py`: optional local-only categorization fallback. Its
+  shared model-listing and generation transport accepts only `http` endpoints
+  that resolve exclusively to loopback addresses, pins the connection to a
+  validated numeric address, bypasses proxies, and revalidates redirects before
+  following them.
 - `honeymoney/schema.py`: public ledger/review columns and allowed values.
 - `honeymoney/report.py`: offline HTML report generation.
 - `honeymoney/reconciliation.py`: deterministic flow derivation, transfer pairing,

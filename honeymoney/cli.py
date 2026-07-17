@@ -42,6 +42,7 @@ from honeymoney.ollama import (
     OllamaProgress,
     apply_ollama_fallback,
     list_ollama_models,
+    validate_ollama_endpoint,
 )
 from honeymoney.persistence import persist_generation
 from honeymoney.reconciliation import (
@@ -591,6 +592,8 @@ def _validate_config_document(config: dict[str, Any]) -> None:
                 raise ValueError(
                     f"Config field ollama.{field} must be a non-empty string"
                 )
+        if "url" in ollama:
+            validate_ollama_endpoint(ollama["url"])
         if "batch_size" in ollama and (
             isinstance(ollama["batch_size"], bool)
             or not isinstance(ollama["batch_size"], int)
