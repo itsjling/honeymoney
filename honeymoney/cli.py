@@ -4004,15 +4004,6 @@ def _remove_flag(existing: str, flag: str) -> str:
     return ";".join(item for item in existing.split(";") if item and item != flag)
 
 
-def _write_csv(
-    path: Path, columns: list[str], rows: list[dict[str, str]] | None = None
-) -> None:
-    with path.open("w", newline="", encoding="utf-8") as fh:
-        writer = csv.DictWriter(fh, fieldnames=columns, extrasaction="ignore")
-        writer.writeheader()
-        writer.writerows(rows or [])
-
-
 def _write_report(path: Path, report: dict[str, Any]) -> None:
     path.write_text(json.dumps(report, indent=2, sort_keys=True), encoding="utf-8")
 
