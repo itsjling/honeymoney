@@ -61,6 +61,16 @@ from honeymoney.schema import (
 )
 
 JSON_SCHEMA_VERSION = 1
+PROFILE_PREVIEW_LIMIT = 10
+PROFILE_PREVIEW_FIELDS = [
+    "amount_hkd",
+    "date",
+    "merchant",
+    "original_amount",
+    "original_currency",
+    "source_page",
+    "source_row",
+]
 
 
 def _emit_json(
@@ -156,6 +166,8 @@ def main(argv: list[str] | None = None) -> int:
         return _setup_command(argv[1:])
     if argv and argv[0] == "import":
         return _import_command(argv[1:])
+    if argv and argv[0] == "profile":
+        return _profile_command(argv[1:])
     if argv and argv[0] == "status":
         return _status_command(argv[1:])
     if argv and argv[0] == "pending":
@@ -376,6 +388,7 @@ Commands:
   honeymoney review [FILTERS]      Review filtered accounting flow decisions
   honeymoney review --transaction ID --as income
                                    Apply one human accounting decision
+  honeymoney profile validate ... Validate a profile and optionally preview input
   honeymoney status [MONTH]        Show processed/categorized counts for a period
   honeymoney pending [MONTH]       List transactions that need review
   honeymoney correct --file FILE   Apply validated transaction corrections
@@ -827,6 +840,127 @@ def _import_command(argv: list[str]) -> int:
         run_args,
         print_import_summary=not args.json,
         json_command="import",
+    )
+
+
+def _profile_command(argv: list[str]) -> int:
+    parser = _command_parser(
+        argv,
+        prog="honeymoney profile",
+        description="Validate a local import profile and optionally preview one input.",
+    )
+    parser.add_argument("operation", choices=["validate"])
+    parser.add_argument("profile_path", metavar="PROFILE")
+    parser.add_argument("--input", dest="input_path", metavar="FILE")
+    parser.add_argument("--config", dest="config_path", metavar="CONFIG")
+    parser.add_argument("--json", action="store_true")
+    args = parser.parse_args(argv)
+
+    profile_path = Path(args.profile_path).expanduser().resolve()
+    if not profile_path.exists():
+        raise ValueError(f"Profile path does not exist: {profile_path}")
+    if not profile_path.is_file():
+        raise ValueError(f"Profile path is not a file: {profile_path}")
+
+    config = _load_config_read_only(args.config_path)
+    try:
+        with profile_path.open(encoding="utf-8") as fh:
+            profile = json.load(fh)
+    except json.JSONDecodeError as error:
+        raise ValueError(
+            f"Invalid JSON in profile {profile_path}: {error.msg}"
+        ) from error
+    _validate_profile(profile, profile_path, config)
+
+    profile_id = str(profile.get("id") or profile.get("account_id"))
+    parsers = [parser_name for parser_name in ("csv", "pdf") if parser_name in profile]
+    data: dict[str, Any] = {
+        "mode": "validation",
+        "parsers": parsers,
+        "profile_id": profile_id,
+        "profile_path": str(profile_path),
+    }
+    warnings: list[str] = []
+
+    if args.input_path:
+        input_path = Path(args.input_path).expanduser().resolve()
+        if not input_path.exists():
+            raise ValueError(f"Input path does not exist: {input_path}")
+        if not input_path.is_file():
+            raise ValueError(f"Input path is not a file: {input_path}")
+        rows, parser_warnings = _preview_profile_input(
+            profile, profile_id, input_path, config
+        )
+        preview_rows = [
+            {field: row.get(field, "") for field in PROFILE_PREVIEW_FIELDS}
+            for row in rows[:PROFILE_PREVIEW_LIMIT]
+        ]
+        warnings = [
+            "Preview output contains normalized local statement data; keep it private.",
+            *parser_warnings,
+        ]
+        if len(rows) > PROFILE_PREVIEW_LIMIT:
+            warnings.append(
+                f"Preview limited to the first {PROFILE_PREVIEW_LIMIT} of "
+                f"{len(rows)} normalized rows."
+            )
+        data.update(
+            {
+                "base_currency": str(config.get("base_currency", "HKD")).upper(),
+                "input_path": str(input_path),
+                "mode": "preview",
+                "preview_count": len(preview_rows),
+                "preview_limit": PROFILE_PREVIEW_LIMIT,
+                "rows": preview_rows,
+                "transaction_count": len(rows),
+            }
+        )
+
+    if args.json:
+        _emit_json("profile.validate", "success", data=data, warnings=warnings)
+        return 0
+
+    parser_label = ", ".join(parsers)
+    print(f"Profile {profile_id} is valid ({parser_label}).")
+    if data["mode"] == "preview":
+        print(
+            f"Preview: {data['transaction_count']} normalized rows; "
+            f"showing {data['preview_count']}."
+        )
+        for row in data["rows"]:
+            print(
+                f"  {row['date']} | {row['original_amount']} "
+                f"{row['original_currency']} | {row['merchant']} | "
+                f"base {row['amount_hkd']} {data['base_currency']}"
+            )
+        for warning in warnings:
+            print(f"Warning: {warning}", file=sys.stderr)
+    return 0
+
+
+def _preview_profile_input(
+    profile: dict[str, Any],
+    profile_id: str,
+    input_path: Path,
+    config: dict[str, Any],
+) -> tuple[list[dict[str, str]], list[str]]:
+    suffix = input_path.suffix.lower()
+    if suffix == ".csv":
+        if "csv" not in profile:
+            raise ValueError(
+                f"Profile {profile_id} does not define csv parser settings "
+                f"required for {input_path.name}"
+            )
+        return _import_csv(input_path, profile, config, input_path.parent), []
+    if suffix == ".pdf":
+        if "pdf" not in profile:
+            raise ValueError(
+                f"Profile {profile_id} does not define pdf parser settings "
+                f"required for {input_path.name}"
+            )
+        return _import_pdf(input_path, profile, config, input_path.parent)
+    raise ValueError(
+        f"Unsupported preview input type for {input_path.name}; expected .csv or .pdf"
     )
 
 
@@ -2133,6 +2267,15 @@ def _write_text_file(path: Path, content: str, force: bool) -> None:
 
 
 def _load_config(config_path: str | None) -> dict[str, Any]:
+    return _load_config_document(config_path, recover=True)
+
+
+def _load_config_read_only(config_path: str | None) -> dict[str, Any]:
+    """Load validated configuration without recovering workspace artifacts."""
+    return _load_config_document(config_path, recover=False)
+
+
+def _load_config_document(config_path: str | None, *, recover: bool) -> dict[str, Any]:
     if config_path is None:
         default_config = Path("config.json")
         if default_config.exists():
@@ -2145,7 +2288,8 @@ def _load_config(config_path: str | None) -> dict[str, Any]:
     config.setdefault("paths", {})
     config["paths"].setdefault("input", "./input")
     config["paths"].setdefault("output", "./output/categorized.csv")
-    _recover_config_generation(config)
+    if recover:
+        _recover_config_generation(config)
     return config
 
 
@@ -2230,8 +2374,9 @@ def _validate_profile(
                 f"Profile {profile_id} field profile.date_formats[{index}] must be a non-empty string"
             )
         try:
-            rendered = datetime(2023, 2, 28).strftime(date_format)
-            datetime.strptime(rendered, date_format)
+            validation_year = 2024
+            rendered = datetime(validation_year, 2, 28).strftime(date_format)
+            _parse_profile_date(rendered, date_format, fallback_year=validation_year)
         except ValueError as error:
             raise ValueError(
                 f"Profile {profile_id} field profile.date_formats[{index}] must be a valid date format"
@@ -2242,11 +2387,7 @@ def _validate_profile(
             raise ValueError(
                 f"Profile {profile_id} field profile.date_formats[{index}] must include day and month"
             )
-        if (
-            "%Y" not in date_format
-            and "%y" not in date_format
-            and "statement_year" not in profile
-        ):
+        if not _date_format_has_year(date_format) and "statement_year" not in profile:
             raise ValueError(
                 f"Profile {profile_id} date format {date_format!r} requires profile.statement_year"
             )
@@ -3780,6 +3921,34 @@ def _clean_text(value: Any) -> str:
     return cleaned.strip()
 
 
+def _date_format_has_year(date_format: str) -> bool:
+    index = 0
+    while index < len(date_format):
+        if date_format[index] != "%":
+            index += 1
+            continue
+        if index + 1 >= len(date_format):
+            return False
+        directive = date_format[index + 1]
+        if directive == "%":
+            index += 2
+            continue
+        if directive in {"Y", "y"}:
+            return True
+        index += 2
+    return False
+
+
+def _parse_profile_date(
+    value: str, date_format: str, *, fallback_year: int | None = None
+) -> datetime:
+    if _date_format_has_year(date_format):
+        return datetime.strptime(value, date_format)
+    if fallback_year is None:
+        raise ValueError("A yearless date format requires a fallback year")
+    return datetime.strptime(f"{value};{fallback_year}", f"{date_format};%Y")
+
+
 def _normalize_date(value: str, profile: dict[str, Any]) -> str:
     if not value:
         return ""
@@ -3787,13 +3956,15 @@ def _normalize_date(value: str, profile: dict[str, Any]) -> str:
     date_formats = profile.get("date_formats", ["%Y-%m-%d"])
     for date_format in date_formats:
         try:
-            parsed = datetime.strptime(value, date_format).date()
+            has_year = _date_format_has_year(date_format)
+            statement_year = profile.get("statement_year") if not has_year else None
+            parsed = _parse_profile_date(
+                value,
+                date_format,
+                fallback_year=int(statement_year) if statement_year else 1900,
+            ).date()
         except ValueError:
             continue
-        if "%Y" not in date_format and "%y" not in date_format:
-            statement_year = profile.get("statement_year")
-            if statement_year:
-                parsed = parsed.replace(year=int(statement_year))
         return parsed.isoformat()
     return value
 
@@ -4015,7 +4186,7 @@ def run() -> int:
         _status.clear()
         argv = sys.argv[1:]
         if "--json" in argv:
-            command = argv[0] if argv and not argv[0].startswith("-") else "run"
+            command = _json_error_command(argv)
             _emit_json(
                 command,
                 "error",
@@ -4024,6 +4195,12 @@ def run() -> int:
             return 2
         print(str(error), file=sys.stderr)
         return 2
+
+
+def _json_error_command(argv: list[str]) -> str:
+    if len(argv) > 1 and argv[:2] == ["profile", "validate"]:
+        return "profile.validate"
+    return argv[0] if argv and not argv[0].startswith("-") else "run"
 
 
 if __name__ == "__main__":

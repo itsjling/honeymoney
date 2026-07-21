@@ -16,6 +16,12 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 class AgentCliTest(unittest.TestCase):
+    def _snapshot_tree(self, root: Path) -> dict[str, bytes | None]:
+        return {
+            str(path.relative_to(root)): None if path.is_dir() else path.read_bytes()
+            for path in sorted(root.rglob("*"))
+        }
+
     def _run_cli(
         self,
         args: list[str],
@@ -77,6 +83,17 @@ class AgentCliTest(unittest.TestCase):
             encoding="utf-8",
         )
 
+    def _write_yearless_csv_profile(self, root: Path) -> Path:
+        profile = json.loads(
+            (root / "profiles" / "starter_csv.json").read_text(encoding="utf-8")
+        )
+        profile["id"] = "yearless_csv"
+        profile["date_formats"] = ["%d/%m"]
+        profile["statement_year"] = 2024
+        profile_path = root / "yearless-profile.json"
+        profile_path.write_text(json.dumps(profile), encoding="utf-8")
+        return profile_path
+
     def test_setup_json_returns_one_machine_readable_document(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "money"
@@ -95,6 +112,512 @@ class AgentCliTest(unittest.TestCase):
             self.assertEqual(payload["warnings"], [])
             self.assertEqual(payload["errors"], [])
             self.assertEqual(result.stdout.count("\n"), 1)
+
+    def test_profile_validate_text_and_pdf_json_are_read_only(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._setup_workspace(tmp)
+            starter_profile = root / "profiles" / "starter_csv.json"
+            before = self._snapshot_tree(root)
+
+            text_result = self._run_cli(
+                ["profile", "validate", str(starter_profile)], cwd=root
+            )
+            pdf_result = self._run_cli(
+                [
+                    "profile",
+                    "validate",
+                    str(
+                        REPO_ROOT
+                        / "honeymoney"
+                        / "data"
+                        / "profiles"
+                        / "mox_bank_pdf.json"
+                    ),
+                    "--json",
+                ],
+                cwd=root,
+            )
+
+            self.assertEqual(text_result.returncode, 0, text_result.stderr)
+            self.assertEqual(
+                text_result.stdout, "Profile starter_csv is valid (csv).\n"
+            )
+            self.assertEqual(text_result.stderr, "")
+            self.assertEqual(pdf_result.returncode, 0, pdf_result.stderr)
+            payload = self._json(pdf_result)
+            self.assertEqual(payload["command"], "profile.validate")
+            self.assertEqual(payload["status"], "success")
+            self.assertEqual(
+                payload["data"],
+                {
+                    "mode": "validation",
+                    "parsers": ["pdf"],
+                    "profile_id": "mox_bank_pdf",
+                    "profile_path": str(
+                        (
+                            REPO_ROOT
+                            / "honeymoney"
+                            / "data"
+                            / "profiles"
+                            / "mox_bank_pdf.json"
+                        ).resolve()
+                    ),
+                },
+            )
+            self.assertEqual(payload["artifacts"], {})
+            self.assertEqual(payload["warnings"], [])
+            self.assertEqual(payload["errors"], [])
+            self.assertEqual(self._snapshot_tree(root), before)
+
+    def test_profile_validate_yearless_dates_treat_deprecation_warnings_as_errors(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._setup_workspace(tmp)
+            profile_path = self._write_yearless_csv_profile(root)
+
+            with patch.dict(
+                os.environ, {"PYTHONWARNINGS": "error::DeprecationWarning"}
+            ):
+                result = self._run_cli(
+                    ["profile", "validate", str(profile_path), "--json"], cwd=root
+                )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(self._json(result)["command"], "profile.validate")
+
+    def test_profile_preview_yearless_dates_uses_statement_year_without_warnings(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._setup_workspace(tmp)
+            profile_path = self._write_yearless_csv_profile(root)
+            statement_path = root / "yearless.csv"
+            statement_path.write_text(
+                "Date,Description,Amount,Currency\n28/02,SYNTHETIC,-10.00,HKD\n",
+                encoding="utf-8",
+            )
+
+            with patch.dict(
+                os.environ, {"PYTHONWARNINGS": "error::DeprecationWarning"}
+            ):
+                result = self._run_cli(
+                    [
+                        "profile",
+                        "validate",
+                        str(profile_path),
+                        "--input",
+                        str(statement_path),
+                        "--json",
+                    ],
+                    cwd=root,
+                )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            payload = self._json(result)
+            self.assertEqual(payload["data"]["rows"][0]["date"], "2024-02-28")
+
+    def test_profile_validate_leaves_a_retained_generation_unchanged(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._setup_workspace(tmp)
+            statement = root / "may.csv"
+            self._write_statement(statement)
+            imported = self._run_cli(["import", str(statement), "--json"], cwd=root)
+            self.assertEqual(imported.returncode, 0, imported.stderr)
+
+            categorized = root / "output" / "categorized.csv"
+            with categorized.open(newline="", encoding="utf-8") as fh:
+                [row] = list(csv.DictReader(fh))
+            interrupted = self._run_cli(
+                ["correct", "--file", "-", "--json"],
+                cwd=root,
+                input_text=json.dumps(
+                    [
+                        {
+                            "transaction_id": row["transaction_id"],
+                            "category": "Groceries",
+                            "needs_review": False,
+                        }
+                    ]
+                ),
+                filesystem_fault="replace-after:categorized.csv",
+            )
+            self.assertEqual(interrupted.returncode, 75, interrupted.stderr)
+
+            state_path = root / "output" / ".categorized.csv.honeymoney-state.json"
+            self.assertTrue(state_path.exists())
+            before = self._snapshot_tree(root)
+
+            result = self._run_cli(
+                [
+                    "profile",
+                    "validate",
+                    str(root / "profiles" / "starter_csv.json"),
+                    "--json",
+                ],
+                cwd=root,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(self._json(result)["command"], "profile.validate")
+            self.assertTrue(state_path.exists())
+            self.assertEqual(self._snapshot_tree(root), before)
+
+    def test_profile_validate_preview_is_bounded_json_and_never_mutates(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._setup_workspace(tmp)
+            profile_path = root / "profiles" / "starter_csv.json"
+            statement_path = root / "synthetic.csv"
+            statement_path.write_text(
+                "\n".join(
+                    ["Date,Description,Amount,Currency"]
+                    + [
+                        f"2026-05-{index:02d},MERCHANT {index:02d},-{index}.00,HKD"
+                        for index in range(1, 13)
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            before = self._snapshot_tree(root)
+
+            result = self._run_cli(
+                [
+                    "profile",
+                    "validate",
+                    str(profile_path),
+                    "--input",
+                    str(statement_path),
+                    "--json",
+                ],
+                cwd=root,
+            )
+            text_result = self._run_cli(
+                [
+                    "profile",
+                    "validate",
+                    str(profile_path),
+                    "--input",
+                    str(statement_path),
+                ],
+                cwd=root,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            payload = self._json(result)
+            self.assertEqual(payload["command"], "profile.validate")
+            self.assertEqual(payload["status"], "success")
+            self.assertEqual(payload["data"]["mode"], "preview")
+            self.assertEqual(payload["data"]["profile_id"], "starter_csv")
+            self.assertEqual(payload["data"]["parsers"], ["csv"])
+            self.assertEqual(
+                payload["data"]["input_path"], str(statement_path.resolve())
+            )
+            self.assertEqual(payload["data"]["transaction_count"], 12)
+            self.assertEqual(payload["data"]["preview_count"], 10)
+            self.assertEqual(payload["data"]["preview_limit"], 10)
+            self.assertEqual(payload["data"]["base_currency"], "HKD")
+            self.assertEqual(len(payload["data"]["rows"]), 10)
+            self.assertEqual(
+                set(payload["data"]["rows"][0]),
+                {
+                    "amount_hkd",
+                    "date",
+                    "merchant",
+                    "original_amount",
+                    "original_currency",
+                    "source_page",
+                    "source_row",
+                },
+            )
+            self.assertEqual(payload["data"]["rows"][0]["merchant"], "MERCHANT 01")
+            self.assertEqual(
+                payload["warnings"],
+                [
+                    "Preview output contains normalized local statement data; keep it private.",
+                    "Preview limited to the first 10 of 12 normalized rows.",
+                ],
+            )
+            self.assertEqual(payload["artifacts"], {})
+            self.assertEqual(payload["errors"], [])
+            self.assertEqual(result.stderr, "")
+            self.assertEqual(text_result.returncode, 0, text_result.stderr)
+            text_lines = text_result.stdout.splitlines()
+            self.assertEqual(text_lines[0], "Profile starter_csv is valid (csv).")
+            self.assertEqual(text_lines[1], "Preview: 12 normalized rows; showing 10.")
+            self.assertEqual(len(text_lines), 12)
+            self.assertIn("MERCHANT 10", text_lines[-1])
+            self.assertNotIn("MERCHANT 11", text_result.stdout)
+            self.assertEqual(
+                text_result.stderr,
+                "Warning: Preview output contains normalized local statement data; keep it private.\n"
+                "Warning: Preview limited to the first 10 of 12 normalized rows.\n",
+            )
+            self.assertEqual(self._snapshot_tree(root), before)
+
+    def test_profile_validate_uses_explicit_and_current_directory_config(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with_config = root / "with-config"
+            without_config = root / "without-config"
+            with_config.mkdir()
+            without_config.mkdir()
+            profile_path = root / "custom-profile.json"
+            profile_path.write_text(
+                json.dumps(
+                    {
+                        "id": "family_csv",
+                        "account_id": "family_account",
+                        "account": "Family Account",
+                        "institution": "Synthetic Bank",
+                        "country": "HK",
+                        "account_currency": "HKD",
+                        "owner": "Family",
+                        "payment_method": "Family Card",
+                        "csv": {
+                            "columns": {
+                                "transaction_date": "Date",
+                                "description": "Description",
+                                "amount": "Amount",
+                            }
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            matching_config = with_config / "config.json"
+            matching_config.write_text(
+                json.dumps(
+                    {
+                        "owners": ["Family"],
+                        "payment_methods": ["Family Card"],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            mismatched_config = root / "mismatched.json"
+            mismatched_config.write_text(
+                json.dumps(
+                    {
+                        "owners": ["Household"],
+                        "payment_methods": ["Bank Account"],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            before = self._snapshot_tree(root)
+
+            discovered = self._run_cli(
+                ["profile", "validate", str(profile_path), "--json"],
+                cwd=with_config,
+            )
+            explicit = self._run_cli(
+                [
+                    "profile",
+                    "validate",
+                    str(profile_path),
+                    "--config",
+                    str(matching_config),
+                    "--json",
+                ],
+                cwd=without_config,
+            )
+            no_config = self._run_cli(
+                ["profile", "validate", str(profile_path), "--json"],
+                cwd=without_config,
+            )
+            mismatched = self._run_cli(
+                [
+                    "profile",
+                    "validate",
+                    str(profile_path),
+                    "--config",
+                    str(mismatched_config),
+                    "--json",
+                ],
+                cwd=with_config,
+            )
+
+            for accepted in (discovered, explicit):
+                self.assertEqual(accepted.returncode, 0, accepted.stderr)
+                payload = self._json(accepted)
+                self.assertEqual(payload["command"], "profile.validate")
+                self.assertEqual(payload["status"], "success")
+                self.assertEqual(payload["data"]["profile_id"], "family_csv")
+                self.assertEqual(payload["artifacts"], {})
+                self.assertEqual(payload["errors"], [])
+                self.assertEqual(accepted.stderr, "")
+
+            for rejected in (no_config, mismatched):
+                self.assertEqual(rejected.returncode, 2)
+                payload = self._json(rejected)
+                self.assertEqual(payload["command"], "profile.validate")
+                self.assertEqual(
+                    payload["errors"],
+                    [
+                        {
+                            "type": "ValueError",
+                            "message": "Unsupported owner in profile family_csv: Family",
+                        }
+                    ],
+                )
+                self.assertEqual(rejected.stderr, "")
+            self.assertEqual(self._snapshot_tree(root), before)
+
+    def test_profile_preview_uses_configured_base_currency_and_exchange_rate(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._setup_workspace(tmp)
+            profile_path = root / "profiles" / "starter_csv.json"
+            statement_path = root / "synthetic.csv"
+            statement_path.write_text(
+                "Date,Description,Amount,Currency\n"
+                "2026-05-01,SYNTHETIC SHOP,-10.00,HKD\n",
+                encoding="utf-8",
+            )
+            config_path = root / "preview-config.json"
+            config = json.loads((root / "config.json").read_text(encoding="utf-8"))
+            config["base_currency"] = "USD"
+            config["exchange_rates"] = {"HKD": 0.13}
+            config_path.write_text(json.dumps(config), encoding="utf-8")
+            before = self._snapshot_tree(root)
+
+            result = self._run_cli(
+                [
+                    "profile",
+                    "validate",
+                    str(profile_path),
+                    "--input",
+                    str(statement_path),
+                    "--config",
+                    str(config_path),
+                    "--json",
+                ],
+                cwd=root,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            payload = self._json(result)
+            self.assertEqual(payload["command"], "profile.validate")
+            self.assertEqual(payload["status"], "success")
+            self.assertEqual(payload["data"]["base_currency"], "USD")
+            self.assertEqual(payload["data"]["rows"][0]["original_amount"], "-10.00")
+            self.assertEqual(payload["data"]["rows"][0]["amount_hkd"], "-1.30")
+            self.assertEqual(payload["artifacts"], {})
+            self.assertEqual(payload["errors"], [])
+            self.assertEqual(result.stderr, "")
+            self.assertEqual(self._snapshot_tree(root), before)
+
+    def test_profile_validate_invalid_and_missing_paths_are_structured_errors(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._setup_workspace(tmp)
+            invalid_profile = root / "invalid-profile.json"
+            profile = json.loads(
+                (root / "profiles" / "starter_csv.json").read_text(encoding="utf-8")
+            )
+            del profile["csv"]["columns"]["transaction_date"]
+            invalid_profile.write_text(json.dumps(profile), encoding="utf-8")
+            before = self._snapshot_tree(root)
+
+            invalid = self._run_cli(
+                ["profile", "validate", str(invalid_profile), "--json"], cwd=root
+            )
+            missing_path = root / "missing-profile.json"
+            missing = self._run_cli(
+                ["profile", "validate", str(missing_path), "--json"], cwd=root
+            )
+
+            self.assertEqual(invalid.returncode, 2)
+            invalid_payload = self._json(invalid)
+            self.assertEqual(invalid_payload["command"], "profile.validate")
+            self.assertEqual(invalid_payload["status"], "error")
+            self.assertEqual(
+                invalid_payload["errors"],
+                [
+                    {
+                        "type": "ValueError",
+                        "message": "Profile starter_csv field csv.columns.transaction_date or posting_date is required",
+                    }
+                ],
+            )
+            self.assertEqual(invalid.stderr, "")
+            self.assertEqual(missing.returncode, 2)
+            missing_payload = self._json(missing)
+            self.assertEqual(missing_payload["command"], "profile.validate")
+            self.assertEqual(
+                missing_payload["errors"],
+                [
+                    {
+                        "type": "ValueError",
+                        "message": f"Profile path does not exist: {missing_path.resolve()}",
+                    }
+                ],
+            )
+            self.assertEqual(missing.stderr, "")
+            self.assertEqual(self._snapshot_tree(root), before)
+
+    def test_profile_validate_preview_rejects_missing_and_mismatched_inputs(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._setup_workspace(tmp)
+            starter_profile = root / "profiles" / "starter_csv.json"
+            missing_input = root / "missing.csv"
+            existing_input = root / "synthetic.csv"
+            self._write_statement(existing_input)
+            pdf_profile = (
+                REPO_ROOT / "honeymoney" / "data" / "profiles" / "mox_bank_pdf.json"
+            )
+            before = self._snapshot_tree(root)
+
+            missing = self._run_cli(
+                [
+                    "profile",
+                    "validate",
+                    str(starter_profile),
+                    "--input",
+                    str(missing_input),
+                    "--json",
+                ],
+                cwd=root,
+            )
+            mismatched = self._run_cli(
+                [
+                    "profile",
+                    "validate",
+                    str(pdf_profile),
+                    "--input",
+                    str(existing_input),
+                    "--json",
+                ],
+                cwd=root,
+            )
+
+            self.assertEqual(missing.returncode, 2)
+            self.assertEqual(
+                self._json(missing)["errors"],
+                [
+                    {
+                        "type": "ValueError",
+                        "message": f"Input path does not exist: {missing_input.resolve()}",
+                    }
+                ],
+            )
+            self.assertEqual(missing.stderr, "")
+            self.assertEqual(mismatched.returncode, 2)
+            self.assertEqual(
+                self._json(mismatched)["errors"],
+                [
+                    {
+                        "type": "ValueError",
+                        "message": "Profile mox_bank_pdf does not define csv parser settings required for synthetic.csv",
+                    }
+                ],
+            )
+            self.assertEqual(mismatched.stderr, "")
+            self.assertEqual(self._snapshot_tree(root), before)
 
     def test_import_json_is_non_interactive_and_returns_import_report(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -966,15 +1489,22 @@ class AgentCliTest(unittest.TestCase):
             "pending",
             "correct",
             "config",
+            "profile",
         ]
 
         for command in commands:
             with self.subTest(command=command):
-                result = self._run_cli([command, "--bogus", "--json"])
+                args = [command, "--bogus", "--json"]
+                if command == "profile":
+                    args = [command, "validate", "profile.json", "--bogus", "--json"]
+                result = self._run_cli(args)
 
                 self.assertEqual(result.returncode, 2)
                 payload = self._json(result)
-                self.assertEqual(payload["command"], command)
+                expected_command = (
+                    "profile.validate" if command == "profile" else command
+                )
+                self.assertEqual(payload["command"], expected_command)
                 self.assertEqual(payload["status"], "error")
                 self.assertIn("unrecognized arguments", payload["errors"][0]["message"])
                 self.assertEqual(result.stdout.count("\n"), 1)

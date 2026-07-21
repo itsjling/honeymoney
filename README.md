@@ -110,6 +110,24 @@ left uncategorized for review, and their prior corrections are cleared as the
 requested reset specifies.
 
 ```bash
+honeymoney profile validate PROFILE
+honeymoney profile validate PROFILE [--config CONFIG] \
+  [--input SYNTHETIC_OR_LOCAL_FILE]
+```
+
+Validates a JSON import profile with the same checks used by normal imports.
+It reads `config.json` from the current directory by default; pass `--config`
+when the profile relies on custom owners, payment methods, base currency, or
+exchange rates from another configuration.
+Adding `--input` runs the same production CSV or PDF normalization path and
+prints a read-only preview of at most 10 rows. The command never creates or
+updates ledgers, corrections, profile mappings, reports, or browser artifacts.
+Preview output contains normalized transaction data, so use real statements
+only in a trusted local terminal and never paste their output into cloud tasks,
+issues, or logs. Profile-only PDF validation does not open a PDF or require the
+PDF parser at runtime.
+
+```bash
 honeymoney review
 honeymoney review --category Other
 honeymoney review --category Other --category Shopping
@@ -182,11 +200,11 @@ Prints or edits the active `config.json`; pass `--config PATH` to target another
 
 ## Structured agent commands
 
-`setup`, `run`, `import`, `status`, `report`, `config`, and fully specified
-one-shot `review` accept `--json`. JSON mode
-prints exactly one versioned document to stdout, never prompts, and never opens
-a browser. Exit code `0` is success, `1` is strict partial success, and `2` is
-an input, configuration, or validation error.
+`setup`, `run`, `import`, `status`, `report`, `config`, `profile validate`,
+and fully specified one-shot `review` accept `--json`. JSON mode prints exactly
+one versioned document to stdout, never prompts, and never opens a browser.
+Exit code `0` is success, `1` is strict partial success, and `2` is an input,
+configuration, or validation error.
 
 ```bash
 honeymoney import ./statement.csv --config ./money/config.json --json
@@ -194,6 +212,8 @@ honeymoney status 2026-05 --config ./money/config.json --json
 honeymoney pending 2026-05 --config ./money/config.json --json
 honeymoney config --config ./money/config.json --json
 honeymoney config edit ollama --config ./money/config.json --model qwen3.5:4b --json
+honeymoney profile validate ./money/profiles/starter_csv.json \
+  --config ./money/config.json --json
 ```
 
 `pending` returns transactions requiring review. Apply reviewed corrections as

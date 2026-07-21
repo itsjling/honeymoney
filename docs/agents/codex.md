@@ -58,11 +58,33 @@ honeymoney report 2026-05 --config ./money/config.json --json
 honeymoney config --config ./money/config.json --json
 honeymoney config edit ollama --config ./money/config.json --model qwen3.5:4b --json
 honeymoney review --transaction TRANSACTION_ID --as income --config ./money/config.json --json
+honeymoney profile validate ./money/profiles/starter_csv.json \
+  --config ./money/config.json --json
 ```
 
 Every response is one JSON object with `schema_version`, `command`, `status`,
 `data`, `artifacts`, `warnings`, and `errors`. Progress and diagnostics remain
 on stderr so stdout can be parsed directly.
+
+Validate a profile and preview one synthetic fixture without mutating the
+workspace:
+
+```bash
+honeymoney profile validate ./money/profiles/starter_csv.json \
+  --config ./money/config.json \
+  --input ./tests/fixtures/import_profiles/starter_csv/balances_ignored/input.csv \
+  --json
+```
+
+The response uses command `profile.validate`, reports `validation` or `preview`
+mode, and bounds preview rows to 10. `artifacts` is always empty. Preview output
+contains normalized local statement data. Cloud Codex tasks must use committed
+synthetic fixtures only; run previews of private statements solely in a local
+task and do not copy their rows into prompts or logs. The command is diagnostic:
+it never writes ledgers, corrections, mappings, import reports, or HTML.
+Without `--config`, validation uses `config.json` in the current directory when
+present, matching normal imports. The same loaded configuration supplies custom
+profile vocabularies, base currency, and exchange rates during preview.
 
 Apply a reviewed batch from a file:
 
