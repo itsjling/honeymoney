@@ -61,6 +61,8 @@ from honeymoney.schema import (
 )
 
 JSON_SCHEMA_VERSION = 1
+TRANSACTION_IDENTITY_VERSION = "2"
+IDENTITY_AMBIGUITY_FLAG = "identity_reconciliation_ambiguous"
 PROFILE_PREVIEW_LIMIT = 10
 PROFILE_PREVIEW_FIELDS = [
     "amount_hkd",
@@ -258,21 +260,29 @@ def _run_pipeline(
             file_report["ledger_action"] = "replaced"
         else:
             file_report["ledger_action"] = "added"
-    replace_sources = (
-        {
-            file_report["source_file"]
-            for file_report in file_reports
-            if file_report.get("status") == "processed"
-        }
-        if args.replace or args.reset
-        else None
+    processed_sources = {
+        file_report["source_file"]
+        for file_report in file_reports
+        if file_report.get("status") == "processed"
+    }
+    identity_warnings, renamed_sources = _reconcile_transaction_identities(
+        transactions,
+        existing_ledger_rows,
+        input_path=input_path,
+        replace_requested=args.replace or args.reset,
     )
+    import_warnings.extend(identity_warnings)
+    replace_sources_set = (
+        set(processed_sources) if args.replace or args.reset else set()
+    )
+    replace_sources_set.update(renamed_sources)
+    replace_sources = replace_sources_set or None
+    reset_sources = set(processed_sources) | renamed_sources
     reset_ids = (
         {
             row["transaction_id"]
             for row in existing_ledger_rows
-            if row.get("source_file") in (replace_sources or set())
-            and row.get("transaction_id")
+            if row.get("source_file") in reset_sources and row.get("transaction_id")
         }
         if args.reset
         else set()
@@ -300,6 +310,7 @@ def _run_pipeline(
         )
         correction_documents[corrections_path] = corrections_content
     apply_corrections(transactions, corrections)
+    _enforce_identity_review(transactions)
     _status.clear()
     if interactive:
         categorized_interactively = _prompt_uncategorized(transactions, config)
@@ -2868,7 +2879,7 @@ def _import_transactions(
                 ),
             }
         )
-    return _assign_transaction_ids(transactions), warnings, file_reports
+    return transactions, warnings, file_reports
 
 
 def _select_pdf_profile(
@@ -3749,6 +3760,10 @@ def _normalized_row(
 
     return {
         "transaction_id": "",
+        "identity_version": "",
+        "identity_fingerprint": "",
+        "identity_source_fingerprint": "",
+        "identity_occurrence": "",
         "date": canonical_date,
         "transaction_date": transaction_date,
         "posting_date": posting_date,
@@ -3791,24 +3806,308 @@ def _normalized_row(
     }
 
 
-def _assign_transaction_ids(transactions: list[dict[str, str]]) -> list[dict[str, str]]:
-    base_counts: dict[str, int] = {}
-    for transaction in transactions:
-        base = _transaction_identity_base(transaction)
-        base_counts[base] = base_counts.get(base, 0) + 1
+def _reconcile_transaction_identities(
+    transactions: list[dict[str, str]],
+    ledger_rows: list[dict[str, str]],
+    *,
+    input_path: Path,
+    replace_requested: bool,
+) -> tuple[list[str], set[str]]:
+    if not transactions:
+        return [], set()
 
-    seen: dict[str, int] = {}
-    for transaction in transactions:
-        base = _transaction_identity_base(transaction)
-        seen[base] = seen.get(base, 0) + 1
-        suffix = f":{seen[base]}" if base_counts[base] > 1 else ""
-        digest = hashlib.sha256(f"{base}{suffix}".encode("utf-8")).hexdigest()[:16]
-        transaction["transaction_id"] = f"txn_{digest}"
-        if base_counts[base] > 1:
-            transaction["flags"] = _append_flag(
-                transaction["flags"], "duplicate_identity_collision"
+    _set_source_identity_fingerprints(transactions)
+    ledger_source_fingerprints = _source_identity_fingerprints(ledger_rows)
+    incoming_source_fingerprints = {
+        row["source_file"]: row["identity_source_fingerprint"] for row in transactions
+    }
+    rename_map, ambiguous_rename_sources = _identity_rename_map(
+        incoming_source_fingerprints,
+        ledger_source_fingerprints,
+        input_path,
+    )
+
+    incoming_by_fingerprint = _rows_by_identity_fingerprint(transactions)
+    ledger_by_fingerprint = _rows_by_identity_fingerprint(ledger_rows)
+    ledger_sources = {
+        row.get("source_file", "") for row in ledger_rows if row.get("source_file")
+    }
+    warnings: set[str] = set()
+    renamed_sources = set(rename_map.values())
+    used_ids = {
+        row.get("transaction_id", ""): _row_identity_fingerprint(row)
+        for row in ledger_rows
+        if row.get("transaction_id")
+    }
+
+    for fingerprint in sorted(incoming_by_fingerprint):
+        incoming_group = incoming_by_fingerprint[fingerprint]
+        ledger_group = ledger_by_fingerprint.get(fingerprint, [])
+        persisted_occurrences = [
+            occurrence
+            for row in ledger_group
+            if (occurrence := _identity_occurrence(row)) is not None
+        ]
+        next_occurrence = max([0, len(ledger_group), *persisted_occurrences], default=0)
+        pending: list[dict[str, str]] = []
+        ambiguity_reasons: dict[int, str] = {}
+        replaced_ledger_sources: set[str] = set()
+
+        incoming_sources = sorted(
+            {row.get("source_file", "") for row in incoming_group}
+        )
+        for source in incoming_sources:
+            incoming_source_group = [
+                row for row in incoming_group if row.get("source_file", "") == source
+            ]
+            previous_source = rename_map.get(source, source)
+            is_replacement = previous_source in ledger_sources and (
+                replace_requested or source in rename_map
             )
-    return transactions
+            if is_replacement:
+                replaced_ledger_sources.add(previous_source)
+            previous_source_group = [
+                row
+                for row in ledger_group
+                if row.get("source_file", "") == previous_source
+            ]
+
+            legacy_collision = (
+                bool(ledger_group)
+                and any(_identity_occurrence(row) is None for row in ledger_group)
+                and len(ledger_group) > 1
+            )
+            changed_collision_count = (
+                is_replacement
+                and max(len(previous_source_group), len(incoming_source_group)) > 1
+                and len(previous_source_group) != len(incoming_source_group)
+            )
+            rename_is_ambiguous = source in ambiguous_rename_sources
+
+            if legacy_collision or changed_collision_count or rename_is_ambiguous:
+                if legacy_collision:
+                    reason = "legacy collision has no persisted occurrence metadata"
+                elif changed_collision_count:
+                    reason = "the number of identical rows changed"
+                else:
+                    reason = "more than one prior source matches the renamed statement"
+                for row in incoming_source_group:
+                    ambiguity_reasons[id(row)] = reason
+                pending.extend(incoming_source_group)
+                continue
+
+            if is_replacement and len(previous_source_group) == len(
+                incoming_source_group
+            ):
+                for incoming, previous in zip(
+                    sorted(incoming_source_group, key=_source_position_key),
+                    sorted(previous_source_group, key=_source_position_key),
+                    strict=True,
+                ):
+                    occurrence = _identity_occurrence(previous) or 1
+                    _set_transaction_identity(
+                        incoming,
+                        fingerprint,
+                        occurrence,
+                        transaction_id=previous.get("transaction_id") or None,
+                    )
+                    used_ids[incoming["transaction_id"]] = fingerprint
+                continue
+
+            pending.extend(incoming_source_group)
+
+        indistinguishable_new_rows = _indistinguishable_new_identity_rows(pending)
+        for row in indistinguishable_new_rows:
+            ambiguity_reasons.setdefault(
+                id(row), "new source occurrences are indistinguishable"
+            )
+
+        for row in sorted(pending, key=_identity_allocation_key):
+            next_occurrence += 1
+            transaction_id = _transaction_id_for_occurrence(row, next_occurrence)
+            while transaction_id in used_ids:
+                next_occurrence += 1
+                transaction_id = _transaction_id_for_occurrence(row, next_occurrence)
+                ambiguity_reasons[id(row)] = (
+                    "the public transaction ID digest collided with an existing row"
+                )
+            _set_transaction_identity(
+                row,
+                fingerprint,
+                next_occurrence,
+                transaction_id=transaction_id,
+            )
+            used_ids[transaction_id] = fingerprint
+
+        retained_occurrences = sum(
+            1
+            for row in ledger_group
+            if row.get("source_file", "") not in replaced_ledger_sources
+        )
+        effective_occurrences = retained_occurrences + len(incoming_group)
+        if effective_occurrences > 1:
+            for row in incoming_group:
+                row["flags"] = _append_flag(
+                    row.get("flags", ""), "duplicate_identity_collision"
+                )
+
+        for row in incoming_group:
+            reason = ambiguity_reasons.get(id(row))
+            if reason is None:
+                continue
+            row["flags"] = _append_flag(row.get("flags", ""), IDENTITY_AMBIGUITY_FLAG)
+            warnings.add(
+                "Ambiguous transaction identity for "
+                f"{row.get('source_file') or '(unknown source)'} "
+                f"({fingerprint[:12]}): {reason}; assigned new IDs and review is required"
+            )
+
+    return sorted(warnings), renamed_sources
+
+
+def _rows_by_identity_fingerprint(
+    rows: list[dict[str, str]],
+) -> dict[str, list[dict[str, str]]]:
+    grouped: dict[str, list[dict[str, str]]] = {}
+    for row in rows:
+        fingerprint = _row_identity_fingerprint(row)
+        grouped.setdefault(fingerprint, []).append(row)
+    return grouped
+
+
+def _row_identity_fingerprint(row: dict[str, str]) -> str:
+    persisted = row.get("identity_fingerprint", "").strip()
+    if persisted:
+        return persisted
+    return hashlib.sha256(_transaction_identity_base(row).encode("utf-8")).hexdigest()
+
+
+def _source_identity_fingerprints(
+    rows: list[dict[str, str]],
+) -> dict[str, str]:
+    by_source: dict[str, list[dict[str, str]]] = {}
+    for row in rows:
+        by_source.setdefault(row.get("source_file", ""), []).append(row)
+    fingerprints: dict[str, str] = {}
+    for source, source_rows in by_source.items():
+        persisted = {
+            row.get("identity_source_fingerprint", "").strip()
+            for row in source_rows
+            if row.get("identity_source_fingerprint", "").strip()
+        }
+        if len(persisted) == 1:
+            fingerprints[source] = persisted.pop()
+            continue
+        ordered = sorted(source_rows, key=_source_position_key)
+        canonical = "\n".join(_row_identity_fingerprint(row) for row in ordered)
+        fingerprints[source] = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    return fingerprints
+
+
+def _set_source_identity_fingerprints(rows: list[dict[str, str]]) -> None:
+    source_fingerprints = _source_identity_fingerprints(rows)
+    for row in rows:
+        row["identity_fingerprint"] = _row_identity_fingerprint(row)
+        row["identity_source_fingerprint"] = source_fingerprints[
+            row.get("source_file", "")
+        ]
+
+
+def _identity_rename_map(
+    incoming_sources: dict[str, str],
+    ledger_sources: dict[str, str],
+    input_path: Path,
+) -> tuple[dict[str, str], set[str]]:
+    rename_map: dict[str, str] = {}
+    ambiguous: set[str] = set()
+    incoming_names = set(incoming_sources)
+    root = input_path if input_path.is_dir() else input_path.parent
+    for source, fingerprint in sorted(incoming_sources.items()):
+        if source in ledger_sources:
+            continue
+        candidates = [
+            previous_source
+            for previous_source, previous_fingerprint in ledger_sources.items()
+            if previous_source not in incoming_names
+            and previous_fingerprint == fingerprint
+            and not (root / previous_source).exists()
+        ]
+        if len(candidates) == 1:
+            rename_map[source] = candidates[0]
+        elif len(candidates) > 1:
+            ambiguous.add(source)
+    return rename_map, ambiguous
+
+
+def _identity_occurrence(row: dict[str, str]) -> int | None:
+    if row.get("identity_version", "").strip() != TRANSACTION_IDENTITY_VERSION:
+        return None
+    try:
+        occurrence = int(row.get("identity_occurrence", ""))
+    except (TypeError, ValueError):
+        return None
+    return occurrence if occurrence > 0 else None
+
+
+def _source_position_key(row: dict[str, str]) -> tuple[Decimal, Decimal, str]:
+    def coordinate(value: str) -> Decimal:
+        try:
+            return Decimal(str(value))
+        except InvalidOperation:
+            return Decimal("Infinity")
+
+    return (
+        coordinate(row.get("source_page", "") or "0"),
+        coordinate(row.get("source_row", "") or "0"),
+        row.get("transaction_id", ""),
+    )
+
+
+def _identity_allocation_key(row: dict[str, str]) -> tuple[str, Decimal, Decimal, str]:
+    page, source_row, _ = _source_position_key(row)
+    return (
+        row.get("identity_source_fingerprint", ""),
+        page,
+        source_row,
+        row.get("source_file", ""),
+    )
+
+
+def _indistinguishable_new_identity_rows(
+    rows: list[dict[str, str]],
+) -> list[dict[str, str]]:
+    signatures: dict[tuple[str, Decimal, Decimal], list[dict[str, str]]] = {}
+    for row in rows:
+        page, source_row, _ = _source_position_key(row)
+        signature = (
+            row.get("identity_source_fingerprint", ""),
+            page,
+            source_row,
+        )
+        signatures.setdefault(signature, []).append(row)
+    return [row for group in signatures.values() if len(group) > 1 for row in group]
+
+
+def _set_transaction_identity(
+    row: dict[str, str],
+    fingerprint: str,
+    occurrence: int,
+    *,
+    transaction_id: str | None = None,
+) -> None:
+    row["identity_version"] = TRANSACTION_IDENTITY_VERSION
+    row["identity_fingerprint"] = fingerprint
+    row["identity_occurrence"] = str(occurrence)
+    row["transaction_id"] = transaction_id or _transaction_id_for_occurrence(
+        row, occurrence
+    )
+
+
+def _transaction_id_for_occurrence(transaction: dict[str, str], occurrence: int) -> str:
+    base = _transaction_identity_base(transaction)
+    suffix = "" if occurrence == 1 else f":{occurrence}"
+    digest = hashlib.sha256(f"{base}{suffix}".encode("utf-8")).hexdigest()[:16]
+    return f"txn_{digest}"
 
 
 def _transaction_identity_base(transaction: dict[str, str]) -> str:
@@ -4079,6 +4378,18 @@ def _relative_source(path: Path, input_root: Path) -> str:
         return str(path.relative_to(root))
     except ValueError:
         return path.name
+
+
+def _enforce_identity_review(transactions: list[dict[str, str]]) -> None:
+    for transaction in transactions:
+        flags = {flag for flag in transaction.get("flags", "").split(";") if flag}
+        if IDENTITY_AMBIGUITY_FLAG not in flags:
+            continue
+        transaction["needs_review"] = "true"
+        transaction["reason"] = _append_reason(
+            transaction.get("reason", ""),
+            "Ambiguous transaction identity; manual review required",
+        )
 
 
 def _annotate_duplicate_suspicions(transactions: list[dict[str, str]]) -> None:

@@ -5,7 +5,7 @@ import unittest
 
 import pdfplumber
 
-from honeymoney.cli import _assign_transaction_ids
+from honeymoney.cli import _reconcile_transaction_identities
 from tests.golden_helpers import (
     FIXTURE_DIR,
     assert_import_case,
@@ -15,6 +15,19 @@ from tests.golden_helpers import (
     load_profile,
     starter_profile,
 )
+
+
+def _assign_transaction_ids(
+    rows: list[dict[str, str]], case_dir
+) -> list[dict[str, str]]:
+    """Assign identity-v2 transaction IDs against an empty ledger."""
+    _reconcile_transaction_identities(
+        rows,
+        [],
+        input_path=case_dir,
+        replace_requested=False,
+    )
+    return rows
 
 
 class StarterCsvProfileTest(unittest.TestCase):
@@ -48,10 +61,12 @@ class HsbcOnePdfProfileTest(unittest.TestCase):
         second_rows, _ = import_profile_case(profile, case_dir)
 
         first_ids = [
-            row["transaction_id"] for row in _assign_transaction_ids(first_rows)
+            row["transaction_id"]
+            for row in _assign_transaction_ids(first_rows, case_dir)
         ]
         second_ids = [
-            row["transaction_id"] for row in _assign_transaction_ids(second_rows)
+            row["transaction_id"]
+            for row in _assign_transaction_ids(second_rows, case_dir)
         ]
 
         self.assertEqual(first_ids, second_ids)
@@ -85,10 +100,12 @@ class MoxBankPdfProfileTest(unittest.TestCase):
         first_rows, _ = import_profile_case(profile, case_dir)
         second_rows, _ = import_profile_case(profile, case_dir)
         first_ids = [
-            row["transaction_id"] for row in _assign_transaction_ids(first_rows)
+            row["transaction_id"]
+            for row in _assign_transaction_ids(first_rows, case_dir)
         ]
         second_ids = [
-            row["transaction_id"] for row in _assign_transaction_ids(second_rows)
+            row["transaction_id"]
+            for row in _assign_transaction_ids(second_rows, case_dir)
         ]
 
         self.assertEqual(len(first_ids), 5)

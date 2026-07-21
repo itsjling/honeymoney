@@ -26,6 +26,10 @@ def offline_ollama_env(
 
 EXPECTED_CATEGORIZED_COLUMNS = [
     "transaction_id",
+    "identity_version",
+    "identity_fingerprint",
+    "identity_source_fingerprint",
+    "identity_occurrence",
     "date",
     "transaction_date",
     "posting_date",
@@ -1680,6 +1684,7 @@ class CliBootstrapTest(unittest.TestCase):
                     "--no-interactive",
                 ],
                 cwd=Path(__file__).resolve().parents[1],
+                env={**os.environ, "PYTHONWARNINGS": "error::DeprecationWarning"},
                 text=True,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -1821,6 +1826,11 @@ class CliBootstrapTest(unittest.TestCase):
 
             self.assertEqual(len(rows), 2)
             self.assertNotEqual(rows[0]["transaction_id"], rows[1]["transaction_id"])
+            self.assertEqual([row["identity_version"] for row in rows], ["2", "2"])
+            self.assertEqual([row["identity_occurrence"] for row in rows], ["1", "2"])
+            self.assertEqual(
+                rows[0]["identity_fingerprint"], rows[1]["identity_fingerprint"]
+            )
             self.assertIn("duplicate_identity_collision", rows[0]["flags"])
             self.assertIn("duplicate_identity_collision", rows[1]["flags"])
 
@@ -3186,14 +3196,22 @@ class CliBootstrapTest(unittest.TestCase):
                     [
                         "duplicate_identity_collision",
                         "duplicate_suspected",
+                        "identity_reconciliation_ambiguous",
                         "matched_rule:parksnshop-groceries",
                     ],
                     [
                         "duplicate_identity_collision",
                         "duplicate_suspected",
+                        "identity_reconciliation_ambiguous",
                         "matched_rule:parksnshop-groceries",
                     ],
                 ],
+            )
+            self.assertTrue(
+                any(
+                    "Ambiguous transaction identity" in warning
+                    for warning in report["warnings"]
+                )
             )
             self.assertEqual(
                 [file_report["source_file"] for file_report in report["files"]],

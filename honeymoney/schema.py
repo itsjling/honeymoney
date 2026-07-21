@@ -2,6 +2,10 @@ from __future__ import annotations
 
 CATEGORIZED_COLUMNS = [
     "transaction_id",
+    "identity_version",
+    "identity_fingerprint",
+    "identity_source_fingerprint",
+    "identity_occurrence",
     "date",
     "transaction_date",
     "posting_date",
@@ -41,6 +45,10 @@ CATEGORIZED_COLUMNS = [
 
 REVIEW_NEEDED_COLUMNS = [
     "transaction_id",
+    "identity_version",
+    "identity_fingerprint",
+    "identity_source_fingerprint",
+    "identity_occurrence",
     "date",
     "transaction_date",
     "posting_date",

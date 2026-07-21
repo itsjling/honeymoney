@@ -13,7 +13,7 @@ config + profiles + statement files
 profile detection and CSV/PDF parsing
                  |
                  v
-normalized rows + stable transaction IDs
+normalized rows + ledger-aware transaction identity reconciliation
                  |
                  v
 deterministic rules -> duplicate checks -> structural classification -> optional local Ollama
@@ -84,6 +84,45 @@ equal-base-currency candidates within the configured date window receive stable
 transfer links derived from their existing transaction IDs. Ambiguous candidates
 are never auto-paired. Reports derive old ledgers in memory, and `reconcile`
 provides an explicit inspect/rewrite seam.
+
+## Transaction identity
+
+Transaction identity v2 separates a row's canonical financial fingerprint from
+its persisted occurrence. The canonical fingerprint still excludes filenames
+and parser coordinates. `categorized.csv` persists `identity_version`,
+`identity_fingerprint`, `identity_source_fingerprint`, and
+`identity_occurrence`; reconciliation consults those columns before allocating
+IDs to a new import. Occurrence 1 retains the unsuffixed v1 ID, so legacy
+non-colliding keys and their corrections migrate in place.
+
+A filename-independent source fingerprint recognizes an unchanged statement
+after a move or rename when the old path is absent. Existing occurrences are
+also reused for unchanged replacements. New sources allocate after the
+ledger's highest occurrence, making identical rows imported sequentially as
+distinct as rows imported together and removing directory discovery order from
+the key.
+
+When identical occurrences are inserted or removed, or legacy collision rows
+lack persisted occurrence metadata, the surviving real-world occurrence is not
+knowable. Honeymoney assigns a fresh deterministic occurrence range, adds
+`identity_reconciliation_ambiguous`, requires review, and emits a warning. Old
+corrections remain unmatched instead of being guessed. The full contract and
+case analysis are recorded in
+[`ADR 0001`](adr/0001-stable-transaction-identity.md).
+
+## Persistence authority and recovery
+
+`categorized.csv` is the authoritative ledger. `review_needed.csv` is a
+deterministic view of its rows whose `needs_review` value is `true`.
+`import_report.json` is a snapshot derived from the most recent successful
+import; review and correction commands do not rewrite that historical import
+snapshot. `corrections.csv` remains durable input for applying reviewed choices
+to future imports, but it is not a second ledger.
+
+Identity metadata is part of the same authoritative ledger row, not a sidecar.
+It therefore participates in the same recoverable filesystem persistence
+generation as categories, review state, and source traceability (see
+"Filesystem persistence" above).
 
 ## Source map
 

@@ -19,7 +19,7 @@ from honeymoney.cli import (
     _StatusLine,
 )
 from honeymoney.ollama import OllamaHttpRequest, apply_ollama_fallback
-from honeymoney.schema import ALLOWED_CATEGORIES
+from honeymoney.schema import ALLOWED_CATEGORIES, CATEGORIZED_COLUMNS
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -370,6 +370,325 @@ def open(path):
                 list((root / "output").glob(".*honeymoney-state.json")), []
             )
 
+    def _ledger_rows(self, root: Path) -> list[dict[str, str]]:
+        with (root / "output" / "categorized.csv").open(
+            newline="", encoding="utf-8"
+        ) as fh:
+            return list(csv.DictReader(fh))
+
+    def test_identical_rows_have_same_ids_together_and_sequentially(self) -> None:
+        identical = "2026-05-04,REPEATED CHARGE,-12.00,HKD"
+        with tempfile.TemporaryDirectory() as together_tmp:
+            together_root = self._setup_workspace(together_tmp)
+            statement = together_root / "together.csv"
+            self._write_statement(statement, [identical, identical])
+            result = self._run_cli(
+                ["import", str(statement), "--no-interactive"], cwd=together_root
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            together_ids = {
+                row["transaction_id"] for row in self._ledger_rows(together_root)
+            }
+
+        with tempfile.TemporaryDirectory() as sequential_tmp:
+            sequential_root = self._setup_workspace(sequential_tmp)
+            first = sequential_root / "first.csv"
+            second = sequential_root / "second.csv"
+            self._write_statement(first, [identical])
+            self._write_statement(second, [identical])
+            for statement in (first, second):
+                result = self._run_cli(
+                    ["import", str(statement), "--no-interactive"],
+                    cwd=sequential_root,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+            sequential_rows = self._ledger_rows(sequential_root)
+
+        self.assertEqual(len(together_ids), 2)
+        self.assertEqual(len(sequential_rows), 2)
+        self.assertEqual(
+            {row["transaction_id"] for row in sequential_rows}, together_ids
+        )
+        self.assertEqual(
+            {row["identity_occurrence"] for row in sequential_rows}, {"1", "2"}
+        )
+
+    def test_renamed_statement_reuses_identity_when_old_path_is_gone(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._setup_workspace(tmp)
+            old_path = root / "old-name.csv"
+            new_path = root / "new-name.csv"
+            repeated = "2026-05-04,RENAMED STATEMENT,-12.00,HKD"
+            self._write_statement(old_path, [repeated, repeated])
+            first = self._run_cli(
+                ["import", str(old_path), "--no-interactive"], cwd=root
+            )
+            self.assertEqual(first.returncode, 0, first.stderr)
+            before = self._ledger_rows(root)
+            (root / "corrections.csv").write_text(
+                "transaction_id,category,reason\n"
+                f"{before[1]['transaction_id']},Dining,Synthetic rename review\n",
+                encoding="utf-8",
+            )
+
+            old_path.rename(new_path)
+            renamed = self._run_cli(
+                ["import", str(new_path), "--no-interactive"], cwd=root
+            )
+
+            self.assertEqual(renamed.returncode, 0, renamed.stderr)
+            after = self._ledger_rows(root)
+            self.assertEqual(
+                [row["transaction_id"] for row in after],
+                [row["transaction_id"] for row in before],
+            )
+            self.assertEqual([row["identity_occurrence"] for row in after], ["1", "2"])
+            self.assertEqual([row["category"] for row in after], ["Unknown", "Dining"])
+            self.assertEqual({row["source_file"] for row in after}, {"new-name.csv"})
+
+    def test_directory_creation_order_does_not_change_identity(self) -> None:
+        def import_directory(
+            tmp: str, creation_order: tuple[str, str]
+        ) -> dict[str, str]:
+            root = self._setup_workspace(tmp)
+            input_dir = root / "statements"
+            input_dir.mkdir()
+            rows_by_name = {
+                "alpha.csv": [
+                    "2026-05-04,ORDER INDEPENDENT,-12.00,HKD",
+                    "2026-05-05,ALPHA ONLY,-1.00,HKD",
+                ],
+                "beta.csv": [
+                    "2026-05-04,ORDER INDEPENDENT,-12.00,HKD",
+                    "2026-05-06,BETA ONLY,-2.00,HKD",
+                ],
+            }
+            for name in creation_order:
+                self._write_statement(input_dir / name, rows_by_name[name])
+            result = self._run_cli(
+                ["import", str(input_dir), "--no-interactive"], cwd=root
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            return {
+                row["identity_source_fingerprint"]: row["transaction_id"]
+                for row in self._ledger_rows(root)
+                if row["merchant"] == "ORDER INDEPENDENT"
+            }
+
+        with tempfile.TemporaryDirectory() as first_tmp:
+            first = import_directory(first_tmp, ("alpha.csv", "beta.csv"))
+        with tempfile.TemporaryDirectory() as second_tmp:
+            second = import_directory(second_tmp, ("beta.csv", "alpha.csv"))
+
+        self.assertEqual(len(first), 2)
+        self.assertEqual(first, second)
+
+    def test_changed_identical_collision_is_quarantined_without_guessing(self) -> None:
+        identical = "2026-05-04,AMBIGUOUS REPEAT,-12.00,HKD"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._setup_workspace(tmp)
+            statement = root / "repeats.csv"
+            self._write_statement(statement, [identical, identical])
+            first = self._run_cli(
+                ["import", str(statement), "--no-interactive"], cwd=root
+            )
+            self.assertEqual(first.returncode, 0, first.stderr)
+            original_rows = self._ledger_rows(root)
+            old_ids = {row["transaction_id"] for row in original_rows}
+            corrected_id = original_rows[1]["transaction_id"]
+            (root / "corrections.csv").write_text(
+                "transaction_id,category,reason\n"
+                f"{corrected_id},Dining,Synthetic collision review\n",
+                encoding="utf-8",
+            )
+
+            self._write_statement(statement, [identical, identical, identical])
+            inserted = self._run_cli(
+                ["import", str(statement), "--replace", "--no-interactive"],
+                cwd=root,
+            )
+            self.assertEqual(inserted.returncode, 0, inserted.stderr)
+            inserted_rows = self._ledger_rows(root)
+            inserted_ids = {row["transaction_id"] for row in inserted_rows}
+            self.assertTrue(old_ids.isdisjoint(inserted_ids))
+            self.assertTrue(all(row["needs_review"] == "true" for row in inserted_rows))
+            self.assertTrue(
+                all(
+                    "identity_reconciliation_ambiguous" in row["flags"]
+                    for row in inserted_rows
+                )
+            )
+            self.assertNotIn("Dining", {row["category"] for row in inserted_rows})
+            report = json.loads(
+                (root / "output" / "import_report.json").read_text(encoding="utf-8")
+            )
+            self.assertTrue(
+                any(
+                    "Ambiguous transaction identity" in item
+                    for item in report["warnings"]
+                )
+            )
+
+            corrected_new_id = inserted_rows[1]["transaction_id"]
+            (root / "corrections.csv").write_text(
+                "transaction_id,category,reason\n"
+                f"{corrected_new_id},Shopping,Synthetic second review\n",
+                encoding="utf-8",
+            )
+            self._write_statement(statement, [identical, identical])
+            removed = self._run_cli(
+                ["import", str(statement), "--replace", "--no-interactive"],
+                cwd=root,
+            )
+            self.assertEqual(removed.returncode, 0, removed.stderr)
+            removed_rows = self._ledger_rows(root)
+            self.assertTrue(
+                inserted_ids.isdisjoint({row["transaction_id"] for row in removed_rows})
+            )
+            self.assertNotIn("Shopping", {row["category"] for row in removed_rows})
+
+    def test_collision_replace_preserves_correction_and_reset_clears_it(self) -> None:
+        identical = "2026-05-04,PERSISTED REPEAT,-12.00,HKD"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._setup_workspace(tmp)
+            statement = root / "repeats.csv"
+            self._write_statement(statement, [identical, identical])
+            first = self._run_cli(
+                ["import", str(statement), "--no-interactive"], cwd=root
+            )
+            self.assertEqual(first.returncode, 0, first.stderr)
+            original_rows = self._ledger_rows(root)
+            corrected_id = original_rows[1]["transaction_id"]
+            (root / "corrections.csv").write_text(
+                "transaction_id,category,reason\n"
+                f"{corrected_id},Dining,Synthetic persisted review\n",
+                encoding="utf-8",
+            )
+
+            replaced = self._run_cli(
+                ["import", str(statement), "--replace", "--no-interactive"],
+                cwd=root,
+            )
+            self.assertEqual(replaced.returncode, 0, replaced.stderr)
+            replaced_rows = self._ledger_rows(root)
+            self.assertEqual(
+                [row["transaction_id"] for row in replaced_rows],
+                [row["transaction_id"] for row in original_rows],
+            )
+            self.assertEqual(
+                [row["category"] for row in replaced_rows], ["Unknown", "Dining"]
+            )
+
+            reset = self._run_cli(
+                ["import", str(statement), "--reset", "--no-interactive"], cwd=root
+            )
+            self.assertEqual(reset.returncode, 0, reset.stderr)
+            self.assertEqual(
+                [row["category"] for row in self._ledger_rows(root)],
+                ["Unknown", "Unknown"],
+            )
+            self.assertEqual(
+                len(
+                    (root / "corrections.csv").read_text(encoding="utf-8").splitlines()
+                ),
+                1,
+            )
+
+    def test_legacy_identity_migration_is_conservative(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._setup_workspace(tmp)
+            statement = root / "legacy.csv"
+            self._write_statement(statement, ["2026-05-04,LEGACY SINGLE,-12.00,HKD"])
+            first = self._run_cli(
+                ["import", str(statement), "--no-interactive"], cwd=root
+            )
+            self.assertEqual(first.returncode, 0, first.stderr)
+            [row] = self._ledger_rows(root)
+            original_id = row["transaction_id"]
+            legacy_columns = [
+                column
+                for column in CATEGORIZED_COLUMNS
+                if not column.startswith("identity_")
+            ]
+            with (root / "output" / "categorized.csv").open(
+                "w", newline="", encoding="utf-8"
+            ) as fh:
+                writer = csv.DictWriter(fh, fieldnames=legacy_columns)
+                writer.writeheader()
+                writer.writerow({column: row[column] for column in legacy_columns})
+
+            migrated = self._run_cli(
+                ["import", str(statement), "--replace", "--no-interactive"],
+                cwd=root,
+            )
+            self.assertEqual(migrated.returncode, 0, migrated.stderr)
+            [migrated_row] = self._ledger_rows(root)
+            self.assertEqual(migrated_row["transaction_id"], original_id)
+            self.assertEqual(migrated_row["identity_version"], "2")
+            self.assertEqual(migrated_row["identity_occurrence"], "1")
+
+            self._write_statement(
+                statement,
+                [
+                    "2026-05-04,LEGACY COLLISION,-14.00,HKD",
+                    "2026-05-04,LEGACY COLLISION,-14.00,HKD",
+                ],
+            )
+            replaced = self._run_cli(
+                ["import", str(statement), "--replace", "--no-interactive"],
+                cwd=root,
+            )
+            self.assertEqual(replaced.returncode, 0, replaced.stderr)
+            collision_rows = self._ledger_rows(root)
+            legacy_ids = {"txn_legacy_first", "txn_legacy_second"}
+            for index, collision_row in enumerate(collision_rows):
+                collision_row["transaction_id"] = sorted(legacy_ids)[index]
+                for field in list(collision_row):
+                    if field.startswith("identity_"):
+                        collision_row.pop(field)
+            with (root / "output" / "categorized.csv").open(
+                "w", newline="", encoding="utf-8"
+            ) as fh:
+                writer = csv.DictWriter(fh, fieldnames=legacy_columns)
+                writer.writeheader()
+                writer.writerows(collision_rows)
+            (root / "corrections.csv").write_text(
+                "transaction_id,category,reason\n"
+                "txn_legacy_first,Dining,Synthetic legacy review\n",
+                encoding="utf-8",
+            )
+
+            ambiguous = self._run_cli(
+                ["import", str(statement), "--replace", "--no-interactive"],
+                cwd=root,
+            )
+            self.assertEqual(ambiguous.returncode, 0, ambiguous.stderr)
+            ambiguous_rows = self._ledger_rows(root)
+            self.assertTrue(
+                legacy_ids.isdisjoint(
+                    {item["transaction_id"] for item in ambiguous_rows}
+                )
+            )
+            self.assertTrue(
+                all(
+                    "identity_reconciliation_ambiguous" in item["flags"]
+                    for item in ambiguous_rows
+                )
+            )
+            self.assertTrue(
+                all(item["needs_review"] == "true" for item in ambiguous_rows)
+            )
+            self.assertNotIn("Dining", {item["category"] for item in ambiguous_rows})
+            report = json.loads(
+                (root / "output" / "import_report.json").read_text(encoding="utf-8")
+            )
+            self.assertTrue(
+                any(
+                    "legacy collision has no persisted occurrence metadata" in warning
+                    for warning in report["warnings"]
+                )
+            )
+
     def test_import_prompts_to_categorize_and_saves_correction(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = self._setup_workspace(tmp)
@@ -514,7 +833,33 @@ def open(path):
                 rows = list(csv.DictReader(fh))
             self.assertEqual([row["merchant"] for row in rows], ["PARKNSHOP"])
 
-    def test_import_replace_preserves_rows_for_disabled_pdf(self) -> None:
+    def test_unchanged_single_row_replace_does_not_create_identity_collision(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._setup_workspace(tmp)
+            statement = root / "single.csv"
+            self._write_statement(
+                statement, ["2026-05-04,SINGLE OCCURRENCE,-12.00,HKD"]
+            )
+            first = self._run_cli(
+                ["import", str(statement), "--no-interactive"], cwd=root
+            )
+            self.assertEqual(first.returncode, 0, first.stderr)
+            [before] = self._ledger_rows(root)
+
+            replaced = self._run_cli(
+                ["import", str(statement), "--replace", "--no-interactive"],
+                cwd=root,
+            )
+
+            self.assertEqual(replaced.returncode, 0, replaced.stderr)
+            [after] = self._ledger_rows(root)
+            self.assertEqual(after["transaction_id"], before["transaction_id"])
+            self.assertEqual(after["identity_occurrence"], "1")
+            self.assertNotIn("duplicate_identity_collision", after["flags"])
+
+    def test_replace_preserves_pdf_ledger_when_pdf_support_is_disabled(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root, fake_modules, statement, config_path = (
                 self._seed_pdf_replacement_workspace(tmp)

@@ -132,7 +132,9 @@ class SpreadsheetSafeCsvTest(unittest.TestCase):
             ledger_path.write_text(ledger_text, encoding="utf-8", newline="")
 
             ledger_bytes = ledger_path.read_bytes()
-            self.assertTrue(ledger_bytes.startswith(b"transaction_id,date,"))
+            self.assertTrue(
+                ledger_bytes.startswith(b"transaction_id,identity_version,")
+            )
             first_data_line = ledger_bytes.splitlines()[1]
             self.assertEqual(first_data_line.count(b",-12.34,"), 3)
             self.assertIn(b",0.25,true,", first_data_line)
@@ -213,7 +215,7 @@ class SpreadsheetSafeCsvTest(unittest.TestCase):
             self.assertEqual(loaded["notes"], "'=LEGACY NOTE")
 
             migrated = ledger_output_documents(ledger_path, [loaded])[ledger_path]
-            self.assertTrue(migrated.startswith("transaction_id,date"))
+            self.assertTrue(migrated.startswith("transaction_id,identity_version,"))
             ledger_path.write_text(migrated, encoding="utf-8", newline="")
             [reloaded] = read_ledger(ledger_path)
             self.assertEqual(reloaded["merchant"], "'=LEGACY MERCHANT")
