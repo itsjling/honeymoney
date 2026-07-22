@@ -310,7 +310,7 @@ def _run_pipeline(
     _status.update("Applying local categorization memory...")
     apply_local_categorization_memory(transactions, local_memory, config)
     _status.update("Checking for duplicates...")
-    _annotate_duplicate_suspicions(transactions)
+    _annotate_duplicate_suspicions(transactions, resolution.retained_ledger_rows)
     _status.update("Applying structural classifications...")
     structural_count = apply_structural_classification(transactions, config)
     ollama_report, ollama_warnings = apply_ollama_fallback(
@@ -4275,37 +4275,75 @@ def _enforce_identity_review(transactions: list[dict[str, str]]) -> None:
         )
 
 
-def _annotate_duplicate_suspicions(transactions: list[dict[str, str]]) -> None:
-    duplicate_keys: dict[str, int] = {}
-    for transaction in transactions:
+def _annotate_duplicate_suspicions(
+    transactions: list[dict[str, str]],
+    retained_ledger_rows: tuple[dict[str, str], ...]
+    | list[dict[str, str]]
+    | None = None,
+    *,
+    operation_counts: dict[str, int] | None = None,
+) -> None:
+    """Flag only incoming rows that match an incoming or retained row."""
+    comparison_rows = [*(retained_ledger_rows or ()), *transactions]
+    current_row_ids = {id(transaction) for transaction in transactions}
+    if operation_counts is not None:
+        operation_counts["date_parses"] = 0
+        operation_counts["window_checks"] = 0
+
+    row_records: list[
+        tuple[dict[str, str], date | None, tuple[str, ...], tuple[str, ...], bool]
+    ] = []
+    duplicate_keys: dict[tuple[str, ...], int] = {}
+    for transaction in comparison_rows:
         key = _duplicate_key(transaction)
         duplicate_keys[key] = duplicate_keys.get(key, 0) + 1
+        transaction_date = _parse_iso_date(transaction.get("date", ""))
+        if operation_counts is not None:
+            operation_counts["date_parses"] += 1
+        row_records.append(
+            (
+                transaction,
+                transaction_date,
+                key,
+                _duplicate_key_without_date(transaction),
+                id(transaction) in current_row_ids,
+            )
+        )
 
-    for transaction in transactions:
-        if duplicate_keys[_duplicate_key(transaction)] > 1:
+    for transaction, _date, key, _near_key, is_current in row_records:
+        if is_current and duplicate_keys[key] > 1:
             _mark_duplicate(transaction)
 
-    near_date_groups: dict[str, list[dict[str, str]]] = {}
-    for transaction in transactions:
-        near_date_groups.setdefault(
-            _duplicate_key_without_date(transaction), []
-        ).append(transaction)
+    near_date_groups: dict[
+        tuple[str, ...], list[tuple[date, int, dict[str, str], bool]]
+    ] = {}
+    for index, (transaction, transaction_date, _key, near_key, is_current) in enumerate(
+        row_records
+    ):
+        if transaction_date is not None:
+            near_date_groups.setdefault(near_key, []).append(
+                (transaction_date, index, transaction, is_current)
+            )
 
     for group in near_date_groups.values():
-        for index, transaction in enumerate(group):
-            transaction_date = _parse_iso_date(transaction.get("date", ""))
-            if transaction_date is None:
+        group.sort(key=lambda item: (item[0], item[1]))
+        for index, (transaction_date, _order, transaction, is_current) in enumerate(
+            group
+        ):
+            if not is_current:
                 continue
-            for other in group[index + 1 :]:
-                other_date = _parse_iso_date(other.get("date", ""))
-                if other_date is None:
+            for neighbor_index in (index - 1, index + 1):
+                if not 0 <= neighbor_index < len(group):
                     continue
+                if operation_counts is not None:
+                    operation_counts["window_checks"] += 1
+                other_date = group[neighbor_index][0]
                 if abs((transaction_date - other_date).days) <= 1:
                     _mark_duplicate(transaction)
-                    _mark_duplicate(other)
+                    break
 
 
-def _duplicate_key(transaction: dict[str, str]) -> str:
+def _duplicate_key(transaction: dict[str, str]) -> tuple[str, ...]:
     fields = [
         "date",
         "amount_hkd",
@@ -4314,12 +4352,10 @@ def _duplicate_key(transaction: dict[str, str]) -> str:
         "merchant",
         "original_description",
     ]
-    return "|".join(
-        _normalized_match_text(transaction.get(field, "")) for field in fields
-    )
+    return tuple(_normalized_match_text(transaction.get(field, "")) for field in fields)
 
 
-def _duplicate_key_without_date(transaction: dict[str, str]) -> str:
+def _duplicate_key_without_date(transaction: dict[str, str]) -> tuple[str, ...]:
     fields = [
         "amount_hkd",
         "original_amount",
@@ -4327,9 +4363,7 @@ def _duplicate_key_without_date(transaction: dict[str, str]) -> str:
         "merchant",
         "original_description",
     ]
-    return "|".join(
-        _normalized_match_text(transaction.get(field, "")) for field in fields
-    )
+    return tuple(_normalized_match_text(transaction.get(field, "")) for field in fields)
 
 
 def _parse_iso_date(value: str) -> date | None:
