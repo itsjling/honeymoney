@@ -18,6 +18,7 @@ from honeymoney.cli import (
     _starter_csv_profile,
     _StatusLine,
 )
+from honeymoney.identity_state import load_identity_state
 from honeymoney.ollama import OllamaHttpRequest, apply_ollama_fallback
 from honeymoney.schema import ALLOWED_CATEGORIES
 
@@ -504,6 +505,137 @@ def open(path):
             newline="", encoding="utf-8"
         ) as fh:
             return list(csv.DictReader(fh))
+
+    def test_import_loads_identity_state_once(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._setup_workspace(tmp)
+            statement = root / "single-identity-load.csv"
+            self._write_statement(statement, ["2026-07-01,SINGLE LOAD,-10.00,HKD"])
+            previous_cwd = Path.cwd()
+            try:
+                os.chdir(root)
+                with patch(
+                    "honeymoney.cli.load_identity_state",
+                    wraps=load_identity_state,
+                ) as load_patch:
+                    result = cli._run_pipeline(
+                        ["--input", str(statement), "--no-interactive"]
+                    )
+            finally:
+                os.chdir(previous_cwd)
+
+            self.assertEqual(result, 0)
+            self.assertEqual(load_patch.call_count, 1)
+
+    def test_cross_import_duplicate_preserves_validated_history(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._setup_workspace(tmp)
+            history = root / "history.csv"
+            self._write_statement(
+                history,
+                [
+                    "2026-05-04,REVIEWED REPEAT,-12.00,HKD",
+                    "2026-05-01,HISTORY CONTEXT,-1.00,HKD",
+                ],
+            )
+            first = self._run_cli(
+                ["import", str(history), "--no-interactive"], cwd=root
+            )
+            self.assertEqual(first.returncode, 0, first.stderr)
+            categorized_path = root / "output" / "categorized.csv"
+            state = load_identity_state(categorized_path)
+            historical_id = next(
+                row["transaction_id"]
+                for row in state.rows
+                if row["merchant"] == "REVIEWED REPEAT"
+            )
+            corrected = self._run_cli(
+                ["correct", "--file", "-", "--json"],
+                cwd=root,
+                input_text=json.dumps(
+                    [
+                        {
+                            "transaction_id": historical_id,
+                            "category": "Dining",
+                            "needs_review": False,
+                            "reason": "Synthetic historical review",
+                        }
+                    ]
+                ),
+            )
+            self.assertEqual(corrected.returncode, 0, corrected.stderr)
+
+            candidate = root / "candidate.csv"
+            self._write_statement(
+                candidate,
+                [
+                    "2026-05-04,REVIEWED REPEAT,-12.00,HKD",
+                    "2026-05-02,CANDIDATE CONTEXT,-2.00,HKD",
+                ],
+            )
+            imported = self._run_cli(
+                ["import", str(candidate), "--no-interactive", "--json"], cwd=root
+            )
+            self.assertEqual(imported.returncode, 0, imported.stderr)
+            self.assertEqual(json.loads(imported.stdout)["data"]["duplicate_count"], 1)
+
+            state = load_identity_state(categorized_path)
+            historical = next(
+                row for row in state.rows if row["transaction_id"] == historical_id
+            )
+            incoming = next(
+                row
+                for row in state.rows
+                if row["source_file"] == "candidate.csv"
+                and row["merchant"] == "REVIEWED REPEAT"
+            )
+            self.assertEqual(historical["category"], "Dining")
+            self.assertEqual(historical["needs_review"], "false")
+            self.assertNotIn("duplicate_suspected", historical["flags"])
+            self.assertEqual(
+                incoming["flags"].split(";").count("duplicate_suspected"), 1
+            )
+            self.assertEqual(
+                incoming["reason"].count("Possible duplicate transaction"), 1
+            )
+
+    def test_source_replacement_excludes_retired_rows_from_duplicate_checks(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._setup_workspace(tmp)
+            statement = root / "replacement.csv"
+            self._write_statement(
+                statement,
+                [
+                    "2026-05-04,REPLACED ROW,-12.00,HKD",
+                    "2026-05-01,CONTEXT,-1.00,HKD",
+                ],
+            )
+            first = self._run_cli(
+                ["import", str(statement), "--no-interactive"], cwd=root
+            )
+            self.assertEqual(first.returncode, 0, first.stderr)
+            self._write_statement(
+                statement,
+                [
+                    "2026-05-05,REPLACED ROW,-12.00,HKD",
+                    "2026-05-01,CONTEXT,-1.00,HKD",
+                ],
+            )
+
+            replaced = self._run_cli(
+                ["import", str(statement), "--replace", "--no-interactive", "--json"],
+                cwd=root,
+            )
+            self.assertEqual(replaced.returncode, 0, replaced.stderr)
+            self.assertEqual(json.loads(replaced.stdout)["data"]["duplicate_count"], 0)
+            state = load_identity_state(root / "output" / "categorized.csv")
+            replacement = next(
+                row for row in state.rows if row["merchant"] == "REPLACED ROW"
+            )
+            self.assertEqual(replacement["date"], "2026-05-05")
+            self.assertNotIn("duplicate_suspected", replacement["flags"])
 
     def _legacy_ledger_row(
         self,
