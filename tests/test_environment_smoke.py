@@ -3,7 +3,7 @@ import json
 import unittest
 from pathlib import Path
 
-from honeymoney.cli import _load_profiles
+from honeymoney.importers import _load_profiles
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 

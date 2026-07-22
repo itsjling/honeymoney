@@ -12,11 +12,7 @@ from unittest.mock import patch
 
 import pdfplumber
 
-from honeymoney.cli import (
-    _import_pdf,
-    _import_transactions,
-    _load_config_document,
-)
+from honeymoney.cli import _load_config_document
 from honeymoney.identity import (
     IdentityError,
     empty_manifest,
@@ -24,6 +20,7 @@ from honeymoney.identity import (
     resolve_batch,
     source_namespace_id,
 )
+from honeymoney.importers import _import_pdf, _import_transactions
 from tests.golden_helpers import (
     FIXTURE_DIR,
     assert_import_case,

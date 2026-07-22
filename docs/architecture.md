@@ -140,8 +140,12 @@ changing it.
 
 ## Source map
 
-- `honeymoney/cli.py`: command routing, workspace setup, imports, profile
-  selection, normalization, ledger management, review filtering, and JSON output.
+- `honeymoney/cli.py`: command routing, workspace setup, identity resolution,
+  ledger generation, categorization, review filtering, and JSON output.
+- `honeymoney/importers.py`: input discovery, profile validation and selection,
+  CSV/PDF parsing, parser locators, and private source identity inputs.
+- `honeymoney/normalization.py`: pure row/date/amount/text normalization and
+  incoming duplicate suspicion checks.
 - `honeymoney/identity.py`: identity-v2 digests, validation, source and record
   resolution, manifest ownership, and safe identity diagnostics.
 - `honeymoney/identity_state.py`: ledger and manifest loading, bootstrap rules,

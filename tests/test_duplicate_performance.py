@@ -1,7 +1,7 @@
 import unittest
 from datetime import date, timedelta
 
-from honeymoney.cli import _annotate_duplicate_suspicions
+from honeymoney.normalization import _annotate_duplicate_suspicions
 
 DUPLICATE_FLAG = "duplicate_suspected"
 DUPLICATE_REASON = "Possible duplicate transaction"
