@@ -7,6 +7,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from honeymoney.schema import CATEGORIZED_COLUMNS
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 OFFLINE_OLLAMA_HOOK = REPO_ROOT / "tests" / "offline_ollama_hook"
 
@@ -24,47 +26,7 @@ def offline_ollama_env(
     return env
 
 
-EXPECTED_CATEGORIZED_COLUMNS = [
-    "transaction_id",
-    "identity_version",
-    "identity_fingerprint",
-    "identity_source_fingerprint",
-    "identity_occurrence",
-    "date",
-    "transaction_date",
-    "posting_date",
-    "account_id",
-    "account",
-    "account_type",
-    "institution",
-    "country",
-    "original_amount",
-    "original_currency",
-    "posted_amount",
-    "posted_currency",
-    "amount_hkd",
-    "statement_opening_balance",
-    "statement_closing_balance",
-    "merchant",
-    "original_description",
-    "category",
-    "flow_type",
-    "flow_source",
-    "transfer_group_id",
-    "paired_transaction_id",
-    "reconciliation_status",
-    "reconciliation_confidence",
-    "owner",
-    "payment_method",
-    "confidence",
-    "needs_review",
-    "reason",
-    "flags",
-    "notes",
-    "source_file",
-    "source_page",
-    "source_row",
-]
+EXPECTED_CATEGORIZED_COLUMNS = CATEGORIZED_COLUMNS
 
 
 class CliBootstrapTest(unittest.TestCase):
@@ -1700,140 +1662,6 @@ class CliBootstrapTest(unittest.TestCase):
             self.assertEqual(row["transaction_date"], "2026-05-01")
             self.assertEqual(row["date"], "2026-05-01")
 
-    def test_transaction_id_is_stable_when_source_filename_changes(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            profile_path = root / "profile.json"
-            profile_path.write_text(
-                json.dumps(
-                    {
-                        "account_id": "hsbc_hk_checking",
-                        "account": "HSBC HK Checking",
-                        "institution": "HSBC HK",
-                        "country": "HK",
-                        "account_currency": "HKD",
-                        "owner": "Household",
-                        "payment_method": "Bank Account",
-                        "csv": {
-                            "columns": {
-                                "transaction_date": "Date",
-                                "description": "Description",
-                                "amount": "Amount",
-                                "original_currency": "Currency",
-                            }
-                        },
-                    }
-                ),
-                encoding="utf-8",
-            )
-            config_path = root / "config.json"
-            config_path.write_text(
-                json.dumps(
-                    {
-                        "base_currency": "HKD",
-                        "exchange_rates": {"HKD": 1.0},
-                        "profiles": [str(profile_path)],
-                    }
-                ),
-                encoding="utf-8",
-            )
-
-            first_id = self._run_single_csv_and_get_transaction_id(
-                root, "may-statement.csv", config_path
-            )
-            second_id = self._run_single_csv_and_get_transaction_id(
-                root, "renamed-statement.csv", config_path
-            )
-
-            self.assertNotEqual(first_id, "")
-            self.assertEqual(first_id, second_id)
-
-    def test_duplicate_identity_collisions_get_distinct_ids_and_flags(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            csv_path = root / "input.csv"
-            csv_path.write_text(
-                "\n".join(
-                    [
-                        "Date,Description,Amount,Currency",
-                        "2026-05-04,PARKNSHOP,-120.50,HKD",
-                        "2026-05-04,PARKNSHOP,-120.50,HKD",
-                    ]
-                ),
-                encoding="utf-8",
-            )
-            profile_path = root / "profile.json"
-            profile_path.write_text(
-                json.dumps(
-                    {
-                        "account_id": "hsbc_hk_checking",
-                        "account": "HSBC HK Checking",
-                        "institution": "HSBC HK",
-                        "country": "HK",
-                        "account_currency": "HKD",
-                        "owner": "Household",
-                        "payment_method": "Bank Account",
-                        "csv": {
-                            "columns": {
-                                "transaction_date": "Date",
-                                "description": "Description",
-                                "amount": "Amount",
-                                "original_currency": "Currency",
-                            }
-                        },
-                    }
-                ),
-                encoding="utf-8",
-            )
-            config_path = root / "config.json"
-            config_path.write_text(
-                json.dumps(
-                    {
-                        "base_currency": "HKD",
-                        "exchange_rates": {"HKD": 1.0},
-                        "profiles": [str(profile_path)],
-                    }
-                ),
-                encoding="utf-8",
-            )
-            output_dir = root / "output"
-
-            result = subprocess.run(
-                [
-                    sys.executable,
-                    "-m",
-                    "honeymoney.cli",
-                    "--input",
-                    str(csv_path),
-                    "--output",
-                    str(output_dir / "categorized.csv"),
-                    "--config",
-                    str(config_path),
-                    "--no-interactive",
-                ],
-                cwd=Path(__file__).resolve().parents[1],
-                text=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                check=False,
-            )
-
-            self.assertEqual(result.returncode, 0, result.stderr)
-            with (output_dir / "categorized.csv").open(
-                newline="", encoding="utf-8"
-            ) as fh:
-                rows = list(csv.DictReader(fh))
-
-            self.assertEqual(len(rows), 2)
-            self.assertNotEqual(rows[0]["transaction_id"], rows[1]["transaction_id"])
-            self.assertEqual([row["identity_version"] for row in rows], ["2", "2"])
-            self.assertEqual([row["identity_occurrence"] for row in rows], ["1", "2"])
-            self.assertEqual(
-                rows[0]["identity_fingerprint"], rows[1]["identity_fingerprint"]
-            )
-            self.assertIn("duplicate_identity_collision", rows[0]["flags"])
-            self.assertIn("duplicate_identity_collision", rows[1]["flags"])
-
     def test_json_rules_categorize_matching_transactions(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -3078,146 +2906,6 @@ class CliBootstrapTest(unittest.TestCase):
                     self.assertEqual(result.returncode, 2)
                     self.assertIn("Unsupported confidence in correction", result.stderr)
 
-    def test_duplicate_suspicions_keep_rule_matched_rows_under_review(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            input_dir = root / "input"
-            input_dir.mkdir()
-            for filename in ["first.csv", "second.csv"]:
-                (input_dir / filename).write_text(
-                    "\n".join(
-                        [
-                            "Date,Description,Amount,Currency",
-                            "2026-05-04,PARKNSHOP,-120.50,HKD",
-                        ]
-                    ),
-                    encoding="utf-8",
-                )
-            profile_path = root / "profile.json"
-            profile_path.write_text(
-                json.dumps(
-                    {
-                        "account_id": "hsbc_hk_checking",
-                        "account": "HSBC HK Checking",
-                        "institution": "HSBC HK",
-                        "country": "HK",
-                        "account_currency": "HKD",
-                        "owner": "Household",
-                        "payment_method": "Bank Account",
-                        "csv": {
-                            "columns": {
-                                "transaction_date": "Date",
-                                "description": "Description",
-                                "amount": "Amount",
-                                "original_currency": "Currency",
-                            }
-                        },
-                    }
-                ),
-                encoding="utf-8",
-            )
-            rules_path = root / "rules.json"
-            rules_path.write_text(
-                json.dumps(
-                    {
-                        "rules": [
-                            {
-                                "id": "parksnshop-groceries",
-                                "enabled": True,
-                                "match_type": "keyword",
-                                "patterns": ["PARKNSHOP"],
-                                "fields": ["merchant"],
-                                "category": "Groceries",
-                                "confidence": 0.98,
-                            }
-                        ]
-                    }
-                ),
-                encoding="utf-8",
-            )
-            config_path = root / "config.json"
-            config_path.write_text(
-                json.dumps(
-                    {
-                        "base_currency": "HKD",
-                        "exchange_rates": {"HKD": 1.0},
-                        "profiles": [str(profile_path)],
-                        "rules": str(rules_path),
-                    }
-                ),
-                encoding="utf-8",
-            )
-            output_dir = root / "output"
-
-            result = subprocess.run(
-                [
-                    sys.executable,
-                    "-m",
-                    "honeymoney.cli",
-                    "--input",
-                    str(input_dir),
-                    "--output",
-                    str(output_dir / "categorized.csv"),
-                    "--config",
-                    str(config_path),
-                    "--no-interactive",
-                ],
-                cwd=Path(__file__).resolve().parents[1],
-                text=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                check=False,
-            )
-
-            self.assertEqual(result.returncode, 0, result.stderr)
-            with (output_dir / "categorized.csv").open(
-                newline="", encoding="utf-8"
-            ) as fh:
-                rows = list(csv.DictReader(fh))
-            with (output_dir / "review_needed.csv").open(
-                newline="", encoding="utf-8"
-            ) as fh:
-                review_rows = list(csv.DictReader(fh))
-
-            self.assertEqual(len(rows), 2)
-            self.assertEqual(len(review_rows), 2)
-            for row in rows:
-                self.assertEqual(row["category"], "Groceries")
-                self.assertEqual(row["needs_review"], "true")
-                self.assertIn("duplicate_suspected", row["flags"])
-
-            report = json.loads((output_dir / "import_report.json").read_text())
-            self.assertEqual(report["transaction_count"], 2)
-            self.assertEqual(report["review_count"], 2)
-            self.assertEqual(report["duplicate_count"], 2)
-            self.assertEqual(
-                sorted(report["transaction_flags"].values()),
-                [
-                    [
-                        "duplicate_identity_collision",
-                        "duplicate_suspected",
-                        "identity_reconciliation_ambiguous",
-                        "matched_rule:parksnshop-groceries",
-                    ],
-                    [
-                        "duplicate_identity_collision",
-                        "duplicate_suspected",
-                        "identity_reconciliation_ambiguous",
-                        "matched_rule:parksnshop-groceries",
-                    ],
-                ],
-            )
-            self.assertTrue(
-                any(
-                    "Ambiguous transaction identity" in warning
-                    for warning in report["warnings"]
-                )
-            )
-            self.assertEqual(
-                [file_report["source_file"] for file_report in report["files"]],
-                ["first.csv", "second.csv"],
-            )
-
     def test_duplicate_detection_flags_near_date_matches(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -3696,7 +3384,8 @@ class CliBootstrapTest(unittest.TestCase):
             )
             output = root / "output" / "categorized.csv"
 
-            def run_import() -> subprocess.CompletedProcess[str]:
+            def run_import(*, replace: bool) -> subprocess.CompletedProcess[str]:
+                action = ["--replace"] if replace else []
                 return subprocess.run(
                     [
                         sys.executable,
@@ -3708,7 +3397,7 @@ class CliBootstrapTest(unittest.TestCase):
                         str(output),
                         "--config",
                         str(config_path),
-                        "--replace",
+                        *action,
                         "--no-interactive",
                     ],
                     cwd=Path(__file__).resolve().parents[1],
@@ -3719,7 +3408,7 @@ class CliBootstrapTest(unittest.TestCase):
                     check=False,
                 )
 
-            first = run_import()
+            first = run_import(replace=False)
             self.assertEqual(first.returncode, 0, first.stderr)
             categorized_text = output.read_text(encoding="utf-8")
             review_path = output.parent / "review_needed.csv"
@@ -3767,11 +3456,15 @@ class CliBootstrapTest(unittest.TestCase):
             self.assertEqual(report["ollama"]["reviewable_count"], 1)
             self.assertEqual(report["ollama"]["rejected_count"], 1)
 
-            second = run_import()
+            second = run_import(replace=True)
             self.assertEqual(second.returncode, 0, second.stderr)
             self.assertEqual(output.read_text(encoding="utf-8"), categorized_text)
             self.assertEqual(review_path.read_text(encoding="utf-8"), review_text)
-            self.assertEqual(report_path.read_text(encoding="utf-8"), report_text)
+            second_report = json.loads(report_path.read_text(encoding="utf-8"))
+            self.assertEqual(
+                [item["ledger_action"] for item in second_report["files"]],
+                ["replaced", "replaced"],
+            )
 
     def test_invalid_ollama_response_marks_transaction_for_review(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

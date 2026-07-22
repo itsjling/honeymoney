@@ -10,8 +10,6 @@ from typing import Iterable, Mapping
 # public CSV column is treated as text and neutralized at serialization time.
 CANONICAL_CSV_COLUMNS = frozenset(
     {
-        "identity_version",
-        "identity_occurrence",
         "original_amount",
         "posted_amount",
         "amount_hkd",

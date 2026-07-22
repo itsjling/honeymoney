@@ -378,28 +378,32 @@ class CashFlowReviewTest(unittest.TestCase):
     def test_explicit_income_is_protected_from_transfer_pairing(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = self._setup_workspace(tmp)
-            self._import_rows(
-                root,
-                "pair.csv",
-                [
-                    "2026-05-04,CONFIRMED INCOME,500.00,HKD",
-                    "2026-05-04,EQUAL OUTFLOW,-500.00,HKD",
-                ],
+            profile_path = root / "profiles" / "starter_csv.json"
+            profile = json.loads(profile_path.read_text(encoding="utf-8"))
+            profile["csv"]["columns"]["account_id"] = "Account ID"
+            profile_path.write_text(json.dumps(profile), encoding="utf-8")
+            statement = root / "pair.csv"
+            statement.write_text(
+                "\n".join(
+                    [
+                        "Date,Description,Amount,Currency,Account ID",
+                        "2026-05-04,CONFIRMED INCOME,500.00,HKD,synthetic_primary",
+                        "2026-05-04,EQUAL OUTFLOW,-500.00,HKD,synthetic_secondary",
+                    ]
+                ),
+                encoding="utf-8",
             )
-            ledger_path = root / "output" / "categorized.csv"
-            rows = self._ledger(root)
-            rows[1]["account_id"] = "synthetic_secondary"
-            rows[1]["account"] = "Synthetic Secondary"
-            with ledger_path.open("w", newline="", encoding="utf-8") as fh:
-                writer = csv.DictWriter(fh, fieldnames=list(rows[0]))
-                writer.writeheader()
-                writer.writerows(rows)
+            imported = self._run_cli(
+                ["import", str(statement), "--no-interactive"], cwd=root
+            )
+            self.assertEqual(imported.returncode, 0, imported.stderr)
+            [income_row, _] = self._ledger(root)
 
             result = self._run_cli(
                 [
                     "review",
                     "--transaction",
-                    rows[0]["transaction_id"],
+                    income_row["transaction_id"],
                     "--as",
                     "income",
                     "--json",
