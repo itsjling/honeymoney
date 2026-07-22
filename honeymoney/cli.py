@@ -23,6 +23,10 @@ from importlib import resources
 from pathlib import Path
 from typing import Any
 
+from honeymoney.categorization_memory import (
+    apply_local_categorization_memory,
+    build_local_categorization_memory,
+)
 from honeymoney.classification_policy import (
     apply_structural_classification,
     validate_category_policies,
@@ -290,9 +294,21 @@ def _run_pipeline(
         _identity_diagnostic_warning(item) for item in resolution.diagnostics
     )
     reset_ids = set(resolution.reset_transaction_ids)
+    corrections = load_corrections(config)
+    correction_documents: dict[Path, str] = {}
+    if args.reset and config.get("corrections"):
+        corrections_path, corrections_content, corrections = (
+            prepare_corrections_document(config, removed_transaction_ids=reset_ids)
+        )
+        correction_documents[corrections_path] = corrections_content
+    local_memory = build_local_categorization_memory(
+        identity_state.rows, corrections, config
+    )
     _status.update("Applying categorization rules...")
     rules = load_rules(config)
     apply_rules(transactions, rules, config)
+    _status.update("Applying local categorization memory...")
+    apply_local_categorization_memory(transactions, local_memory, config)
     _status.update("Checking for duplicates...")
     _annotate_duplicate_suspicions(transactions)
     _status.update("Applying structural classifications...")
@@ -305,13 +321,6 @@ def _run_pipeline(
         for warning in ollama_warnings:
             print(f"Warning: {warning}", file=sys.stderr)
     _status.update("Applying corrections...")
-    corrections = load_corrections(config)
-    correction_documents: dict[Path, str] = {}
-    if args.reset and config.get("corrections"):
-        corrections_path, corrections_content, corrections = (
-            prepare_corrections_document(config, removed_transaction_ids=reset_ids)
-        )
-        correction_documents[corrections_path] = corrections_content
     apply_corrections(transactions, corrections)
     _enforce_identity_review(transactions)
     _status.clear()
@@ -651,6 +660,17 @@ def _validate_config_document(config: dict[str, Any]) -> None:
         if not isinstance(reconciliation, dict):
             raise ValueError("Config field reconciliation must be a JSON object")
         reconciliation_date_window(config)
+
+    categorization_memory = config.get("categorization_memory")
+    if categorization_memory is not None:
+        if not isinstance(categorization_memory, dict):
+            raise ValueError("Config field categorization_memory must be a JSON object")
+        if "enabled" in categorization_memory and not isinstance(
+            categorization_memory["enabled"], bool
+        ):
+            raise ValueError(
+                "Config field categorization_memory.enabled must be a boolean"
+            )
     validate_category_policies(config)
 
 
@@ -2168,6 +2188,7 @@ def _write_starter_workspace(root: Path, force: bool) -> None:
             "exchange_rates": {"HKD": 1.0, "USD": 7.8},
             "review_confidence_threshold": 0.8,
             "reconciliation": {"date_window_days": 3},
+            "categorization_memory": {"enabled": False},
             "profiles": [str(profile_path)]
             + [str(path) for path in starter_profile_paths],
             "profile_mappings": str(profile_mappings_path),

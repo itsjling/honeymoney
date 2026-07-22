@@ -16,7 +16,7 @@ profile detection and CSV/PDF parsing
 normalized rows + batch-wide identity resolution against the ledger and manifest
                  |
                  v
-deterministic rules -> duplicate checks -> structural classification -> optional local Ollama
+deterministic rules -> opt-in local memory -> duplicate checks -> structural classification -> optional local Ollama
                  |
                  v
 validated corrections
@@ -154,6 +154,8 @@ changing it.
 - `honeymoney/persistence.py`: staged filesystem generation commits, authoritative
   ledger replacement, directory synchronization, and retained-state recovery.
 - `honeymoney/rules.py`: deterministic rule validation and application.
+- `honeymoney/categorization_memory.py`: opt-in, correction-derived local
+  spending-category matches rebuilt from validated identity state.
 - `honeymoney/ollama.py`: optional local-only categorization fallback. Its
   shared model-listing and generation transport accepts only `http` endpoints
   that resolve exclusively to loopback addresses, pins the connection to a

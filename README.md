@@ -322,12 +322,24 @@ Common edits:
 - Add or edit profiles in `profiles/`.
 - Add deterministic categorization rules in `rules.json`.
 - Feed reviewed rows back through `corrections.csv`.
+- Set `categorization_memory.enabled` to `true` to reuse a conservative local
+  category match from two agreeing reviewed rows. It is off by default.
 - Set `ollama.enabled` to `true` only when you want local Ollama fallback.
 - Add filename mappings in `profile_mappings.json` when automatic detection is ambiguous.
 
 Profiles may set `account_type` to `bank`, `credit_card`, `investment`, or `unknown`; omission remains compatible and common payment methods are inferred. CSV/PDF column mappings may optionally expose `statement_opening_balance` and `statement_closing_balance`. Reconciliation reports an explicit `unavailable` balance status when the source does not supply both rather than inventing balances.
 
 Rules may assign `flow_type` as well as `category`. For institution-specific treatment, use `conditions` to combine exact, keyword, or regex matches on fields such as `institution`, `account_id`, `account_type`, and `original_description`. The derived `direction` condition supports exact `inflow` or `outflow` matching without changing transaction identity. These deterministic rules run before local Ollama; Ollama can suggest spending merchant categories but does not set an owner or replace `flow_type`.
+
+### Local categorization memory
+
+Local memory is opt-in and rebuilt for each import from exact corrections and
+the validated ledger. It uses only two or more agreeing current identity-v2
+rows with the same account, institution, currency, and normalized merchant.
+It skips generic and transfer-like merchants, legacy or migration-ambiguous
+rows, accounting or manual-only categories, and any conflicting evidence. It runs after explicit rules and before
+Ollama; exact corrections still run last. It stores no learned sidecar and
+sends no data anywhere.
 
 ### Ollama fallback
 

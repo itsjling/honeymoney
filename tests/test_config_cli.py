@@ -251,6 +251,16 @@ class ConfigCliTest(unittest.TestCase):
             ("corrections", {"corrections": 4}, "non-empty string"),
             ("pdf", {"pdf": []}, "must be a JSON object"),
             ("pdf enabled", {"pdf": {"enabled": "yes"}}, "must be a boolean"),
+            (
+                "categorization memory",
+                {"categorization_memory": []},
+                "must be a JSON object",
+            ),
+            (
+                "categorization memory enabled",
+                {"categorization_memory": {"enabled": "yes"}},
+                "must be a boolean",
+            ),
             ("exchange rates", {"exchange_rates": []}, "must be a JSON object"),
             (
                 "exchange rate value",

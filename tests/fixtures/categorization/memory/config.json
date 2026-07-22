@@ -1,0 +1,6 @@
+{
+  "categorization_memory": {
+    "enabled": true
+  },
+  "review_confidence_threshold": 0.8
+}
