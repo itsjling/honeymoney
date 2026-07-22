@@ -6,6 +6,12 @@ on 2026-07-11 against `aa0eedf`; their source excerpts, branch names, and line
 numbers are historical context, not execution instructions for the live
 architecture.
 
+Reconciliation addendum (2026-07-21): the superseding identity v2 proposal
+on #24 was approved in issue comments. #24 is now `ready-for-agent`, which
+unblocks #25 (also relabeled `ready-for-agent`) and its slices #31, #32, #33
+in dependency order. Plan 012's row above is corrected to `DONE` to match the
+evidence section and the merged #26; no content was re-opened.
+
 Current `main` is the only implementation source of truth. A plan is `DONE`
 only when its observable acceptance criteria pass there. A commit on another
 branch is reference material, never status evidence. The command below returns
@@ -59,7 +65,7 @@ correction, reconciliation, review, PDF, and JSON contracts.
 | [009](009-stable-source-namespace.md) | Stabilize source namespace | P1 | PARTIAL | [#24](https://github.com/itsjling/honeymoney/issues/24) |
 | [010](010-cross-import-duplicates.md) | Detect cross-import duplicates | P2 | TODO | [#25](https://github.com/itsjling/honeymoney/issues/25) |
 | [011](011-optimize-duplicate-window.md) | Optimize duplicate scanning | P2 | TODO | [#25](https://github.com/itsjling/honeymoney/issues/25) |
-| [012](012-safe-spreadsheet-exports.md) | Make CSV exports spreadsheet-safe | P2 | TODO | [#26](https://github.com/itsjling/honeymoney/issues/26) |
+| [012](012-safe-spreadsheet-exports.md) | Make CSV exports spreadsheet-safe | P2 | DONE | [#26](https://github.com/itsjling/honeymoney/issues/26) |
 | [013](013-pin-ci-toolchain.md) | Stabilize CI dependency resolution | P3 | DONE | [#28](https://github.com/itsjling/honeymoney/issues/28) |
 | [014](014-single-ledger-read.md) | Read ledger once per import | P3 | SUPERSEDED | [#29](https://github.com/itsjling/honeymoney/issues/29) |
 | [015](015-local-categorization-memory.md) | Add local categorization memory | P2 | SUPERSEDED | — |
