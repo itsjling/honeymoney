@@ -6,6 +6,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from honeymoney.classification_policy import trusted_accounting_provenance
+from honeymoney.identity import ambiguous_legacy_transaction_ids
 from honeymoney.schema import ALLOWED_ACCOUNT_TYPES, ALLOWED_FLOW_TYPES
 
 TRANSFER_FLOW_TYPES = {
@@ -24,15 +25,34 @@ def reconcile_ledger(
 ) -> dict[str, Any]:
     """Derive cash-flow treatment and pair unique owned-account transfers."""
     window = reconciliation_date_window(config)
+    ambiguous_legacy_ids = ambiguous_legacy_transaction_ids(rows)
+    protected = {
+        id(row)
+        for row in rows
+        if row.get("transaction_id", "") in ambiguous_legacy_ids
+        and not any(
+            row.get(field, "")
+            for field in (
+                "source_id",
+                "source_namespace_id",
+                "source_revision",
+                "source_record_id",
+            )
+        )
+    }
     by_id = {
-        row.get("transaction_id", ""): row for row in rows if row.get("transaction_id")
+        row.get("transaction_id", ""): row
+        for row in rows
+        if id(row) not in protected and row.get("transaction_id")
     }
     for row in rows:
+        if id(row) in protected:
+            continue
         _reset_reconciliation(row)
         _derive_flow_type(row)
 
     candidates: list[tuple[int, str, str, str]] = []
-    eligible = [row for row in rows if _eligible(row)]
+    eligible = [row for row in rows if id(row) not in protected and _eligible(row)]
     for index, left in enumerate(eligible):
         for right in eligible[index + 1 :]:
             candidate = _candidate(left, right, window)
@@ -68,6 +88,8 @@ def reconcile_ledger(
     ambiguous = 0
     unmatched = 0
     for row in rows:
+        if id(row) in protected:
+            continue
         transaction_id = row.get("transaction_id", "")
         if transaction_id in paired:
             continue

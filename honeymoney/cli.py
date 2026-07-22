@@ -38,6 +38,20 @@ from honeymoney.corrections import (
     to_review_row,
     validate_correction,
 )
+from honeymoney.identity import (
+    AllocationLocator,
+    IdentityError,
+    IncomingRecordIdentity,
+    IncomingSourceIdentity,
+    ambiguous_legacy_transaction_ids,
+    extractor_contract_id,
+    logical_locator,
+    resolve_batch,
+    source_id,
+    source_namespace_id,
+    source_revision,
+)
+from honeymoney.identity_state import load_identity_state
 from honeymoney.ollama import (
     OllamaProgress,
     apply_ollama_fallback,
@@ -61,6 +75,7 @@ from honeymoney.schema import (
 )
 
 JSON_SCHEMA_VERSION = 1
+IDENTITY_MIGRATION_AMBIGUITY_FLAG = "identity_migration_ambiguous"
 PROFILE_PREVIEW_LIMIT = 10
 PROFILE_PREVIEW_FIELDS = [
     "amount_hkd",
@@ -222,25 +237,18 @@ def _run_pipeline(
     input_files = _discover_input_files(input_path)
     profiles = _load_profiles(config)
     profile_mappings = _load_profile_mappings(config)
-    source_files = {
-        _relative_source(input_file, input_path) for input_file in input_files
-    }
-    existing_ledger_rows = read_ledger(categorized_path)
-    existing_source_files = _processed_source_files(existing_ledger_rows, source_files)
-    if existing_source_files and not (args.replace or args.reset):
-        source_list = ", ".join(sorted(existing_source_files))
-        raise ValueError(
-            f"Already imported source file(s): {source_list}. "
-            "Use --replace to re-import or --reset to re-import and clear corrections."
+    identity_state = load_identity_state(categorized_path)
+    transactions, import_warnings, file_reports, identity_sources = (
+        _import_transactions(
+            input_files,
+            profiles,
+            config,
+            input_path,
+            interactive=interactive,
+            profile_mappings=profile_mappings,
+            profile_mappings_path=config.get("profile_mappings"),
+            include_identity_sources=True,
         )
-    transactions, import_warnings, file_reports = _import_transactions(
-        input_files,
-        profiles,
-        config,
-        input_path,
-        interactive=interactive,
-        profile_mappings=profile_mappings,
-        profile_mappings_path=config.get("profile_mappings"),
     )
     if args.reset:
         requested_action = "reset"
@@ -248,8 +256,12 @@ def _run_pipeline(
         requested_action = "replace"
     else:
         requested_action = "import"
+    candidate_source_ids = _candidate_source_ids(input_files, input_path, config)
     for file_report in file_reports:
         file_report["requested_action"] = requested_action
+        file_report["source_id"] = candidate_source_ids.get(
+            file_report["source_file"], ""
+        )
         if file_report.get("status") != "processed":
             file_report["ledger_action"] = "preserved"
         elif args.reset:
@@ -258,25 +270,26 @@ def _run_pipeline(
             file_report["ledger_action"] = "replaced"
         else:
             file_report["ledger_action"] = "added"
-    replace_sources = (
-        {
-            file_report["source_file"]
-            for file_report in file_reports
-            if file_report.get("status") == "processed"
-        }
-        if args.replace or args.reset
-        else None
+    resolution = resolve_batch(
+        ledger_rows=identity_state.rows,
+        manifest=identity_state.manifest,
+        sources=identity_sources,
+        intent=requested_action,
     )
-    reset_ids = (
-        {
-            row["transaction_id"]
-            for row in existing_ledger_rows
-            if row.get("source_file") in (replace_sources or set())
-            and row.get("transaction_id")
-        }
-        if args.reset
-        else set()
+    transactions = [dict(row) for row in resolution.resolved_rows]
+    resolved_source_ids = {
+        str(source["source_namespace_id"]): str(source["source_id"])
+        for source in resolution.next_manifest["sources"]
+    }
+    for source in identity_sources:
+        source_id_value = resolved_source_ids.get(source.namespace_id, "")
+        for file_report in file_reports:
+            if file_report.get("source_file") == source.source_display:
+                file_report["source_id"] = source_id_value
+    import_warnings.extend(
+        _identity_diagnostic_warning(item) for item in resolution.diagnostics
     )
+    reset_ids = set(resolution.reset_transaction_ids)
     _status.update("Applying categorization rules...")
     rules = load_rules(config)
     apply_rules(transactions, rules, config)
@@ -300,6 +313,7 @@ def _run_pipeline(
         )
         correction_documents[corrections_path] = corrections_content
     apply_corrections(transactions, corrections)
+    _enforce_identity_review(transactions)
     _status.clear()
     if interactive:
         categorized_interactively = _prompt_uncategorized(transactions, config)
@@ -308,8 +322,12 @@ def _run_pipeline(
     review_rows = [row for row in transactions if row["needs_review"] == "true"]
 
     _status.update("Writing output files...")
-    ledger_rows = _merge_into_ledger(categorized_path, transactions, replace_sources)
+    ledger_rows = [
+        *(dict(row) for row in resolution.retained_ledger_rows),
+        *transactions,
+    ]
     reconciliation = reconcile_ledger(ledger_rows, config)
+    _enforce_identity_review(ledger_rows)
     report = {
         "status": "partial_success" if import_warnings else "success",
         "input_count": len(input_files),
@@ -344,7 +362,9 @@ def _run_pipeline(
         "ollama": ollama_report,
         "reconciliation": reconciliation,
     }
-    files = ledger_output_documents(categorized_path, ledger_rows)
+    files = ledger_output_documents(
+        categorized_path, ledger_rows, identity_manifest=resolution.next_manifest
+    )
     files[import_report_path] = json.dumps(report, indent=2, sort_keys=True) + "\n"
     files.update(correction_documents)
     files.update(
@@ -1053,6 +1073,7 @@ def _review_command(argv: list[str]) -> int:
         )
     categorized_path = Path(args.output_path or config["paths"]["output"])
     ledger_rows = read_ledger(categorized_path)
+    _reject_ambiguous_legacy_transaction_ids(ledger_rows)
     if not ledger_rows:
         if args.transaction_id:
             raise ValueError(f"Unknown transaction_id: {args.transaction_id}")
@@ -1751,6 +1772,7 @@ def _correct_command(argv: list[str]) -> int:
     config = _load_config(args.config_path)
     categorized_path = Path(args.output_path or config["paths"]["output"])
     ledger_rows = read_ledger(categorized_path)
+    _reject_ambiguous_legacy_transaction_ids(ledger_rows)
     ledger_ids = {
         row["transaction_id"] for row in ledger_rows if row.get("transaction_id")
     }
@@ -1953,30 +1975,11 @@ def _uncategorized_count(rows: list[dict[str, str]]) -> int:
     return sum(1 for row in rows if not _is_categorized(row))
 
 
-def _processed_source_files(
-    ledger_rows: list[dict[str, str]], source_files: set[str]
-) -> set[str]:
-    return {
-        row.get("source_file", "")
-        for row in ledger_rows
-        if row.get("source_file", "") in source_files
-    }
-
-
-def _merge_into_ledger(
-    categorized_path: Path,
-    transactions: list[dict[str, str]],
-    replace_sources: set[str] | None = None,
-) -> list[dict[str, str]]:
-    merged = {
-        row["transaction_id"]: row
-        for row in read_ledger(categorized_path)
-        if row.get("transaction_id")
-        and (replace_sources is None or row.get("source_file") not in replace_sources)
-    }
-    for transaction in transactions:
-        merged[transaction["transaction_id"]] = transaction
-    return list(merged.values())
+def _reject_ambiguous_legacy_transaction_ids(
+    ledger_rows: list[dict[str, str]],
+) -> None:
+    if ambiguous_legacy_transaction_ids(ledger_rows):
+        raise IdentityError("identity_legacy_transaction_id_ambiguous")
 
 
 def _write_ledger_outputs(
@@ -2281,13 +2284,21 @@ def _load_config_document(config_path: str | None, *, recover: bool) -> dict[str
         if default_config.exists():
             config_path = str(default_config)
         else:
-            return {"paths": {"input": "./input", "output": "./output/categorized.csv"}}
+            resolved_config_path = default_config.resolve()
+            return {
+                "paths": {"input": "./input", "output": "./output/categorized.csv"},
+                "_identity_config_path": resolved_config_path,
+                "_identity_workspace_root": resolved_config_path.parent,
+            }
 
-    config = _read_config_document(Path(config_path))
+    resolved_config_path = Path(config_path).resolve(strict=True)
+    config = _read_config_document(resolved_config_path)
 
     config.setdefault("paths", {})
     config["paths"].setdefault("input", "./input")
     config["paths"].setdefault("output", "./output/categorized.csv")
+    config["_identity_config_path"] = resolved_config_path
+    config["_identity_workspace_root"] = resolved_config_path.parent
     if recover:
         _recover_config_generation(config)
     return config
@@ -2771,10 +2782,22 @@ def _import_transactions(
     interactive: bool,
     profile_mappings: dict[str, Any],
     profile_mappings_path: str | None,
-) -> tuple[list[dict[str, str]], list[str], list[dict[str, str]]]:
+    *,
+    include_identity_sources: bool = False,
+) -> (
+    tuple[list[dict[str, str]], list[str], list[dict[str, str]]]
+    | tuple[
+        list[dict[str, str]],
+        list[str],
+        list[dict[str, str]],
+        tuple[IncomingSourceIdentity, ...],
+    ]
+):
+    """Import rows and, when requested, their private identity inputs."""
     transactions: list[dict[str, str]] = []
     warnings: list[str] = []
     file_reports: list[dict[str, str]] = []
+    identity_sources: list[IncomingSourceIdentity] = []
     for file_number, input_file in enumerate(input_files, start=1):
         _status.update(
             f"Importing statements... ({file_number}/{len(input_files)}) {input_file.name}"
@@ -2803,9 +2826,18 @@ def _import_transactions(
                     profile_mappings,
                     profile_mappings_path,
                 )
-                imported, pdf_warnings = _import_pdf(
-                    input_file, profile, config, input_root
-                )
+                if include_identity_sources:
+                    imported, pdf_warnings, records = _import_pdf(
+                        input_file,
+                        profile,
+                        config,
+                        input_root,
+                        include_identity_records=True,
+                    )
+                else:
+                    imported, pdf_warnings = _import_pdf(
+                        input_file, profile, config, input_root
+                    )
                 warnings.extend(pdf_warnings)
             except ImportError:
                 warning = (
@@ -2834,6 +2866,17 @@ def _import_transactions(
                 continue
 
             transactions.extend(imported)
+            if include_identity_sources:
+                identity_sources.append(
+                    _incoming_source_identity(
+                        input_file,
+                        profile,
+                        config,
+                        _pdf_adapter_tag(profile),
+                        records,
+                        input_root,
+                    )
+                )
             file_reports.append(
                 {
                     "source_file": _relative_source(input_file, input_root),
@@ -2854,10 +2897,25 @@ def _import_transactions(
             interactive,
             profile_mappings,
         )
-        imported = _import_csv(input_file, profile, config, input_root)
+        if include_identity_sources:
+            imported, records = _import_csv(
+                input_file,
+                profile,
+                config,
+                input_root,
+                include_identity_records=True,
+            )
+        else:
+            imported = _import_csv(input_file, profile, config, input_root)
         if prompted_for_profile:
             _maybe_save_profile_mapping(input_file, profile, profile_mappings_path)
         transactions.extend(imported)
+        if include_identity_sources:
+            identity_sources.append(
+                _incoming_source_identity(
+                    input_file, profile, config, 1, records, input_root
+                )
+            )
         file_reports.append(
             {
                 "source_file": _relative_source(input_file, input_root),
@@ -2868,7 +2926,68 @@ def _import_transactions(
                 ),
             }
         )
-    return _assign_transaction_ids(transactions), warnings, file_reports
+    if include_identity_sources:
+        return transactions, warnings, file_reports, tuple(identity_sources)
+    return transactions, warnings, file_reports
+
+
+def _incoming_source_identity(
+    input_file: Path,
+    profile: dict[str, Any],
+    config: dict[str, Any],
+    adapter_tag: int,
+    records: tuple[IncomingRecordIdentity, ...],
+    input_root: Path,
+) -> IncomingSourceIdentity:
+    """Build private, immutable identity inputs for one processed source."""
+    workspace_root = config.get("_identity_workspace_root")
+    if not isinstance(workspace_root, Path):
+        workspace_root = Path("config.json").resolve().parent
+    locator_kind, locator = logical_locator(input_file, workspace_root)
+    return IncomingSourceIdentity(
+        stable_handle=str(input_file.resolve(strict=True)),
+        source_display=_relative_source(input_file, input_root),
+        namespace_id=source_namespace_id(locator_kind, locator),
+        revision=source_revision(input_file.read_bytes()),
+        contract_id=extractor_contract_id(adapter_tag, profile),
+        record_data=records,
+    )
+
+
+def _candidate_source_ids(
+    input_files: list[Path], input_root: Path, config: dict[str, Any]
+) -> dict[str, str]:
+    """Return report-safe candidate IDs without retaining private locators."""
+    workspace_root = config.get("_identity_workspace_root")
+    if not isinstance(workspace_root, Path):
+        workspace_root = Path("config.json").resolve().parent
+    candidates: dict[str, str] = {}
+    for input_file in input_files:
+        locator_kind, locator = logical_locator(input_file, workspace_root)
+        candidates[_relative_source(input_file, input_root)] = source_id(
+            source_namespace_id(locator_kind, locator)
+        )
+    return candidates
+
+
+def _identity_diagnostic_warning(diagnostic: Any) -> str:
+    """Format the resolver's safe diagnostic without exposing identity inputs."""
+    count = getattr(diagnostic, "affected_count", None)
+    if count is None:
+        count = getattr(diagnostic, "candidate_count", 0)
+    return (
+        f"{diagnostic.code}: {diagnostic.source_display}; "
+        f"action={diagnostic.action}; count={count}; {diagnostic.remediation}"
+    )
+
+
+def _pdf_adapter_tag(profile: dict[str, Any]) -> int:
+    pdf_settings = profile.get("pdf", {})
+    if pdf_settings.get("word_rows") == "sectioned":
+        return 4
+    if pdf_settings.get("word_rows"):
+        return 3
+    return 2
 
 
 def _select_pdf_profile(
@@ -3051,7 +3170,12 @@ def _import_csv(
     profile: dict[str, Any],
     config: dict[str, Any],
     input_root: Path,
-) -> list[dict[str, str]]:
+    *,
+    include_identity_records: bool = False,
+) -> (
+    list[dict[str, str]]
+    | tuple[list[dict[str, str]], tuple[IncomingRecordIdentity, ...]]
+):
     csv_settings = profile.get("csv", {})
     _validate_selected_csv_headers(csv_path, profile, csv_settings)
     columns = dict(csv_settings.get("columns", {}))
@@ -3060,10 +3184,21 @@ def _import_csv(
     columns["amount_default_sign"] = csv_settings.get("amount_default_sign", "")
     skip_patterns = _skip_descriptions(profile)
     rows: list[dict[str, str]] = []
+    identity_records: list[IncomingRecordIdentity] = []
 
     with csv_path.open(newline="", encoding="utf-8") as fh:
         reader = csv.DictReader(fh)
-        for row_number, source_row in enumerate(reader, start=2):
+        # DictReader consumes its header lazily. Read it before deriving each
+        # record's start so the first data record correctly starts on line 2.
+        if reader.fieldnames is None:
+            return (rows, tuple(identity_records)) if include_identity_records else rows
+        row_number = 2
+        while True:
+            physical_row = reader.line_num + 1
+            try:
+                source_row = next(reader)
+            except StopIteration:
+                break
             normalized = _normalized_row(
                 source_row=source_row,
                 row_number=row_number,
@@ -3074,9 +3209,19 @@ def _import_csv(
                 columns=columns,
             )
             if _row_is_skipped(normalized, skip_patterns):
+                row_number += 1
                 continue
             rows.append(normalized)
+            if include_identity_records:
+                identity_records.append(
+                    IncomingRecordIdentity(
+                        normalized, AllocationLocator(1, (physical_row,))
+                    )
+                )
+            row_number += 1
 
+    if include_identity_records:
+        return rows, tuple(identity_records)
     return rows
 
 
@@ -3098,7 +3243,12 @@ def _import_pdf(
     profile: dict[str, Any],
     config: dict[str, Any],
     input_root: Path,
-) -> tuple[list[dict[str, str]], list[str]]:
+    *,
+    include_identity_records: bool = False,
+) -> (
+    tuple[list[dict[str, str]], list[str]]
+    | tuple[list[dict[str, str]], list[str], tuple[IncomingRecordIdentity, ...]]
+):
     import pdfplumber
 
     pdf_settings = profile.get("pdf", {})
@@ -3111,6 +3261,7 @@ def _import_pdf(
     skip_patterns = _skip_descriptions(profile)
     rows: list[dict[str, str]] = []
     warnings: list[str] = []
+    identity_records: list[IncomingRecordIdentity] = []
     with _quiet_pdfminer_font_warnings():
         with pdfplumber.open(str(pdf_path)) as pdf:
             if pdf_settings.get("word_rows") == "sectioned":
@@ -3131,12 +3282,27 @@ def _import_pdf(
                     if _row_is_skipped(normalized, skip_patterns):
                         continue
                     rows.append(normalized)
+                    if include_identity_records:
+                        identity_records.append(
+                            IncomingRecordIdentity(
+                                normalized,
+                                AllocationLocator(4, (page_number, row_number)),
+                            )
+                        )
+                if include_identity_records:
+                    return rows, warnings, tuple(identity_records)
                 return rows, warnings
 
             for page_number, page in enumerate(pdf.pages, start=1):
-                word_rows = _pdf_word_source_rows(page, pdf_settings)
+                word_rows = _pdf_word_source_rows(
+                    page, pdf_settings, include_physical_lines=include_identity_records
+                )
                 if word_rows is not None:
-                    for row_number, source_row in enumerate(word_rows, start=1):
+                    for row_number, item in enumerate(word_rows, start=1):
+                        if include_identity_records:
+                            source_row, physical_line = item
+                        else:
+                            source_row = item
                         normalized = _normalized_row(
                             source_row=source_row,
                             row_number=row_number,
@@ -3150,6 +3316,13 @@ def _import_pdf(
                         if _row_is_skipped(normalized, skip_patterns):
                             continue
                         rows.append(normalized)
+                        if include_identity_records:
+                            identity_records.append(
+                                IncomingRecordIdentity(
+                                    normalized,
+                                    AllocationLocator(3, (page_number, physical_line)),
+                                )
+                            )
                     continue
 
                 if pdf_settings.get("word_rows_only", False) and hasattr(
@@ -3169,7 +3342,7 @@ def _import_pdf(
                             f"{text_length} characters on {pdf_path.name} page {page_number}"
                         )
                     continue
-                for table in tables:
+                for table_number, table in enumerate(tables, start=1):
                     header = (
                         [str(cell or "").strip() for cell in table[0]]
                         if has_header
@@ -3216,8 +3389,25 @@ def _import_pdf(
                             if _row_is_skipped(normalized, skip_patterns):
                                 continue
                             rows.append(normalized)
+                            if include_identity_records:
+                                identity_records.append(
+                                    IncomingRecordIdentity(
+                                        normalized,
+                                        AllocationLocator(
+                                            2,
+                                            (
+                                                page_number,
+                                                table_number,
+                                                table_row_number,
+                                                expanded_index,
+                                            ),
+                                        ),
+                                    )
+                                )
     if pdf_settings.get("word_rows_only", False) and not rows:
         warnings.append(f"No word transaction table found in {pdf_path.name}")
+    if include_identity_records:
+        return rows, warnings, tuple(identity_records)
     return rows, warnings
 
 
@@ -3475,8 +3665,11 @@ def _pdf_amounts_in_bounds(
 
 
 def _pdf_word_source_rows(
-    page: Any, pdf_settings: dict[str, Any]
-) -> list[dict[str, str]] | None:
+    page: Any,
+    pdf_settings: dict[str, Any],
+    *,
+    include_physical_lines: bool = False,
+) -> list[dict[str, str]] | list[tuple[dict[str, str], int]] | None:
     if not pdf_settings.get("word_rows", False) or not hasattr(page, "extract_words"):
         return None
 
@@ -3489,9 +3682,9 @@ def _pdf_word_source_rows(
     if not lines:
         return None
 
-    rows: list[dict[str, str]] = []
+    rows: list[dict[str, str]] | list[tuple[dict[str, str], int]] = []
     in_table = False
-    for line in lines:
+    for physical_line, line in enumerate(lines, start=1):
         text = " ".join(str(word.get("text", "")) for word in line).strip()
         if not in_table:
             in_table = _pdf_word_header_seen(text, pdf_settings)
@@ -3507,7 +3700,10 @@ def _pdf_word_source_rows(
             or source_row.get("Trans date", "").strip()
         ):
             continue
-        rows.append(source_row)
+        if include_physical_lines:
+            rows.append((source_row, physical_line))
+        else:
+            rows.append(source_row)
     return rows if in_table else None
 
 
@@ -3749,6 +3945,10 @@ def _normalized_row(
 
     return {
         "transaction_id": "",
+        "source_id": "",
+        "source_namespace_id": "",
+        "source_revision": "",
+        "source_record_id": "",
         "date": canonical_date,
         "transaction_date": transaction_date,
         "posting_date": posting_date,
@@ -3791,45 +3991,7 @@ def _normalized_row(
     }
 
 
-def _assign_transaction_ids(transactions: list[dict[str, str]]) -> list[dict[str, str]]:
-    base_counts: dict[str, int] = {}
-    for transaction in transactions:
-        base = _transaction_identity_base(transaction)
-        base_counts[base] = base_counts.get(base, 0) + 1
-
-    seen: dict[str, int] = {}
-    for transaction in transactions:
-        base = _transaction_identity_base(transaction)
-        seen[base] = seen.get(base, 0) + 1
-        suffix = f":{seen[base]}" if base_counts[base] > 1 else ""
-        digest = hashlib.sha256(f"{base}{suffix}".encode("utf-8")).hexdigest()[:16]
-        transaction["transaction_id"] = f"txn_{digest}"
-        if base_counts[base] > 1:
-            transaction["flags"] = _append_flag(
-                transaction["flags"], "duplicate_identity_collision"
-            )
-    return transactions
-
-
-def _transaction_identity_base(transaction: dict[str, str]) -> str:
-    fields = [
-        "account_id",
-        "date",
-        "transaction_date",
-        "posting_date",
-        "original_amount",
-        "original_currency",
-        "posted_amount",
-        "posted_currency",
-        "merchant",
-        "original_description",
-    ]
-    return "|".join(
-        _normalize_identity_part(transaction.get(field, "")) for field in fields
-    )
-
-
-def _normalize_identity_part(value: str) -> str:
+def _normalized_match_text(value: Any) -> str:
     return " ".join(str(value).strip().casefold().split())
 
 
@@ -4006,12 +4168,12 @@ def _posted_amount(
 def _apply_amount_sign(
     raw_amount: str, amount: Decimal, row: dict[str, str], columns: dict[str, str]
 ) -> Decimal:
-    indicator = _normalize_identity_part(_value(row, columns.get("credit_debit")))
+    indicator = _normalized_match_text(_value(row, columns.get("credit_debit")))
     debit_values = {
-        _normalize_identity_part(value) for value in columns.get("debit_values", [])
+        _normalized_match_text(value) for value in columns.get("debit_values", [])
     }
     credit_values = {
-        _normalize_identity_part(value) for value in columns.get("credit_values", [])
+        _normalized_match_text(value) for value in columns.get("credit_values", [])
     }
     if indicator and indicator in debit_values:
         return -abs(amount)
@@ -4081,6 +4243,17 @@ def _relative_source(path: Path, input_root: Path) -> str:
         return path.name
 
 
+def _enforce_identity_review(transactions: list[dict[str, str]]) -> None:
+    for transaction in transactions:
+        flags = {flag for flag in transaction.get("flags", "").split(";") if flag}
+        if IDENTITY_MIGRATION_AMBIGUITY_FLAG not in flags:
+            continue
+        transaction["needs_review"] = "true"
+        transaction["reason"] = (
+            "Identity migration is ambiguous; explicit resolution is required"
+        )
+
+
 def _annotate_duplicate_suspicions(transactions: list[dict[str, str]]) -> None:
     duplicate_keys: dict[str, int] = {}
     for transaction in transactions:
@@ -4121,7 +4294,7 @@ def _duplicate_key(transaction: dict[str, str]) -> str:
         "original_description",
     ]
     return "|".join(
-        _normalize_identity_part(transaction.get(field, "")) for field in fields
+        _normalized_match_text(transaction.get(field, "")) for field in fields
     )
 
 
@@ -4134,7 +4307,7 @@ def _duplicate_key_without_date(transaction: dict[str, str]) -> str:
         "original_description",
     ]
     return "|".join(
-        _normalize_identity_part(transaction.get(field, "")) for field in fields
+        _normalized_match_text(transaction.get(field, "")) for field in fields
     )
 
 
@@ -4185,16 +4358,50 @@ def run() -> int:
     except (OSError, ValueError) as error:
         _status.clear()
         argv = sys.argv[1:]
+        identity_error = error if isinstance(error, IdentityError) else None
+        identity_details = (
+            _identity_error_details(identity_error) if identity_error else None
+        )
         if "--json" in argv:
             command = _json_error_command(argv)
             _emit_json(
                 command,
                 "error",
-                errors=[{"type": type(error).__name__, "message": str(error)}],
+                errors=[
+                    identity_details
+                    if identity_details is not None
+                    else {"type": type(error).__name__, "message": str(error)}
+                ],
             )
             return 2
-        print(str(error), file=sys.stderr)
+        print(
+            identity_details["message"] if identity_details is not None else str(error),
+            file=sys.stderr,
+        )
         return 2
+
+
+def _identity_error_details(error: IdentityError) -> dict[str, Any]:
+    diagnostic = error.diagnostic
+    details: dict[str, Any] = {
+        "type": "IdentityError",
+        "code": error.code,
+        "message": error.code,
+    }
+    if diagnostic is not None:
+        count = getattr(diagnostic, "affected_count", None)
+        if count is None:
+            count = getattr(diagnostic, "candidate_count", 0)
+        details.update(
+            {
+                "display": diagnostic.source_display,
+                "action": diagnostic.action,
+                "count": count,
+                "remediation": diagnostic.remediation,
+                "message": _identity_diagnostic_warning(diagnostic),
+            }
+        )
+    return details
 
 
 def _json_error_command(argv: list[str]) -> str:

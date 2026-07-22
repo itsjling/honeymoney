@@ -268,7 +268,7 @@ honeymoney run --input ./samples --output ./output/categorized.csv
 
 Each run writes three files next to the configured categorized CSV:
 
-- `categorized.csv`: normalized transactions with categories, accounting flow treatment, transfer links, owners, payment methods, confidence, flags, and source traceability. This file is a cumulative ledger: each import merges into it by `transaction_id`, so reconciliation, `status`, and `report` see everything imported so far. Older ledgers without the newer columns are hydrated and safely rewritten; transaction IDs do not depend on the new fields.
+- `categorized.csv`: normalized transactions with stable identity metadata, categories, accounting flow treatment, transfer links, owners, payment methods, confidence, flags, and source traceability. This file is a cumulative ledger: each import reconciles persisted occurrences and merges by `transaction_id`, so reconciliation, `status`, and `report` see everything imported so far. Older ledgers without the newer columns are hydrated and safely rewritten; transaction IDs do not depend on the new fields.
 - `review_needed.csv`: only ledger rows that need review, with editable correction columns.
 - `import_report.json`: processed files, selected profiles, warnings, duplicate counts, review counts, ledger totals, and Ollama status.
 
@@ -279,6 +279,40 @@ Cashflow signs use the household perspective:
 - spending and card purchases are negative
 - salary, refunds, and credits are positive
 
+### Stable transaction identity
+
+Repeated transactions with identical financial details remain separate. The
+ledger stores identity version, canonical and source fingerprints, and an
+occurrence number so importing repeats one at a time produces the same distinct
+IDs as importing them together. Renaming an unchanged statement or changing
+directory discovery order does not move a reviewed correction to another
+occurrence.
+
+Existing non-colliding ledgers retain their v1 transaction IDs as identity
+metadata is added. Some collision changes are inherently unknowable: if an
+identical occurrence is inserted or removed, or an old collision has no saved
+occurrence metadata, Honeymoney assigns fresh IDs, adds
+`identity_reconciliation_ambiguous`, emits a warning, and keeps the affected
+rows in review. It never guesses which old correction belongs to which row.
+`--reset` removes the old source's corrections with the ledger update, while
+`--replace` leaves unmatched old corrections inert.
+
+### Spreadsheet-safe CSV values
+
+Honeymoney protects generated CSV text cells from being interpreted as formulas
+when opened in spreadsheet software. Text cells that could trigger formula
+parsing are written with a self-identifying, Honeymoney-versioned escape
+prefix. Honeymoney decodes this presentation encoding when it reads its own
+ledger and correction files, so replacements and persistent corrections keep
+the original value without accumulating prefixes.
+
+Canonical columns (amounts, numeric identity fields, confidence, review flags,
+and parser coordinates) are never escaped: negative amounts and other numeric
+values remain directly usable as numbers. This policy applies only to generated
+CSV artifacts; canonical in-memory values and JSON/HTML output are unchanged.
+When adding a generated CSV column, classify it explicitly in
+`honeymoney/csv_artifacts.py` (`CANONICAL_CSV_COLUMNS`) so the export boundary
+remains safe.
 ## Configuration
 
 Start with the files created by `honeymoney setup`.

@@ -16,6 +16,17 @@ from honeymoney.corrections import (
     read_ledger,
 )
 from honeymoney.csv_artifacts import HONEYMONEY_CSV_ESCAPE_V1
+from honeymoney.identity import (
+    AllocationLocator,
+    IncomingRecordIdentity,
+    IncomingSourceIdentity,
+    empty_manifest,
+    extractor_contract_id,
+    resolve_batch,
+    source_namespace_id,
+    source_revision,
+)
+from honeymoney.identity_state import LEGACY_CATEGORIZED_COLUMNS
 from honeymoney.reconciliation import reconcile_ledger
 from honeymoney.rules import apply_rules
 from honeymoney.schema import (
@@ -76,6 +87,36 @@ class SpreadsheetSafeCsvTest(unittest.TestCase):
         row.update(values)
         return row
 
+    def _v2_state(
+        self, rows: list[dict[str, str]]
+    ) -> tuple[list[dict[str, str]], dict[str, object]]:
+        """Resolve synthetic rows through the public identity boundary."""
+        source = IncomingSourceIdentity(
+            "spreadsheet-safe-csv",
+            "spreadsheet-safe.csv",
+            source_namespace_id("workspace", "spreadsheet-safe.csv"),
+            source_revision(b"spreadsheet-safe synthetic source\n"),
+            extractor_contract_id(1, {"id": "spreadsheet-safe-csv", "version": 1}),
+            tuple(
+                IncomingRecordIdentity(row, AllocationLocator(1, (index,)))
+                for index, row in enumerate(rows, start=2)
+            ),
+        )
+        resolution = resolve_batch(
+            ledger_rows=[],
+            manifest=empty_manifest(),
+            sources=[source],
+            intent="ordinary",
+        )
+        return (
+            [dict(record) for record in resolution.resolved_rows],
+            resolution.next_manifest,
+        )
+
+    def _write_documents(self, documents: dict[Path, str]) -> None:
+        for path, content in documents.items():
+            path.write_text(content, encoding="utf-8", newline="")
+
     def test_ledger_and_review_exports_are_reversible_and_keep_amounts_numeric(
         self,
     ) -> None:
@@ -125,14 +166,17 @@ class SpreadsheetSafeCsvTest(unittest.TestCase):
             )
             rows.append(row)
 
+        rows, manifest = self._v2_state(rows)
         with tempfile.TemporaryDirectory() as tmp:
             ledger_path = Path(tmp) / "categorized.csv"
-            documents = ledger_output_documents(ledger_path, rows)
+            documents = ledger_output_documents(
+                ledger_path, rows, identity_manifest=manifest
+            )
             ledger_text = documents[ledger_path]
-            ledger_path.write_text(ledger_text, encoding="utf-8", newline="")
+            self._write_documents(documents)
 
             ledger_bytes = ledger_path.read_bytes()
-            self.assertTrue(ledger_bytes.startswith(b"transaction_id,date,"))
+            self.assertTrue(ledger_bytes.startswith(b"transaction_id,source_id,"))
             first_data_line = ledger_bytes.splitlines()[1]
             self.assertEqual(first_data_line.count(b",-12.34,"), 3)
             self.assertIn(b",0.25,true,", first_data_line)
@@ -178,7 +222,9 @@ class SpreadsheetSafeCsvTest(unittest.TestCase):
                 [canonical for canonical, _ in dangerous_values],
             )
             self.assertEqual(
-                ledger_output_documents(ledger_path, canonical_rows)[ledger_path],
+                ledger_output_documents(
+                    ledger_path, canonical_rows, identity_manifest=manifest
+                )[ledger_path],
                 ledger_text,
             )
 
@@ -186,7 +232,7 @@ class SpreadsheetSafeCsvTest(unittest.TestCase):
         self,
     ) -> None:
         legacy_row = self._ledger_row(
-            "txn_legacy",
+            "txn_0123456789abcdef",
             merchant="'=LEGACY MERCHANT",
             original_description="''LEGACY DESCRIPTION",
             notes="'=LEGACY NOTE",
@@ -197,11 +243,16 @@ class SpreadsheetSafeCsvTest(unittest.TestCase):
             with ledger_path.open("w", newline="", encoding="utf-8-sig") as handle:
                 writer = csv.DictWriter(
                     handle,
-                    fieldnames=CATEGORIZED_COLUMNS,
+                    fieldnames=LEGACY_CATEGORIZED_COLUMNS,
                     quoting=csv.QUOTE_ALL,
                 )
                 writer.writeheader()
-                writer.writerow(legacy_row)
+                writer.writerow(
+                    {
+                        column: legacy_row[column]
+                        for column in LEGACY_CATEGORIZED_COLUMNS
+                    }
+                )
             ledger_before = ledger_path.read_bytes()
             self.assertTrue(ledger_before.startswith(b"\xef\xbb\xbf"))
 
@@ -212,9 +263,10 @@ class SpreadsheetSafeCsvTest(unittest.TestCase):
             self.assertEqual(loaded["original_description"], "''LEGACY DESCRIPTION")
             self.assertEqual(loaded["notes"], "'=LEGACY NOTE")
 
-            migrated = ledger_output_documents(ledger_path, [loaded])[ledger_path]
-            self.assertTrue(migrated.startswith("transaction_id,date"))
-            ledger_path.write_text(migrated, encoding="utf-8", newline="")
+            migrated_documents = ledger_output_documents(ledger_path, [loaded])
+            migrated = migrated_documents[ledger_path]
+            self.assertTrue(migrated.startswith("transaction_id,source_id,"))
+            self._write_documents(migrated_documents)
             [reloaded] = read_ledger(ledger_path)
             self.assertEqual(reloaded["merchant"], "'=LEGACY MERCHANT")
             self.assertEqual(reloaded["original_description"], "''LEGACY DESCRIPTION")
@@ -261,12 +313,11 @@ class SpreadsheetSafeCsvTest(unittest.TestCase):
             merchant="=PAYROLL",
             original_description="=PAYROLL",
         )
+        [row], manifest = self._v2_state([row])
         with tempfile.TemporaryDirectory() as tmp:
             ledger_path = Path(tmp) / "categorized.csv"
-            ledger_path.write_text(
-                ledger_output_documents(ledger_path, [row])[ledger_path],
-                encoding="utf-8",
-                newline="",
+            self._write_documents(
+                ledger_output_documents(ledger_path, [row], identity_manifest=manifest)
             )
             rows = read_ledger(ledger_path)
 
@@ -311,27 +362,28 @@ class SpreadsheetSafeCsvTest(unittest.TestCase):
                 original_description="+CARD PAYMENT",
             ),
         ]
+        rows, manifest = self._v2_state(rows)
         with tempfile.TemporaryDirectory() as tmp:
             ledger_path = Path(tmp) / "categorized.csv"
-            ledger_path.write_text(
-                ledger_output_documents(ledger_path, rows)[ledger_path],
-                encoding="utf-8",
-                newline="",
+            self._write_documents(
+                ledger_output_documents(ledger_path, rows, identity_manifest=manifest)
             )
             canonical_rows = read_ledger(ledger_path)
 
             summary = reconcile_ledger(
                 canonical_rows, {"reconciliation": {"date_window_days": 3}}
             )
-            rewritten = ledger_output_documents(ledger_path, canonical_rows)[
-                ledger_path
-            ]
-            ledger_path.write_text(rewritten, encoding="utf-8", newline="")
+            rewritten = ledger_output_documents(
+                ledger_path, canonical_rows, identity_manifest=manifest
+            )
+            self._write_documents(rewritten)
             reloaded = {row["transaction_id"]: row for row in read_ledger(ledger_path)}
 
             self.assertEqual(summary["paired_groups"], 1)
-            self.assertEqual(reloaded["txn_bank"]["merchant"], "@BANK TRANSFER")
-            self.assertEqual(reloaded["txn_card"]["merchant"], "+CARD PAYMENT")
+            self.assertEqual(
+                {row["merchant"] for row in reloaded.values()},
+                {"@BANK TRANSFER", "+CARD PAYMENT"},
+            )
             self.assertEqual(
                 {row["flow_type"] for row in reloaded.values()},
                 {"credit_card_payment"},

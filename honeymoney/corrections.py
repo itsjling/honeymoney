@@ -4,10 +4,17 @@ import json
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 from honeymoney.csv_artifacts import csv_document, read_csv_artifact
-from honeymoney.persistence import persist_generation, recover_generation
+from honeymoney.identity import IdentityError, ambiguous_legacy_transaction_ids
+from honeymoney.identity_state import (
+    IdentityState,
+    identity_manifest_path,
+    load_identity_state,
+    validated_manifest_document,
+)
+from honeymoney.persistence import persist_generation
 from honeymoney.reconciliation import reconcile_ledger
 from honeymoney.rules import validate_rules
 from honeymoney.schema import (
@@ -196,8 +203,25 @@ def prepare_corrections_document(
 
 
 def ledger_output_documents(
-    categorized_path: Path, ledger_rows: list[dict[str, str]]
+    categorized_path: Path,
+    ledger_rows: list[dict[str, str]],
+    *,
+    identity_manifest: Mapping[str, object] | None = None,
+    identity_manifest_document: str | None = None,
 ) -> dict[Path, str]:
+    """Build all ledger artifacts, including validated identity ownership."""
+    if identity_manifest is not None and identity_manifest_document is not None:
+        raise ValueError("Pass either an identity manifest or its document, not both")
+    if identity_manifest_document is not None:
+        from honeymoney.identity import parse_manifest
+
+        manifest = parse_manifest(identity_manifest_document)
+        manifest_content = validated_manifest_document(ledger_rows, manifest)
+    elif identity_manifest is not None:
+        manifest_content = validated_manifest_document(ledger_rows, identity_manifest)
+    else:
+        state = load_identity_state(categorized_path)
+        manifest_content = validated_manifest_document(ledger_rows, state.manifest)
     review_rows = [
         to_review_row(row) for row in ledger_rows if row.get("needs_review") == "true"
     ]
@@ -206,6 +230,7 @@ def ledger_output_documents(
         categorized_path.parent / "review_needed.csv": csv_document(
             REVIEW_NEEDED_COLUMNS, review_rows
         ),
+        identity_manifest_path(categorized_path): manifest_content,
     }
 
 
@@ -221,7 +246,11 @@ def apply_correction_operation(
     if not corrections_value:
         raise ValueError("Config must define a corrections CSV path")
     corrections_path = Path(corrections_value)
-    ledger_rows = read_ledger(categorized_path)
+    state = load_identity_state(categorized_path)
+    ledger_rows = _normalize_ledger_rows(state)
+    ambiguous_ids = ambiguous_legacy_transaction_ids(ledger_rows)
+    if ambiguous_ids:
+        raise IdentityError("identity_legacy_transaction_id_ambiguous")
     ledger_by_id = {
         row["transaction_id"]: row for row in ledger_rows if row.get("transaction_id")
     }
@@ -282,7 +311,11 @@ def apply_correction_operation(
         for transaction_id, correction in sorted(merged_corrections.items())
     ]
 
-    files = ledger_output_documents(categorized_path, corrected_ledger)
+    files = ledger_output_documents(
+        categorized_path,
+        corrected_ledger,
+        identity_manifest_document=state.manifest_document,
+    )
     files[corrections_path] = csv_document(CORRECTION_COLUMNS, correction_rows)
     rules_added = 0
     if remembered_rules:
@@ -366,10 +399,11 @@ def _correction_csv_value(field: str, value: str, encoded_cell: bool) -> str:
 
 
 def read_ledger(path: Path) -> list[dict[str, str]]:
-    recover_generation(path)
-    if not path.exists():
-        return []
-    rows = read_csv_artifact(path, CATEGORIZED_COLUMNS).rows
+    return _normalize_ledger_rows(load_identity_state(path))
+
+
+def _normalize_ledger_rows(state: IdentityState) -> list[dict[str, str]]:
+    rows = state.rows
     for row in rows:
         if not row["account_type"]:
             row["account_type"] = {

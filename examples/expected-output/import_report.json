@@ -10,6 +10,7 @@
       "profile_id": "starter_csv",
       "requested_action": "import",
       "source_file": "transactions.csv",
+      "source_id": "src_6b9833c1cc0055080755d1abb772c3d6e0579d64cbaadc2aca7db936afa0933a",
       "status": "processed",
       "transaction_count": "3"
     }
@@ -56,35 +57,35 @@
   "successful_record_count": 3,
   "transaction_count": 3,
   "transaction_diagnostics": {
-    "txn_6a86206bd03997dd": {
+    "txn_25d47895dafa863747c4338afcbe7034": {
       "category": "Income",
       "needs_review": false,
       "owner": "Household",
       "reason": "Matched rule salary-income"
     },
-    "txn_d52e75d5634ea2c9": {
-      "category": "Groceries",
-      "needs_review": false,
-      "owner": "Household",
-      "reason": "Matched rule parksnshop-groceries"
-    },
-    "txn_e2ad405fad1c1285": {
+    "txn_2af28d075da758ad2411ab8cc8de90a8": {
       "category": "Unknown",
       "needs_review": true,
       "owner": "Household",
       "reason": "No categorization rules have been applied"
+    },
+    "txn_cd10a410e080d3c55f425b48063bdbb2": {
+      "category": "Groceries",
+      "needs_review": false,
+      "owner": "Household",
+      "reason": "Matched rule parksnshop-groceries"
     }
   },
   "transaction_flags": {
-    "txn_6a86206bd03997dd": [
+    "txn_25d47895dafa863747c4338afcbe7034": [
       "matched_flow_rule:salary-income",
       "matched_rule:salary-income"
     ],
-    "txn_d52e75d5634ea2c9": [
-      "matched_rule:parksnshop-groceries"
-    ],
-    "txn_e2ad405fad1c1285": [
+    "txn_2af28d075da758ad2411ab8cc8de90a8": [
       "uncategorized"
+    ],
+    "txn_cd10a410e080d3c55f425b48063bdbb2": [
+      "matched_rule:parksnshop-groceries"
     ]
   },
   "uncategorized_count": 1,

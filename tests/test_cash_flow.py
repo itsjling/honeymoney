@@ -1,4 +1,5 @@
 import csv
+import hashlib
 import json
 import os
 import subprocess
@@ -7,11 +8,43 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from honeymoney.identity_state import LEGACY_CATEGORIZED_COLUMNS
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 class CashFlowWorkflowTest(unittest.TestCase):
+    def _legacy_id(self, label: str) -> str:
+        return "txn_" + hashlib.sha256(label.encode("utf-8")).hexdigest()[:16]
+
+    def _aliases(self, root: Path) -> dict[str, str]:
+        return getattr(self, "_identity_aliases", {}).get(root, {})
+
     def _run_cli(self, args: list[str], cwd: Path) -> subprocess.CompletedProcess:
+        aliases = self._aliases(cwd)
+        corrections_path = cwd / "corrections.csv"
+        if aliases and corrections_path.exists():
+            with corrections_path.open(newline="", encoding="utf-8") as fh:
+                reader = csv.DictReader(fh)
+                fieldnames = reader.fieldnames or []
+                correction_rows = list(reader)
+            if correction_rows:
+                for row in correction_rows:
+                    row["transaction_id"] = aliases.get(
+                        row["transaction_id"], row["transaction_id"]
+                    )
+                with corrections_path.open("w", newline="", encoding="utf-8") as fh:
+                    writer = csv.DictWriter(fh, fieldnames=fieldnames)
+                    writer.writeheader()
+                    writer.writerows(correction_rows)
+        if aliases and "--file" in args:
+            correction_path = Path(args[args.index("--file") + 1])
+            corrections = json.loads(correction_path.read_text(encoding="utf-8"))
+            for correction in corrections:
+                correction["transaction_id"] = aliases.get(
+                    correction["transaction_id"], correction["transaction_id"]
+                )
+            correction_path.write_text(json.dumps(corrections), encoding="utf-8")
         env = dict(os.environ)
         env["PYTHONPATH"] = str(REPO_ROOT)
         return subprocess.run(
@@ -29,11 +62,19 @@ class CashFlowWorkflowTest(unittest.TestCase):
         output = root / "output"
         output.mkdir()
         ledger = output / "categorized.csv"
-        fieldnames = sorted({key for row in rows for key in row})
+        aliases = {
+            row["transaction_id"]: self._legacy_id(row["transaction_id"])
+            for row in rows
+        }
+        self._identity_aliases = getattr(self, "_identity_aliases", {})
+        self._identity_aliases[root] = aliases
+        ledger_rows = [
+            {**row, "transaction_id": aliases[row["transaction_id"]]} for row in rows
+        ]
         with ledger.open("w", newline="", encoding="utf-8") as fh:
-            writer = csv.DictWriter(fh, fieldnames=fieldnames)
+            writer = csv.DictWriter(fh, fieldnames=LEGACY_CATEGORIZED_COLUMNS)
             writer.writeheader()
-            writer.writerows(rows)
+            writer.writerows(ledger_rows)
         (root / "config.json").write_text(
             json.dumps(
                 {
@@ -55,7 +96,16 @@ class CashFlowWorkflowTest(unittest.TestCase):
         with (root / "output" / "categorized.csv").open(
             newline="", encoding="utf-8"
         ) as fh:
-            return list(csv.DictReader(fh))
+            rows = list(csv.DictReader(fh))
+        reverse_aliases = {value: key for key, value in self._aliases(root).items()}
+        for row in rows:
+            row["transaction_id"] = reverse_aliases.get(
+                row["transaction_id"], row["transaction_id"]
+            )
+            row["paired_transaction_id"] = reverse_aliases.get(
+                row["paired_transaction_id"], row["paired_transaction_id"]
+            )
+        return rows
 
     def test_reconcile_pairs_bank_debit_and_card_credit_across_days(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -358,7 +408,8 @@ class CashFlowWorkflowTest(unittest.TestCase):
             ) as fh:
                 review_rows = list(csv.DictReader(fh))
             self.assertEqual(
-                [row["transaction_id"] for row in review_rows], ["txn_out"]
+                [row["transaction_id"] for row in review_rows],
+                [self._legacy_id("txn_out")],
             )
 
     def test_equal_salary_and_expense_are_not_hidden_as_transfer(self) -> None:

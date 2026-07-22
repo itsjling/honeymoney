@@ -29,6 +29,7 @@ class AgentCliTest(unittest.TestCase):
         cwd: Path | None = None,
         input_text: str | None = None,
         filesystem_fault: str | None = None,
+        deprecations_as_errors: bool = False,
     ) -> subprocess.CompletedProcess[str]:
         env = dict(os.environ)
         python_paths = []
@@ -37,6 +38,8 @@ class AgentCliTest(unittest.TestCase):
             env["HONEYMONEY_TEST_FS_FAULT"] = filesystem_fault
         python_paths.append(REPO_ROOT)
         env["PYTHONPATH"] = os.pathsep.join(map(str, python_paths))
+        if deprecations_as_errors:
+            env["PYTHONWARNINGS"] = "error::DeprecationWarning"
         return subprocess.run(
             [sys.executable, "-m", "honeymoney.cli", *args],
             cwd=cwd or REPO_ROOT,
@@ -136,6 +139,7 @@ class AgentCliTest(unittest.TestCase):
                     "--json",
                 ],
                 cwd=root,
+                deprecations_as_errors=True,
             )
 
             self.assertEqual(text_result.returncode, 0, text_result.stderr)

@@ -13,7 +13,7 @@ config + profiles + statement files
 profile detection and CSV/PDF parsing
                  |
                  v
-normalized rows + stable transaction IDs
+normalized rows + batch-wide identity resolution against the ledger and manifest
                  |
                  v
 deterministic rules -> duplicate checks -> structural classification -> optional local Ollama
@@ -25,16 +25,17 @@ validated corrections
 deterministic flow treatment + cumulative-ledger transfer reconciliation
                  |
                  v
-categorized.csv + review_needed.csv + import_report.json
+categorized.csv + review_needed.csv + import_report.json + hidden identity manifest
                  |
                  v
 status summaries and self-contained HTML reports
 ```
 
-Imports merge into the cumulative ledger by `transaction_id`. `source_file`
-provides statement-level replacement and reset behavior. Corrections are
-persistent overrides keyed by `transaction_id`; rules and Ollama suggestions
-run before corrections, so reviewed choices win.
+Imports merge into the cumulative ledger by `transaction_id`. The identity
+resolver uses the hidden manifest, not `source_file`, to find sources for
+replacement and reset. `source_file` is display provenance only. Corrections
+are persistent overrides keyed by `transaction_id`; rules and Ollama
+suggestions run before corrections, so reviewed choices win.
 
 ## Filesystem persistence
 
@@ -85,10 +86,66 @@ transfer links derived from their existing transaction IDs. Ambiguous candidates
 are never auto-paired. Reports derive old ledgers in memory, and `reconcile`
 provides an explicit inspect/rewrite seam.
 
+## Transaction identity
+
+Identity v2 gives each resolved ledger row four public fields, directly after
+`transaction_id`: `source_id`, `source_namespace_id`, `source_revision`, and
+`source_record_id`. A v2 row has all four fields. An unresolved legacy row has
+all four empty. Partial metadata fails validation. New transaction IDs use a
+128-bit, domain-separated digest of the source and record IDs. Source IDs use
+the `src_`, `ns_`, `rev_`, and `rec_` prefixes plus full SHA-256 digests; new
+transaction IDs use `txn_` plus 32 lowercase hexadecimal characters.
+`source_file`, source page, and source row remain display fields and never form
+identity or replacement keys.
+
+The resolver runs for the whole input batch before categorization, correction
+application, reconciliation, or any transaction-ID dictionary. It resolves a
+logical source from its normalized workspace-safe locator and exact source
+bytes. An ordinary import creates a new source when its namespace is new. A
+replace or reset reuses a source only through one exact namespace match, or one
+unclaimed equal-revision match for an accepted rename. It never guesses from a
+file name, directory order, or an ambiguous match.
+
+Within each source, the resolver matches records only on the accepted
+fingerprint and manifest ownership. An unchanged source uses its exact stored
+locator mapping. A changed source can reuse records only when there is one
+maximum matching; otherwise it stops with an identity ambiguity error. New
+records receive a stable allocation origin from immutable parser locators.
+Retired records keep their ownership, so they cannot pass a correction to a
+later similar transaction. Legacy IDs survive only when migration proves one
+owner; shared legacy IDs stay unowned and require review. The full contract is
+in [`ADR 0001`](adr/0001-stable-transaction-identity.md).
+
+## Persistence authority and recovery
+
+`categorized.csv` is the authoritative ledger. `review_needed.csv` is a
+deterministic view of its rows whose `needs_review` value is `true`.
+`import_report.json` is a snapshot derived from the most recent successful
+import; review and correction commands do not rewrite that historical import
+snapshot. `corrections.csv` remains durable input for applying reviewed choices
+to future imports, but it is not a second ledger.
+
+The hidden `<categorized.csv parent>/.honeymoney-identity-manifest.json` is the
+authoritative source and record ownership store. It records IDs, hashes,
+allocation locators, and active or retired state, but never source paths,
+statement text, or display values. Ledger rows and the manifest must agree.
+The first import writes both, including for a zero-record source. A missing
+manifest can bootstrap only an exact pre-v2 ledger header. Missing v2 state or
+a manifest without its ledger fails closed.
+
+The manifest joins every recoverable ledger generation, including import,
+replace, reset, correction, review, reconcile, and recovery. A change that
+only updates mutable ledger fields carries validated ownership forward without
+changing it.
+
 ## Source map
 
 - `honeymoney/cli.py`: command routing, workspace setup, imports, profile
   selection, normalization, ledger management, review filtering, and JSON output.
+- `honeymoney/identity.py`: identity-v2 digests, validation, source and record
+  resolution, manifest ownership, and safe identity diagnostics.
+- `honeymoney/identity_state.py`: ledger and manifest loading, bootstrap rules,
+  cross-file validation, and manifest path handling.
 - `honeymoney/corrections.py`: correction validation, merge-by-transaction-ID,
   cumulative reconciliation, and correction/ledger/review/rule generation content.
 - `honeymoney/csv_artifacts.py`: reversible spreadsheet-safe serialization and
