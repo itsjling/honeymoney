@@ -119,6 +119,7 @@ class CliBootstrapTest(unittest.TestCase):
             self.assertEqual(
                 config["corrections"], str(resolved_root / "corrections.csv")
             )
+            self.assertEqual(config["categorization_memory"], {"enabled": False})
 
             run_result = subprocess.run(
                 [

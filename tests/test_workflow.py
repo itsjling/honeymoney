@@ -283,6 +283,68 @@ def open(path):
             ],
         )
 
+    def test_opt_in_local_memory_uses_two_reviewed_v2_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._setup_workspace(tmp)
+            config_path = root / "config.json"
+            config = json.loads(config_path.read_text(encoding="utf-8"))
+            config["categorization_memory"]["enabled"] = True
+            config_path.write_text(json.dumps(config), encoding="utf-8")
+
+            for index, merchant in enumerate(("Park-N-Shop", "PARK N SHOP"), 1):
+                statement = root / f"reviewed-{index}.csv"
+                self._write_statement(
+                    statement, [f"2026-07-0{index},{merchant},-10.00,HKD"]
+                )
+                result = self._run_cli(
+                    ["import", str(statement)],
+                    cwd=root,
+                    input_text=f"{_category_number('Groceries')}\n",
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+
+            target = root / "target.csv"
+            self._write_statement(target, ["2026-07-03,park.n.shop,-10.00,HKD"])
+            result = self._run_cli(
+                ["import", str(target), "--no-interactive"], cwd=root
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+            with (root / "output" / "categorized.csv").open(
+                newline="", encoding="utf-8"
+            ) as handle:
+                row = next(
+                    item
+                    for item in csv.DictReader(handle)
+                    if item["source_file"] == "target.csv"
+                )
+            self.assertEqual(row["category"], "Groceries")
+            self.assertEqual(row["confidence"], "0.90")
+            self.assertEqual(row["needs_review"], "false")
+            self.assertIn("local_memory_categorized", row["flags"])
+
+            reset = self._run_cli(
+                ["import", str(root / "reviewed-2.csv"), "--reset", "--no-interactive"],
+                cwd=root,
+            )
+            self.assertEqual(reset.returncode, 0, reset.stderr)
+            after_reset = root / "after-reset.csv"
+            self._write_statement(after_reset, ["2026-07-04,park n shop,-10.00,HKD"])
+            result = self._run_cli(
+                ["import", str(after_reset), "--no-interactive"], cwd=root
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            with (root / "output" / "categorized.csv").open(
+                newline="", encoding="utf-8"
+            ) as handle:
+                after_reset_row = next(
+                    item
+                    for item in csv.DictReader(handle)
+                    if item["source_file"] == "after-reset.csv"
+                )
+            self.assertEqual(after_reset_row["category"], "Unknown")
+            self.assertNotIn("local_memory_categorized", after_reset_row["flags"])
+
     def test_first_import_failure_does_not_publish_a_partial_generation(self) -> None:
         faults = [
             "file-fsync:review_needed.csv",

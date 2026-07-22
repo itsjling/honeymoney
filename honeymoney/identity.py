@@ -1045,6 +1045,29 @@ def validate_ledger_manifest_agreement(
     _validate_global_ledger_manifest_agreement(rows, manifest)
 
 
+def has_stable_v2_identity(row: Mapping[str, Any]) -> bool:
+    """Return whether a row carries a complete, current v2 identity.
+
+    This predicate is for consumers of validated ledger data that need to
+    reject legacy or partial identity rows without reaching into resolver
+    internals. It does not replace ledger/manifest validation.
+    """
+    if not isinstance(row, Mapping):
+        return False
+    return (
+        all(
+            pattern.fullmatch(_text(row.get(field))) is not None
+            for field, pattern in (
+                ("source_id", SOURCE_ID_RE),
+                ("source_namespace_id", SOURCE_NAMESPACE_ID_RE),
+                ("source_revision", SOURCE_REVISION_RE),
+                ("source_record_id", SOURCE_RECORD_ID_RE),
+            )
+        )
+        and TRANSACTION_ID_V2_RE.fullmatch(_text(row.get("transaction_id"))) is not None
+    )
+
+
 def ambiguous_legacy_transaction_ids(
     rows: list[Mapping[str, Any]] | tuple[Mapping[str, Any], ...],
 ) -> frozenset[str]:
@@ -2220,6 +2243,7 @@ __all__ = [
     "empty_manifest",
     "exact_state_key",
     "extractor_contract_id",
+    "has_stable_v2_identity",
     "logical_locator",
     "manifest_document",
     "manifest_path",
