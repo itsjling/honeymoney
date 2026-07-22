@@ -138,6 +138,32 @@ hashes, empty metadata, page counts, and prohibited PDF object markers. The
 older JSON layouts remain useful for isolated parser cases, but they do not
 replace this end-to-end extraction seam.
 
+Before adding or updating a CSV golden, validate the profile and preview the
+synthetic fixture through the public read-only command:
+
+```bash
+honeymoney profile validate honeymoney/data/profiles/hsbc_hk_bank.json \
+  --input tests/fixtures/import_profiles/hsbc_hk_bank/debit_credit_and_previous_balance/input.csv \
+  --json
+```
+
+For PDF table and word-coordinate goldens, validate the profile without
+`--input`; the committed `tables.json` and `words.json` represent extracted
+parser data rather than standalone PDFs. The existing golden test then exercises
+those shapes without requiring a live statement:
+
+```bash
+honeymoney profile validate honeymoney/data/profiles/mox_bank_pdf.json --json
+python3 -m unittest tests.test_import_profiles
+```
+
+The preview is capped at 10 normalized rows and creates no artifacts. Its output
+contains local transaction data, so only committed synthetic fixtures belong in
+agent prompts, test logs, or issues. Pass `--config CONFIG` when a profile golden
+depends on custom owner/payment vocabularies or configured currency conversion;
+otherwise the command uses `config.json` from the current directory when it
+exists.
+
 ## Adding a Categorization Golden
 
 For deterministic rules:
