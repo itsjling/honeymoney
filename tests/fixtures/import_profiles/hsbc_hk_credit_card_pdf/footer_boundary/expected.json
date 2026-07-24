@@ -1,0 +1,14 @@
+{
+  "warnings": [],
+  "rows": [
+    {
+      "date": "2026-06-01",
+      "transaction_date": "2026-06-01",
+      "posting_date": "2026-06-02",
+      "merchant": "SYNTHETIC MERCHANT",
+      "original_amount": "-10.00",
+      "source_page": "1",
+      "source_row": "1"
+    }
+  ]
+}

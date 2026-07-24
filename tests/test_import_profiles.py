@@ -12,7 +12,7 @@ from unittest.mock import patch
 
 import pdfplumber
 
-from honeymoney.cli import _load_config_document
+from honeymoney.cli import _load_config_document, _preview_profile_input
 from honeymoney.identity import (
     IdentityError,
     empty_manifest,
@@ -61,6 +61,32 @@ class HsbcCreditCardPdfProfileTest(unittest.TestCase):
             load_profile("hsbc_hk_credit_card_pdf.json"),
             "accepted_statement",
         )
+
+    def test_footer_boundary(self) -> None:
+        assert_import_case(
+            self,
+            load_profile("hsbc_hk_credit_card_pdf.json"),
+            "footer_boundary",
+        )
+
+    def test_preview_and_import_share_footer_boundary(self) -> None:
+        profile = load_profile("hsbc_hk_credit_card_pdf.json")
+        fixture = (
+            FIXTURE_DIR
+            / "import_profiles"
+            / "hsbc_hk_credit_card_pdf"
+            / "footer_boundary"
+            / "words.json"
+        )
+        words = load_json(fixture)["pages"][0]
+
+        imported_rows, imported_warnings, _ = _import_fake_pdf(profile, words=words)
+        preview_rows, preview_warnings = _import_fake_pdf(
+            profile, words=words, preview=True
+        )
+
+        self.assertEqual(preview_warnings, imported_warnings)
+        self.assertEqual(preview_rows, imported_rows)
 
 
 class MoxBankPdfProfileTest(unittest.TestCase):
@@ -444,6 +470,43 @@ class IdentityParserInputsTest(unittest.TestCase):
 
         self.assertEqual(records[0].locator.components, (1, 3))
 
+    def test_pdf_word_rows_reject_invalid_required_dates_before_identity(self) -> None:
+        profile = {
+            "id": "word",
+            "account_id": "word",
+            "account_currency": "HKD",
+            "date_formats": ["%Y-%m-%d"],
+            "pdf": {
+                "word_rows": True,
+                "word_header_markers": ["Post date", "Description", "Amount"],
+                "word_columns": {
+                    "Post date": [0, 90],
+                    "Description": [90, 200],
+                    "Amount": [200, 300],
+                },
+                "columns": {
+                    "transaction_date": "Post date",
+                    "description": "Description",
+                    "amount": "Amount",
+                },
+            },
+        }
+        words = [
+            {"text": "Post date", "x0": 0, "top": 10},
+            {"text": "Description", "x0": 100, "top": 10},
+            {"text": "Amount", "x0": 210, "top": 10},
+            {"text": "not-a-date", "x0": 0, "top": 20},
+            {"text": "Synthetic footer", "x0": 100, "top": 20},
+            {"text": "1.00", "x0": 210, "top": 20},
+        ]
+
+        with self.assertRaisesRegex(
+            ValueError,
+            r"pdf_word_row_invalid_date: profile=word; source=statement\.pdf; "
+            r"page=1; row=2; field=Post date",
+        ):
+            _import_fake_pdf(profile, words=words)
+
     def test_pdf_sectioned_identity_uses_physical_line(self) -> None:
         profile = load_profile("hsbc_one_pdf.json")
         fixture = (
@@ -473,6 +536,7 @@ def _import_fake_pdf(
     *,
     tables: list | None = None,
     words: list | None = None,
+    preview: bool = False,
 ):
     class Page:
         def extract_tables(self):
@@ -499,10 +563,15 @@ def _import_fake_pdf(
         statement.write_bytes(b"%PDF-1.4 synthetic")
         fake_pdfplumber = types.SimpleNamespace(open=lambda path: Pdf())
         with patch.dict(sys.modules, {"pdfplumber": fake_pdfplumber}):
+            config = {"base_currency": "HKD", "exchange_rates": {"HKD": 1}}
+            if preview:
+                return _preview_profile_input(
+                    profile, str(profile["id"]), statement, config
+                )
             return _import_pdf(
                 statement,
                 profile,
-                {"base_currency": "HKD", "exchange_rates": {"HKD": 1}},
+                config,
                 root,
                 include_identity_records=True,
             )

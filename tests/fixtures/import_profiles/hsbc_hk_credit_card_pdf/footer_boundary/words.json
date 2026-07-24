@@ -1,0 +1,24 @@
+{
+  "pages": [
+    [
+      {"text": "Post", "top": 10, "x0": 60},
+      {"text": "date", "top": 10, "x0": 75},
+      {"text": "Trans", "top": 10, "x0": 100},
+      {"text": "date", "top": 10, "x0": 120},
+      {"text": "Description", "top": 10, "x0": 267},
+      {"text": "Amount", "top": 10, "x0": 495},
+      {"text": "02JUN", "top": 20, "x0": 64},
+      {"text": "01JUN", "top": 20, "x0": 99},
+      {"text": "SYNTHETIC", "top": 20, "x0": 137},
+      {"text": "MERCHANT", "top": 20, "x0": 208},
+      {"text": "10.00", "top": 20, "x0": 527},
+      {"text": "The", "top": 30, "x0": 60},
+      {"text": "Hongkong", "top": 30, "x0": 85},
+      {"text": "and", "top": 30, "x0": 137},
+      {"text": "Shanghai", "top": 30, "x0": 162},
+      {"text": "Banking", "top": 30, "x0": 218},
+      {"text": "Corporation", "top": 30, "x0": 278},
+      {"text": "Limited", "top": 30, "x0": 360}
+    ]
+  ]
+}

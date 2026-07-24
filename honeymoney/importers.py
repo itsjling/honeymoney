@@ -1041,14 +1041,20 @@ def _import_pdf(
 
             for page_number, page in enumerate(pdf.pages, start=1):
                 word_rows = _pdf_word_source_rows(
-                    page, pdf_settings, include_physical_lines=include_identity_records
+                    page, pdf_settings, include_physical_lines=True
                 )
                 if word_rows is not None:
-                    for row_number, item in enumerate(word_rows, start=1):
-                        if include_identity_records:
-                            source_row, physical_line = item
-                        else:
-                            source_row = item
+                    for row_number, (source_row, physical_line) in enumerate(
+                        word_rows, start=1
+                    ):
+                        _validate_pdf_word_row_dates(
+                            source_row,
+                            profile,
+                            columns,
+                            source_display=_relative_source(pdf_path, input_root),
+                            page_number=page_number,
+                            physical_line=physical_line,
+                        )
                         normalized = _normalized_row(
                             source_row=source_row,
                             row_number=row_number,
@@ -1449,6 +1455,58 @@ def _pdf_word_source_rows(
         else:
             rows.append(source_row)
     return rows if in_table else None
+
+
+def _validate_pdf_word_row_dates(
+    source_row: dict[str, str],
+    profile: dict[str, Any],
+    columns: dict[str, Any],
+    *,
+    source_display: str,
+    page_number: int,
+    physical_line: int,
+) -> None:
+    """Reject malformed word rows before they can become identity inputs."""
+    date_formats = profile.get("date_formats", ["%Y-%m-%d"])
+    statement_year = profile.get("statement_year")
+    profile_id = str(profile.get("id") or profile.get("account_id") or "unknown")
+    seen_columns: set[str] = set()
+
+    for field in ("transaction_date", "posting_date"):
+        column = columns.get(field)
+        if column in (None, ""):
+            continue
+        column_name = str(column)
+        if column_name in seen_columns:
+            continue
+        seen_columns.add(column_name)
+        value = _clean_text(source_row.get(column_name, ""))
+        if value and _date_matches_profile(value, date_formats, statement_year):
+            continue
+        raise ValueError(
+            "pdf_word_row_invalid_date: "
+            f"profile={profile_id}; source={source_display}; "
+            f"page={page_number}; row={physical_line}; field={column_name}"
+        )
+
+
+def _date_matches_profile(value: str, date_formats: Any, statement_year: Any) -> bool:
+    if not isinstance(date_formats, list):
+        return False
+    for date_format in date_formats:
+        if not isinstance(date_format, str):
+            continue
+        try:
+            fallback_year = (
+                int(statement_year)
+                if not _date_format_has_year(date_format) and statement_year is not None
+                else None
+            )
+            _parse_profile_date(value, date_format, fallback_year=fallback_year)
+        except (TypeError, ValueError):
+            continue
+        return True
+    return False
 
 
 def _pdf_word_lines(
