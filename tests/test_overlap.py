@@ -1,4 +1,5 @@
 import copy
+import json
 import unittest
 
 from honeymoney.corrections import apply_corrections
@@ -7,11 +8,16 @@ from honeymoney.overlap import (
     EQUAL_POOL_STATUS,
     EXACT_ONE_TO_ONE_STATUS,
     SINGLE_SOURCE_STATUS,
+    DuplicateResolutionError,
     apply_history_ambiguity,
     canonicalize_overlaps,
     empty_overlap_manifest,
     enforce_overlap_review,
+    list_duplicate_groups,
+    overlap_manifest_document,
+    parse_overlap_manifest,
     project_corrections,
+    resolve_duplicate_group,
     validate_overlap_agreement,
 )
 from honeymoney.report import build_report_html
@@ -48,6 +54,55 @@ def _occurrence(
 
 
 class CanonicalOverlapTest(unittest.TestCase):
+    def test_v1_migration_rejects_unsorted_and_reused_manifest_entries(self) -> None:
+        result = canonicalize_overlaps(
+            [
+                _occurrence("1", "a", merchant="SYNTHETIC FIRST"),
+                _occurrence("2", "b", merchant="SYNTHETIC SECOND"),
+            ],
+            [],
+            empty_overlap_manifest(_NAMESPACE_KEY),
+        )
+        v1 = {
+            "schema_version": 1,
+            "namespace_key": result.manifest["namespace_key"],
+            "groups": [
+                {
+                    "group_id": group["overlap_group_id"],
+                    "record_fingerprint": group["record_fingerprint"],
+                    "slots": group["slots"],
+                }
+                for group in result.manifest["groups"]
+            ],
+        }
+
+        malformed = []
+        unsorted = copy.deepcopy(v1)
+        unsorted["groups"].reverse()
+        malformed.append(unsorted)
+        reused_fingerprint = copy.deepcopy(v1)
+        reused_fingerprint["groups"].append(
+            copy.deepcopy(reused_fingerprint["groups"][-1])
+        )
+        malformed.append(reused_fingerprint)
+        reused_transaction = copy.deepcopy(v1)
+        reused_transaction["groups"][1]["slots"][0]["transaction_id"] = (
+            reused_transaction["groups"][0]["slots"][0]["transaction_id"]
+        )
+        malformed.append(reused_transaction)
+
+        for document in malformed:
+            with self.subTest(document=document), self.assertRaises(ValueError):
+                parse_overlap_manifest(
+                    json.dumps(
+                        document,
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                        sort_keys=True,
+                    )
+                    + "\n"
+                )
+
     def test_one_to_one_overlap_becomes_one_canonical_occurrence(self) -> None:
         occurrences = [_occurrence("1", "a"), _occurrence("2", "b")]
 
@@ -75,7 +130,7 @@ class CanonicalOverlapTest(unittest.TestCase):
             },
         )
         self.assertEqual(
-            result.manifest["groups"][0]["group_id"],
+            result.manifest["groups"][0]["overlap_group_id"],
             "ovg_5f5f4ebc1ea6bfdbfd6850cd67789f01d75526dda3adadaa5be4f7a8ccdf7eb5",
         )
         self.assertEqual(
@@ -135,6 +190,406 @@ class CanonicalOverlapTest(unittest.TestCase):
             self.assertEqual(row["needs_review"], "true")
             self.assertIn("overlap_count_ambiguous", row["flags"].split(";"))
         self.assertEqual(result.ambiguous_group_count, 1)
+
+    def test_duplicate_review_lists_only_count_mismatches_with_supported_floor(
+        self,
+    ) -> None:
+        mismatch = [
+            *[_occurrence(str(index), "a") for index in range(1, 4)],
+            *[_occurrence(str(index), "b") for index in range(4, 6)],
+            _occurrence("6", "c"),
+        ]
+        equal = [
+            _occurrence("7", "d", merchant="SYNTHETIC EQUAL"),
+            _occurrence("8", "e", merchant="SYNTHETIC EQUAL"),
+        ]
+
+        result = canonicalize_overlaps(
+            [*mismatch, *equal], [], empty_overlap_manifest(_NAMESPACE_KEY)
+        )
+        groups = list_duplicate_groups(result, [*mismatch, *equal])
+
+        self.assertEqual(len(groups), 1)
+        [group] = groups
+        self.assertRegex(group["group_id"], r"^ovr_[0-9a-f]{64}$")
+        self.assertEqual(group["keep_all_count"], 3)
+        self.assertEqual(group["same_event_count"], 2)
+        self.assertEqual(group["source_counts"], [1, 2, 3])
+        self.assertEqual(len(group["occurrences"]), 6)
+        self.assertEqual(
+            group["canonical_occurrence_ids"],
+            sorted(
+                row["transaction_id"]
+                for row in result.rows
+                if row["merchant"] == "SYNTHETIC OVERLAP"
+            ),
+        )
+        self.assertEqual(
+            set(group["occurrences"][0]),
+            {
+                "account",
+                "account_id",
+                "amount",
+                "currency",
+                "date",
+                "institution",
+                "merchant",
+                "occurrence_id",
+                "source_display",
+                "source_page",
+                "source_row",
+            },
+        )
+        self.assertNotIn("original_description", str(group))
+        self.assertNotIn("source_id", str(group))
+        self.assertNotIn("namespace_key", str(group))
+
+    def test_same_event_resolution_keeps_the_second_largest_multiplicity(
+        self,
+    ) -> None:
+        occurrences = [
+            *[_occurrence(str(index), "a") for index in range(1, 4)],
+            *[_occurrence(str(index), "b") for index in range(4, 6)],
+            _occurrence("6", "c"),
+        ]
+        unresolved = canonicalize_overlaps(
+            occurrences, [], empty_overlap_manifest(_NAMESPACE_KEY)
+        )
+        [group] = list_duplicate_groups(unresolved, occurrences)
+
+        resolved = resolve_duplicate_group(
+            occurrences,
+            unresolved.rows,
+            unresolved.manifest,
+            group["group_id"],
+            "same-event",
+            {},
+        )
+
+        self.assertEqual(len(resolved.result.rows), 2)
+        self.assertEqual(resolved.removed_correction_ids, ())
+        self.assertFalse(resolved.idempotent)
+        self.assertTrue(
+            all(
+                "overlap_count_ambiguous" not in row["flags"].split(";")
+                for row in resolved.result.rows
+            )
+        )
+        [manifest_group] = [
+            item
+            for item in resolved.result.manifest["groups"]
+            if item["overlap_group_id"] == unresolved.rows[0]["canonical_group_id"]
+        ]
+        self.assertEqual(
+            manifest_group["memberships"],
+            [
+                {
+                    "group_id": group["group_id"],
+                    "membership_digest": group["membership_digest"],
+                    "overlap_group_id": manifest_group["overlap_group_id"],
+                    "resolution": "same-event",
+                }
+            ],
+        )
+
+    def test_same_resolution_is_byte_idempotent_and_conflict_fails(self) -> None:
+        occurrences = [
+            *[_occurrence(str(index), "a") for index in range(1, 4)],
+            *[_occurrence(str(index), "b") for index in range(4, 6)],
+        ]
+        unresolved = canonicalize_overlaps(
+            occurrences, [], empty_overlap_manifest(_NAMESPACE_KEY)
+        )
+        [group] = list_duplicate_groups(unresolved, occurrences)
+        with self.assertRaises(DuplicateResolutionError) as invalid:
+            resolve_duplicate_group(
+                occurrences,
+                unresolved.rows,
+                unresolved.manifest,
+                group["group_id"],
+                "merge",
+                {},
+            )
+        self.assertEqual(invalid.exception.code, "duplicate_choice_invalid")
+        first = resolve_duplicate_group(
+            occurrences,
+            unresolved.rows,
+            unresolved.manifest,
+            group["group_id"],
+            "keep-all",
+            {},
+        )
+        first_document = overlap_manifest_document(first.result.manifest)
+
+        repeated = resolve_duplicate_group(
+            occurrences,
+            first.result.rows,
+            first.result.manifest,
+            group["group_id"],
+            "keep-all",
+            {},
+        )
+
+        self.assertTrue(repeated.idempotent)
+        self.assertEqual(repeated.result.rows, first.result.rows)
+        self.assertEqual(
+            overlap_manifest_document(repeated.result.manifest), first_document
+        )
+        with self.assertRaises(DuplicateResolutionError) as conflict:
+            resolve_duplicate_group(
+                occurrences,
+                first.result.rows,
+                first.result.manifest,
+                group["group_id"],
+                "same-event",
+                {},
+            )
+        self.assertEqual(conflict.exception.code, "duplicate_resolution_conflict")
+
+    def test_membership_drift_ignores_saved_resolution_and_restores_review(
+        self,
+    ) -> None:
+        occurrences = [
+            *[_occurrence(str(index), "a") for index in range(1, 4)],
+            *[_occurrence(str(index), "b") for index in range(4, 6)],
+            _occurrence("6", "c"),
+        ]
+        unresolved = canonicalize_overlaps(
+            occurrences, [], empty_overlap_manifest(_NAMESPACE_KEY)
+        )
+        [old_group] = list_duplicate_groups(unresolved, occurrences)
+        resolved = resolve_duplicate_group(
+            occurrences,
+            unresolved.rows,
+            unresolved.manifest,
+            old_group["group_id"],
+            "same-event",
+            {},
+        )
+
+        changed_occurrences = occurrences[:-1]
+        changed = canonicalize_overlaps(
+            changed_occurrences, resolved.result.rows, resolved.result.manifest
+        )
+        [new_group] = list_duplicate_groups(changed, changed_occurrences)
+
+        self.assertNotEqual(new_group["group_id"], old_group["group_id"])
+        self.assertEqual(len(changed.rows), 3)
+        self.assertTrue(all(row["needs_review"] == "true" for row in changed.rows))
+        self.assertEqual(
+            changed.diagnostic["warnings"],
+            [
+                {
+                    "code": "duplicate_membership_changed",
+                    "group_id": new_group["group_id"],
+                }
+            ],
+        )
+        with self.assertRaises(DuplicateResolutionError) as stale:
+            resolve_duplicate_group(
+                changed_occurrences,
+                changed.rows,
+                changed.manifest,
+                old_group["group_id"],
+                "same-event",
+                {},
+            )
+        self.assertEqual(stale.exception.code, "duplicate_group_stale")
+        with self.assertRaises(DuplicateResolutionError) as unknown:
+            resolve_duplicate_group(
+                changed_occurrences,
+                changed.rows,
+                changed.manifest,
+                "ovr_" + "f" * 64,
+                "same-event",
+                {},
+            )
+        self.assertEqual(unknown.exception.code, "duplicate_group_unknown")
+
+    def test_membership_binds_source_records_counts_slots_and_tail(self) -> None:
+        occurrences = [
+            *[_occurrence(str(index), "a") for index in range(1, 4)],
+            *[_occurrence(str(index), "b") for index in range(4, 6)],
+        ]
+        first = canonicalize_overlaps(
+            occurrences, [], empty_overlap_manifest(_NAMESPACE_KEY)
+        )
+        [first_group] = list_duplicate_groups(first, occurrences)
+        reallocated = copy.deepcopy(occurrences)
+        reallocated[0]["source_record_id"] = "rec_" + "f" * 64
+
+        changed = canonicalize_overlaps(reallocated, first.rows, first.manifest)
+        [changed_group] = list_duplicate_groups(changed, reallocated)
+
+        self.assertNotEqual(
+            changed_group["membership_digest"],
+            first_group["membership_digest"],
+        )
+        self.assertNotEqual(changed_group["group_id"], first_group["group_id"])
+        self.assertEqual(
+            first_group["membership_digest"],
+            "ovm_714ca8c7e9462c590f454d32ccd434805c82f84f66e5caab900325dd3c3822a9",
+        )
+        self.assertEqual(
+            first_group["group_id"],
+            "ovr_b7c20c5ed9091bea3b85c91b57935a7fac92e5ba73b3ae24fcb92d32a3524596",
+        )
+
+    def test_duplicate_evidence_uses_one_amount_currency_basis(self) -> None:
+        occurrences = [
+            _occurrence("1", "a"),
+            _occurrence("2", "a"),
+            _occurrence("3", "b"),
+        ]
+        for row in occurrences:
+            row.update(
+                {
+                    "original_amount": "-1.00",
+                    "original_currency": "USD",
+                    "posted_amount": "-8.00",
+                    "posted_currency": "HKD",
+                    "amount_hkd": "-8.00",
+                }
+            )
+        result = canonicalize_overlaps(
+            occurrences, [], empty_overlap_manifest(_NAMESPACE_KEY)
+        )
+
+        [group] = list_duplicate_groups(result, occurrences)
+
+        self.assertEqual(
+            {(item["amount"], item["currency"]) for item in group["occurrences"]},
+            {("-8.00", "HKD")},
+        )
+
+    def test_same_event_removes_only_proven_equal_tail_corrections(self) -> None:
+        occurrences = [
+            *[_occurrence(str(index), "a") for index in range(1, 4)],
+            *[_occurrence(str(index), "b") for index in range(4, 6)],
+        ]
+        unresolved = canonicalize_overlaps(
+            occurrences, [], empty_overlap_manifest(_NAMESPACE_KEY)
+        )
+        [group] = list_duplicate_groups(unresolved, occurrences)
+        identifiers = [row["transaction_id"] for row in unresolved.rows]
+        patch = {"category": "Dining", "needs_review": "false"}
+
+        with self.assertRaises(DuplicateResolutionError) as conflict:
+            resolve_duplicate_group(
+                occurrences,
+                unresolved.rows,
+                unresolved.manifest,
+                group["group_id"],
+                "same-event",
+                {identifiers[-1]: patch},
+            )
+        self.assertEqual(conflict.exception.code, "duplicate_history_conflict")
+
+        resolved = resolve_duplicate_group(
+            occurrences,
+            unresolved.rows,
+            unresolved.manifest,
+            group["group_id"],
+            "same-event",
+            {identifier: patch for identifier in identifiers},
+        )
+
+        self.assertEqual(resolved.removed_correction_ids, (identifiers[-1],))
+        self.assertEqual(resolved.correction_updates, {})
+        self.assertEqual(len(resolved.result.rows), 2)
+
+    def test_same_event_migrates_one_tail_correction_only_at_floor_one(
+        self,
+    ) -> None:
+        occurrences = [
+            _occurrence("1", "a"),
+            _occurrence("2", "a"),
+            _occurrence("3", "b"),
+        ]
+        unresolved = canonicalize_overlaps(
+            occurrences, [], empty_overlap_manifest(_NAMESPACE_KEY)
+        )
+        [group] = list_duplicate_groups(unresolved, occurrences)
+        first_id, tail_id = [row["transaction_id"] for row in unresolved.rows]
+        patch = {"category": "Dining", "needs_review": "false"}
+        unresolved.rows[-1].update(patch)
+        unresolved.rows[-1]["flags"] += ";manual_correction"
+
+        resolved = resolve_duplicate_group(
+            occurrences,
+            unresolved.rows,
+            unresolved.manifest,
+            group["group_id"],
+            "same-event",
+            {tail_id: patch},
+        )
+
+        self.assertEqual(resolved.removed_correction_ids, (tail_id,))
+        self.assertEqual(resolved.correction_updates, {first_id: patch})
+        self.assertEqual(len(resolved.result.rows), 1)
+
+    def test_same_event_protects_non_overlap_review_history(self) -> None:
+        occurrences = [
+            _occurrence("1", "a"),
+            _occurrence("2", "a"),
+            _occurrence("3", "b"),
+        ]
+        unresolved = canonicalize_overlaps(
+            occurrences, [], empty_overlap_manifest(_NAMESPACE_KEY)
+        )
+        [group] = list_duplicate_groups(unresolved, occurrences)
+        unresolved.rows[-1]["notes"] = "Synthetic protected review note"
+
+        with self.assertRaises(DuplicateResolutionError) as conflict:
+            resolve_duplicate_group(
+                occurrences,
+                unresolved.rows,
+                unresolved.manifest,
+                group["group_id"],
+                "same-event",
+                {},
+            )
+
+        self.assertEqual(conflict.exception.code, "duplicate_history_conflict")
+
+    def test_resolutions_clear_only_overlap_owned_review(self) -> None:
+        occurrences = [
+            _occurrence("1", "a"),
+            _occurrence("2", "a"),
+            _occurrence("3", "b"),
+        ]
+        unresolved = canonicalize_overlaps(
+            occurrences, [], empty_overlap_manifest(_NAMESPACE_KEY)
+        )
+        [group] = list_duplicate_groups(unresolved, occurrences)
+        for row in unresolved.rows:
+            row["needs_review"] = "true"
+            row["reason"] += "; Synthetic independent review"
+            row["flags"] += ";synthetic_independent_review"
+
+        for choice in ("same-event", "keep-all"):
+            with self.subTest(choice=choice):
+                resolved = resolve_duplicate_group(
+                    occurrences,
+                    copy.deepcopy(unresolved.rows),
+                    unresolved.manifest,
+                    group["group_id"],
+                    choice,
+                    {},
+                )
+                self.assertTrue(
+                    all(row["needs_review"] == "true" for row in resolved.result.rows)
+                )
+                self.assertTrue(
+                    all(
+                        "synthetic_independent_review" in row["flags"].split(";")
+                        and "Synthetic independent review" in row["reason"]
+                        and "overlap_count_ambiguous" not in row["flags"].split(";")
+                        and "Exact overlap has different source occurrence counts"
+                        not in row["reason"]
+                        for row in resolved.result.rows
+                    )
+                )
 
     def test_single_source_repeats_stay_separate(self) -> None:
         occurrences = [_occurrence(str(index), "a") for index in range(1, 4)]

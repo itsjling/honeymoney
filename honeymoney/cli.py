@@ -57,10 +57,14 @@ from honeymoney.ollama import (
     validate_ollama_endpoint,
 )
 from honeymoney.overlap import (
+    CanonicalizationResult,
+    DuplicateResolutionError,
     apply_history_ambiguity,
     canonicalize_overlaps,
     enforce_overlap_review,
+    list_duplicate_groups,
     project_corrections,
+    resolve_duplicate_group,
 )
 from honeymoney.persistence import persist_generation, recover_generation
 from honeymoney.reconciliation import (
@@ -188,6 +192,8 @@ def main(argv: list[str] | None = None) -> int:
         return _status_command(argv[1:])
     if argv and argv[0] == "pending":
         return _pending_command(argv[1:])
+    if argv and argv[0] == "duplicates":
+        return _duplicates_command(argv[1:])
     if argv and argv[0] == "correct":
         return _correct_command(argv[1:])
     if argv and argv[0] == "report":
@@ -407,7 +413,8 @@ def _run_pipeline(
     apply_history_ambiguity(
         ledger_rows, correction_projection.ambiguous_transaction_ids
     )
-    enforce_overlap_review(ledger_rows)
+    if has_processed_source:
+        enforce_overlap_review(ledger_rows, overlap_result)
     _enforce_identity_review(transactions)
     _status.clear()
     if interactive:
@@ -422,11 +429,16 @@ def _run_pipeline(
     )
     if has_processed_source:
         refresh_duplicate_candidates(ledger_rows, final_review_ids=final_review_ids)
-    enforce_overlap_review(ledger_rows)
+        enforce_overlap_review(ledger_rows, overlap_result)
     _enforce_identity_review(ledger_rows)
     review_rows = [row for row in transactions if row["needs_review"] == "true"]
     duplicate_count, duplicate_group_count, duplicate_candidates = (
         _duplicate_compatibility(overlap_result.diagnostic)
+    )
+    import_warnings.extend(
+        f"{warning['code']}: duplicate group membership changed; "
+        f"review {warning['group_id']}"
+        for warning in overlap_result.diagnostic["warnings"]
     )
     report = {
         "status": "partial_success" if import_warnings else "success",
@@ -523,6 +535,9 @@ Commands:
   honeymoney profile validate ... Validate a profile and optionally preview input
   honeymoney status [MONTH]        Show processed/categorized counts for a period
   honeymoney pending [MONTH]       List transactions that need review
+  honeymoney duplicates            List unresolved exact-overlap count groups
+  honeymoney duplicates resolve ID --as same-event|keep-all
+                                   Resolve one current duplicate group
   honeymoney correct --file FILE   Apply validated transaction corrections
   honeymoney report [MONTH]        Open a web report for a period
   honeymoney reconcile             Recompute and inspect ledger transfers
@@ -551,6 +566,164 @@ Review filters and decisions:
   --remember --yes                 Save an exact, directional income rule
   --json                           Valid only for a fully specified one-shot review
 """
+
+
+def _duplicates_command(argv: list[str]) -> int:
+    if argv and argv[0] == "resolve":
+        return _duplicates_resolve_command(argv[1:])
+    parser = _command_parser(
+        argv,
+        prog="honeymoney duplicates",
+        description="List unresolved exact-overlap count groups.",
+    )
+    parser.add_argument("--config", dest="config_path")
+    parser.add_argument("--output", dest="output_path")
+    parser.add_argument("--json", action="store_true")
+    args = parser.parse_args(argv)
+
+    config = _load_config(args.config_path)
+    categorized_path = Path(args.output_path or config["paths"]["output"])
+    state = load_identity_state(categorized_path)
+    current = canonicalize_overlaps(
+        state.source_rows,
+        [] if state.canonical_migration_required else state.rows,
+        state.overlap_manifest,
+    )
+    groups = list_duplicate_groups(current, state.source_rows)
+    if args.json:
+        _emit_json(
+            "duplicates",
+            "success",
+            data={"group_count": len(groups), "groups": groups},
+            warnings=current.diagnostic["warnings"],
+        )
+        return 0
+    if not groups:
+        print("No unresolved duplicate groups.")
+        return 0
+    print(f"{len(groups)} unresolved duplicate group(s):")
+    for group in groups:
+        print(
+            f"\n{group['group_id']}  "
+            f"match={group['match_basis']}  "
+            f"keep-all={group['keep_all_count']}  "
+            f"same-event={group['same_event_count']}"
+        )
+        for occurrence in group["occurrences"]:
+            print(
+                "  "
+                f"{occurrence['occurrence_id']}  "
+                f"{occurrence['date']}  "
+                f"{occurrence['amount']} {occurrence['currency']}  "
+                f"{occurrence['account_id']}  "
+                f"{occurrence['merchant']}  "
+                f"{occurrence['source_display']}"
+            )
+        print(f"  honeymoney duplicates resolve {group['group_id']} --as same-event")
+        print(f"  honeymoney duplicates resolve {group['group_id']} --as keep-all")
+    return 0
+
+
+def _duplicates_resolve_command(argv: list[str]) -> int:
+    parser = _command_parser(
+        argv,
+        prog="honeymoney duplicates resolve",
+        description="Resolve one current exact-overlap count group.",
+    )
+    parser.add_argument("group_id")
+    parser.add_argument(
+        "--as",
+        dest="resolution",
+        required=True,
+    )
+    parser.add_argument("--config", dest="config_path")
+    parser.add_argument("--output", dest="output_path")
+    parser.add_argument("--json", action="store_true")
+    args = parser.parse_args(argv)
+
+    config = _load_config(args.config_path)
+    categorized_path = Path(args.output_path or config["paths"]["output"])
+    state = load_identity_state(categorized_path)
+    corrections = load_corrections(config)
+    resolution = resolve_duplicate_group(
+        state.source_rows,
+        [] if state.canonical_migration_required else state.rows,
+        state.overlap_manifest,
+        args.group_id,
+        args.resolution,
+        corrections,
+    )
+    if resolution.idempotent:
+        if args.json:
+            _emit_json(
+                "duplicates.resolve",
+                "success",
+                data={
+                    "group_id": args.group_id,
+                    "resolution": args.resolution,
+                    "changed": False,
+                    "old_group_canonical_count": (resolution.old_group_canonical_count),
+                    "new_group_canonical_count": (resolution.new_group_canonical_count),
+                    "remaining_unresolved_count": (
+                        resolution.remaining_unresolved_count
+                    ),
+                },
+            )
+        else:
+            print(
+                f"Duplicate group {args.group_id} is already resolved "
+                f"as {args.resolution}."
+            )
+        return 0
+
+    rows = [dict(row) for row in resolution.result.rows]
+    apply_corrections(rows, resolution.correction_updates)
+    reconcile_ledger(rows, config, statement_rows=state.source_rows)
+    files = ledger_output_documents(
+        categorized_path,
+        rows,
+        identity_manifest_document=state.manifest_document,
+        source_occurrences=state.source_rows,
+        source_evidence=state.source_evidence_rows,
+        overlap_manifest=resolution.result.manifest,
+    )
+    if resolution.removed_correction_ids or resolution.correction_updates:
+        corrections_path, corrections_document, _ = prepare_corrections_document(
+            config,
+            resolution.correction_updates,
+            removed_transaction_ids=set(resolution.removed_correction_ids),
+        )
+        files[corrections_path] = corrections_document
+    persist_generation(categorized_path, files)
+
+    if args.json:
+        _emit_json(
+            "duplicates.resolve",
+            "success",
+            data={
+                "group_id": args.group_id,
+                "resolution": args.resolution,
+                "changed": True,
+                "old_group_canonical_count": (resolution.old_group_canonical_count),
+                "new_group_canonical_count": (resolution.new_group_canonical_count),
+                "remaining_unresolved_count": (resolution.remaining_unresolved_count),
+                "removed_correction_count": len(resolution.removed_correction_ids),
+            },
+            artifacts={
+                "categorized_csv": str(categorized_path.resolve()),
+                "review_needed_csv": str(
+                    (categorized_path.parent / "review_needed.csv").resolve()
+                ),
+            },
+        )
+        return 0
+    print(
+        f"Resolved duplicate group {args.group_id} as {args.resolution}; "
+        f"group count {resolution.old_group_canonical_count} -> "
+        f"{resolution.new_group_canonical_count}; "
+        f"{resolution.remaining_unresolved_count} unresolved group(s) remain."
+    )
+    return 0
 
 
 def _config_command(argv: list[str]) -> int:
@@ -1681,7 +1854,9 @@ def _overlap_diagnostic_for_rows(
     return {
         "group_count": len(groups),
         "ambiguous_group_count": sum(
-            group["provenance_status"] == "ambiguous_count_mismatch" for group in groups
+            group["provenance_status"] == "ambiguous_count_mismatch"
+            and group.get("decision") is None
+            for group in groups
         ),
         "source_occurrence_count": source_count,
         "canonical_occurrence_count": canonical_count,
@@ -1927,8 +2102,15 @@ def _report_command(argv: list[str]) -> int:
     categorized_path = Path(config["paths"]["output"])
     state = load_identity_state(categorized_path)
     ledger_rows = _normalize_loaded_rows(state.rows)
+    current_overlap = (
+        None
+        if state.canonical_migration_required
+        else canonicalize_overlaps(
+            state.source_rows, ledger_rows, state.overlap_manifest
+        )
+    )
     reconcile_ledger(ledger_rows, config, statement_rows=state.source_rows)
-    enforce_overlap_review(ledger_rows)
+    enforce_overlap_review(ledger_rows, current_overlap)
 
     start, end = _resolve_period(args.month or args.period, args.start, args.end)
     rows = _rows_in_period(ledger_rows, start, end)
@@ -2019,7 +2201,7 @@ def _reconcile_command(argv: list[str]) -> int:
         )
     refresh_duplicate_candidates(rows, final_review_ids=final_review_ids)
     summary = reconcile_ledger(rows, config, statement_rows=state.source_rows)
-    enforce_overlap_review(rows)
+    enforce_overlap_review(rows, overlap_result)
     if overlap_result is not None and not state.bootstrap_required:
         overlap_result = canonicalize_overlaps(
             state.source_rows, rows, overlap_result.manifest
@@ -2042,6 +2224,7 @@ def _reconcile_command(argv: list[str]) -> int:
                 if overlap_result is None
                 else overlap_result.manifest
             ),
+            overlap_result=overlap_result,
             identity_manifest_document=state.manifest_document,
         )
 
@@ -2402,10 +2585,11 @@ def _write_ledger_outputs(
     source_rows: list[dict[str, str]] | None = None,
     source_evidence: list[dict[str, str]] | None = None,
     overlap_manifest: dict[str, object] | None = None,
+    overlap_result: CanonicalizationResult | None = None,
     identity_manifest_document: str | None = None,
 ) -> None:
     refresh_duplicate_candidates(ledger_rows, final_review_ids=final_review_ids)
-    enforce_overlap_review(ledger_rows)
+    enforce_overlap_review(ledger_rows, overlap_result)
     persist_generation(
         categorized_path,
         ledger_output_documents(
@@ -2846,6 +3030,15 @@ def run() -> int:
         identity_details = (
             _identity_error_details(identity_error) if identity_error else None
         )
+        duplicate_details = (
+            {
+                "type": "DuplicateResolutionError",
+                "code": error.code,
+                "message": error.code,
+            }
+            if isinstance(error, DuplicateResolutionError)
+            else None
+        )
         if "--json" in argv:
             command = _json_error_command(argv)
             _emit_json(
@@ -2854,12 +3047,25 @@ def run() -> int:
                 errors=[
                     identity_details
                     if identity_details is not None
-                    else {"type": type(error).__name__, "message": str(error)}
+                    else (
+                        duplicate_details
+                        if duplicate_details is not None
+                        else {
+                            "type": type(error).__name__,
+                            "message": str(error),
+                        }
+                    )
                 ],
             )
             return 2
         print(
-            identity_details["message"] if identity_details is not None else str(error),
+            identity_details["message"]
+            if identity_details is not None
+            else (
+                duplicate_details["message"]
+                if duplicate_details is not None
+                else str(error)
+            ),
             file=sys.stderr,
         )
         return 2
@@ -2891,6 +3097,8 @@ def _identity_error_details(error: IdentityError) -> dict[str, Any]:
 def _json_error_command(argv: list[str]) -> str:
     if len(argv) > 1 and argv[:2] == ["profile", "validate"]:
         return "profile.validate"
+    if len(argv) > 1 and argv[:2] == ["duplicates", "resolve"]:
+        return "duplicates.resolve"
     return argv[0] if argv and not argv[0].startswith("-") else "run"
 
 

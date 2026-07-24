@@ -271,6 +271,8 @@ honeymoney run --strict --no-interactive
 honeymoney run --config ./money/config.json
 honeymoney import "/path/to/statement.pdf"
 honeymoney run --input ./samples --output ./output/categorized.csv
+honeymoney duplicates --json
+honeymoney duplicates resolve ovr_<group> --as same-event
 ```
 
 ## Outputs
@@ -294,11 +296,20 @@ Three hidden files join each recoverable ledger generation:
   and canonical output.
 - `.honeymoney-identity-manifest.json`: source and record ownership.
 - `.honeymoney-overlap-manifest.json`: the private canonical-ID namespace and
-  active or retired multiset slots.
+  active or retired multiset slots, keyed membership history, and explicit
+  duplicate resolutions.
 
 An exact issue #31 ledger keeps its old source IDs during read-only commands.
 Its first write publishes the canonical CSV and both new hidden files together.
 Partial canonical state fails closed.
+
+When exact overlap sources have different repeat counts, `honeymoney
+duplicates` lists the unresolved groups with bounded local evidence. Resolve a
+current group with `--as keep-all` to retain the largest source count, or
+`--as same-event` to retain the largest count supported by at least two
+sources. Equal counts need no prompt. A later membership change gets a new
+group ID, ignores the old choice, and returns the group to review. Resolution
+keeps source evidence and does not rewrite `import_report.json`.
 
 `category` describes merchant or budget purpose. `flow_type` separately controls accounting treatment and is one of `income`, `expense`, `refund`, `internal_transfer`, `credit_card_payment`, `investment_transfer`, or `unresolved`. Reports never infer income from a positive sign alone.
 

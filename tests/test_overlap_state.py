@@ -1,14 +1,17 @@
 from __future__ import annotations
 
+import io
 import json
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
 
 from honeymoney.cli import (
     _active_source_ids_by_fingerprint,
     _normalize_loaded_rows,
     _reconcile_command,
+    main,
 )
 from honeymoney.corrections import (
     CORRECTION_COLUMNS,
@@ -33,6 +36,7 @@ from honeymoney.identity import (
 from honeymoney.identity_state import identity_manifest_path, load_identity_state
 from honeymoney.overlap import (
     canonicalize_overlaps,
+    overlap_manifest_document,
     overlap_manifest_path,
     source_occurrences_path,
 )
@@ -356,6 +360,83 @@ class OverlapWorkspaceStateTest(unittest.TestCase):
         self.assertEqual(
             support[record_fingerprint(first)], {first_source["source_id"]}
         )
+
+    def test_schema_one_overlap_manifest_migrates_in_memory_then_on_write(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "categorized.csv"
+            self._write_issue_31_state(path)
+            issue_31 = load_identity_state(path)
+            canonical = canonicalize_overlaps(
+                issue_31.source_rows, [], issue_31.overlap_manifest
+            )
+            files = ledger_output_documents(
+                path,
+                canonical.rows,
+                identity_manifest=issue_31.manifest,
+                source_occurrences=issue_31.source_rows,
+                overlap_manifest=canonical.manifest,
+            )
+            v1_manifest = {
+                "schema_version": 1,
+                "namespace_key": canonical.manifest["namespace_key"],
+                "groups": [
+                    {
+                        "group_id": group["overlap_group_id"],
+                        "record_fingerprint": group["record_fingerprint"],
+                        "slots": group["slots"],
+                    }
+                    for group in canonical.manifest["groups"]
+                ],
+            }
+            files[overlap_manifest_path(path)] = (
+                json.dumps(
+                    v1_manifest,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                )
+                + "\n"
+            )
+            persist_generation(path, files)
+            raw_v1 = overlap_manifest_path(path).read_bytes()
+
+            migrated = load_identity_state(path)
+
+            self.assertTrue(migrated.overlap_migration_required)
+            self.assertEqual(migrated.overlap_manifest["schema_version"], 2)
+            config_path = Path(temporary) / "config.json"
+            config_path.write_text(
+                json.dumps({"paths": {"output": str(path)}}),
+                encoding="utf-8",
+            )
+            output = io.StringIO()
+            with redirect_stdout(output):
+                return_code = main(
+                    ["duplicates", "--config", str(config_path), "--json"]
+                )
+            self.assertEqual(return_code, 0)
+            self.assertEqual(overlap_manifest_path(path).read_bytes(), raw_v1)
+            rewritten = ledger_output_documents(
+                path,
+                migrated.rows,
+                identity_manifest_document=migrated.manifest_document,
+                source_occurrences=migrated.source_rows,
+                source_evidence=migrated.source_evidence_rows,
+                overlap_manifest=migrated.overlap_manifest,
+            )
+            self.assertIn(
+                '"schema_version":2',
+                rewritten[overlap_manifest_path(path)],
+            )
+            persist_generation(path, rewritten)
+            reloaded = load_identity_state(path)
+            self.assertFalse(reloaded.overlap_migration_required)
+            self.assertEqual(
+                overlap_manifest_path(path).read_text(encoding="utf-8"),
+                overlap_manifest_document(reloaded.overlap_manifest),
+            )
 
 
 if __name__ == "__main__":
