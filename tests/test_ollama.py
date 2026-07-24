@@ -175,6 +175,35 @@ class OllamaTest(unittest.TestCase):
             [1, 1],
         )
 
+    def test_exact_valid_category_corrections_are_not_model_candidates(self) -> None:
+        transport = FakeTransport(successful_handler)
+        corrected = unresolved_transaction("txn_corrected")
+        uncorrected = unresolved_transaction("txn_uncorrected")
+        owner_only = unresolved_transaction("txn_owner_only")
+        unknown = unresolved_transaction("txn_unknown")
+        invalid = unresolved_transaction("txn_invalid")
+
+        report, warnings = apply_ollama_fallback(
+            [corrected, uncorrected, owner_only, unknown, invalid],
+            self.config(),
+            corrections={
+                "txn_corrected": {"category": "Dining"},
+                "txn_owner_only": {"owner": "Justin"},
+                "txn_unknown": {"category": "Unknown"},
+                "txn_invalid": {"category": "Not a category"},
+            },
+            transport=transport,
+        )
+
+        self.assertEqual(warnings, [])
+        self.assertEqual(report["candidate_count"], 4)
+        self.assertEqual(report["skipped_exact_category_correction_count"], 1)
+        self.assertEqual(
+            [row["id"] for row in prompt_for(transport.requests[0])["transactions"]],
+            ["txn_uncorrected", "txn_owner_only", "txn_unknown", "txn_invalid"],
+        )
+        self.assertEqual(corrected["category"], "Unknown")
+
     def test_unavailable_batch_reports_additive_partial_counts(self) -> None:
         calls = 0
 

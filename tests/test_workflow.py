@@ -1531,6 +1531,147 @@ def open(path):
             corrections = (root / "corrections.csv").read_text(encoding="utf-8")
             self.assertEqual(len(corrections.strip().splitlines()), 1)
 
+    def test_ollama_skips_corrected_rows_on_replace_and_uses_them_after_reset(
+        self,
+    ) -> None:
+        sent_batches: list[list[str]] = []
+
+        class FakeTransport:
+            def request(self, request: OllamaHttpRequest) -> bytes:
+                assert request.body is not None
+                prompt = json.loads(json.loads(request.body)["prompt"])
+                transactions = prompt["transactions"]
+                sent_batches.append([transaction["id"] for transaction in transactions])
+                return json.dumps(
+                    {
+                        "response": json.dumps(
+                            [
+                                {
+                                    "id": transaction["id"],
+                                    "category": "Dining",
+                                    "confidence": 0.9,
+                                    "reason": "Synthetic local category",
+                                }
+                                for transaction in transactions
+                            ]
+                        )
+                    }
+                ).encode()
+
+        def fake_apply(transactions, config, progress=None, corrections=None):
+            return apply_ollama_fallback(
+                transactions,
+                config,
+                progress=progress,
+                transport=FakeTransport(),
+                corrections=corrections,
+            )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._setup_workspace(tmp)
+            statement = root / "may.csv"
+            self._write_statement(
+                statement,
+                [
+                    "2026-05-04,SYNTHETIC REVIEWED SHOP,-12.00,HKD",
+                    "2026-05-05,SYNTHETIC UNREVIEWED SHOP,-15.00,HKD",
+                ],
+            )
+            config_path = root / "config.json"
+            config = json.loads(config_path.read_text(encoding="utf-8"))
+            config["ollama"] = {
+                "enabled": False,
+                "url": "http://localhost:11434/api/generate",
+                "model": "test",
+            }
+            config_path.write_text(json.dumps(config), encoding="utf-8")
+
+            old_cwd = Path.cwd()
+            try:
+                os.chdir(root)
+                self.assertEqual(
+                    cli.main(["import", str(statement), "--no-interactive"]), 0
+                )
+                corrected_id = next(
+                    row["transaction_id"]
+                    for row in self._ledger_rows(root)
+                    if row["merchant"] == "SYNTHETIC REVIEWED SHOP"
+                )
+                (root / "corrections.csv").write_text(
+                    f"transaction_id,category\n{corrected_id},Groceries\n",
+                    encoding="utf-8",
+                )
+                config["ollama"]["enabled"] = True
+                config_path.write_text(json.dumps(config), encoding="utf-8")
+
+                with patch.object(cli, "apply_ollama_fallback", side_effect=fake_apply):
+                    self.assertEqual(
+                        cli.main(
+                            [
+                                "import",
+                                str(statement),
+                                "--replace",
+                                "--no-interactive",
+                            ]
+                        ),
+                        0,
+                    )
+
+                    replace_report = json.loads(
+                        (root / "output" / "import_report.json").read_text(
+                            encoding="utf-8"
+                        )
+                    )
+                    self.assertEqual(replace_report["ollama"]["candidate_count"], 1)
+                    self.assertEqual(
+                        replace_report["ollama"][
+                            "skipped_exact_category_correction_count"
+                        ],
+                        1,
+                    )
+                    self.assertEqual(
+                        sent_batches,
+                        [
+                            [
+                                row["transaction_id"]
+                                for row in self._ledger_rows(root)
+                                if row["merchant"] == "SYNTHETIC UNREVIEWED SHOP"
+                            ]
+                        ],
+                    )
+
+                    sent_batches.clear()
+                    self.assertEqual(
+                        cli.main(
+                            [
+                                "import",
+                                str(statement),
+                                "--reset",
+                                "--no-interactive",
+                            ]
+                        ),
+                        0,
+                    )
+                reset_report = json.loads(
+                    (root / "output" / "import_report.json").read_text(encoding="utf-8")
+                )
+            finally:
+                os.chdir(old_cwd)
+
+            self.assertEqual(reset_report["ollama"]["candidate_count"], 2)
+            self.assertEqual(
+                reset_report["ollama"]["skipped_exact_category_correction_count"],
+                0,
+            )
+            self.assertEqual(len(sent_batches), 1)
+            self.assertEqual(len(sent_batches[0]), 2)
+            self.assertEqual(
+                len(
+                    (root / "corrections.csv").read_text(encoding="utf-8").splitlines()
+                ),
+                1,
+            )
+
     def test_interactive_reset_replaces_the_old_correction_with_the_new_choice(
         self,
     ) -> None:
@@ -2728,12 +2869,13 @@ class StatusLineTtyTest(unittest.TestCase):
                     }
                 ).encode()
 
-        def fake_apply(transactions, config, progress=None):
+        def fake_apply(transactions, config, progress=None, corrections=None):
             return apply_ollama_fallback(
                 transactions,
                 config,
                 progress=progress,
                 transport=FakeTransport(),
+                corrections=corrections,
             )
 
         with tempfile.TemporaryDirectory() as tmp:

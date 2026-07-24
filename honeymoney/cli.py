@@ -306,7 +306,7 @@ def _run_pipeline(
     _status.update("Applying structural classifications...")
     structural_count = apply_structural_classification(transactions, config)
     ollama_report, ollama_warnings = apply_ollama_fallback(
-        transactions, config, progress=_ollama_progress
+        transactions, config, progress=_ollama_progress, corrections=corrections
     )
     if ollama_warnings:
         _status.clear()
