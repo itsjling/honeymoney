@@ -26,8 +26,10 @@ jobs:
           cache-dependency-path: |
             pyproject.toml
             constraints/dev.txt
-      - run: ./scripts/bootstrap.sh
-      - run: ./scripts/check.sh
+      - name: Bootstrap constrained tools
+        run: ./scripts/bootstrap.sh
+      - name: Run offline quality gates
+        run: ./scripts/check.sh
 
   dependency-health:
     name: Dependency health (online advisory lookup)

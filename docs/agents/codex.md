@@ -13,6 +13,28 @@ environment when desired, then run:
 Set `PYTHON=/path/to/python` when Codex should use a specific interpreter.
 Bootstrap resolves the reviewed direct and transitive versions from
 `constraints/dev.txt`; CI proves that resolution on Python 3.10 and 3.13.
+Run either offline gate alone when a focused check is useful:
+
+```bash
+python3 -m mypy
+./scripts/check_coverage.sh
+```
+
+Mypy checks the named zero-error scope in `pyproject.toml`. Never remove a
+checked file or weaken a type rule to make a change pass. New financial-core
+modules enter the scope when added. A change to an excluded module must add
+that module to the checked scope, or state why the same change cannot finish
+the conversion and file the next bounded step.
+
+The current excluded implementation modules are
+`categorization_memory.py`, `cli.py`, `identity.py`, `importers.py`,
+`ollama.py`, `report.py`, and `rules.py`. Their public identity and parser
+boundaries use the checked contracts in `contracts.py`,
+`identity_contracts.py`, `overlap_contracts.py`, and `parser_contracts.py`,
+plus checked stubs for the exact callable surface of `identity.py`,
+`importers.py`, and `rules.py`. The overlap planner and its duplicate decisions
+are in the strict checked scope. See `docs/quality-gates.md` for the baseline
+and seam map.
 
 ## Codex cloud
 
@@ -29,10 +51,11 @@ Run `./scripts/bootstrap.sh` during environment setup while package-index access
 is available. The required editable-install extras are `pdf` and `dev`
 (`.[pdf,dev]`); the bootstrap script installs both under the reviewed
 constraints. The subsequent `./scripts/check.sh` agent phase is offline: it
-uses the installed environment for Ruff, tests, `pip check`, package builds,
-and distribution-metadata verification. Its default test runner rejects socket
-creation and non-local DNS lookup; Ollama tests inject fake transports rather
-than starting listeners. It does not perform advisory lookup.
+uses the installed environment for Ruff, mypy, branch-covered tests,
+`pip check`, package builds, and distribution-metadata verification. Its
+default test runner rejects socket creation and non-local DNS lookup in the
+test process and child Python processes. Ollama tests inject fake transports
+rather than starting listeners. It does not perform advisory lookup.
 
 Maintainers can run `./scripts/dependency-health.sh` separately when network
 access is allowed. That command audits package names and versions only; it does

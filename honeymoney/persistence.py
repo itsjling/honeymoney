@@ -5,20 +5,74 @@ import json
 import os
 import stat
 import uuid
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Any
+from typing import Literal, Mapping, TypedDict, TypeGuard
+
+from honeymoney.contracts import Config, GenerationDocuments
+from honeymoney.identity import IDENTITY_MANIFEST_NAME
+from honeymoney.overlap import OVERLAP_MANIFEST_NAME, SOURCE_OCCURRENCES_NAME
 
 STATE_SCHEMA_VERSION = 1
 
 
-def persist_generation(authoritative_path: Path, files: dict[Path, str]) -> None:
+class GenerationEntry(TypedDict):
+    target: str
+    staged: str
+    backup: str
+    install: str
+    existed: bool
+    mode: int
+    old_sha256: str | None
+    new_sha256: str
+
+
+class GenerationState(TypedDict):
+    schema_version: int
+    generation: str
+    phase: str
+    authoritative_path: str
+    entries: list[GenerationEntry]
+
+
+_STATE_FIELDS = frozenset(
+    {"schema_version", "generation", "phase", "authoritative_path", "entries"}
+)
+_ENTRY_FIELDS = frozenset(
+    {
+        "target",
+        "staged",
+        "backup",
+        "install",
+        "existed",
+        "mode",
+        "old_sha256",
+        "new_sha256",
+    }
+)
+
+
+def configured_generation_paths(config: Config) -> frozenset[Path]:
+    """Return the exact configured files that may join a ledger generation."""
+    paths: set[Path] = set()
+    for field in ("corrections", "rules"):
+        value = config.get(field)
+        if isinstance(value, str) and value.strip():
+            paths.add(Path(value).resolve())
+    return frozenset(paths)
+
+
+def persist_generation(authoritative_path: Path, files: GenerationDocuments) -> None:
     """Durably publish files using the ledger replacement as the commit point."""
     authoritative_path = authoritative_path.resolve()
     normalized = {path.resolve(): content for path, content in files.items()}
     if authoritative_path not in normalized:
         raise ValueError("A persisted generation must include the authoritative ledger")
 
-    recover_generation(authoritative_path)
+    recover_generation(
+        authoritative_path,
+        allowed_generation_paths=normalized,
+    )
     lock_path = _lock_path(authoritative_path)
     _acquire_lock(lock_path)
     generation = uuid.uuid4().hex
@@ -28,7 +82,7 @@ def persist_generation(authoritative_path: Path, files: dict[Path, str]) -> None
         for target, content in normalized.items()
     ]
     entries.sort(key=lambda entry: entry["target"] == str(authoritative_path))
-    state: dict[str, Any] = {
+    state: GenerationState = {
         "schema_version": STATE_SCHEMA_VERSION,
         "generation": generation,
         "phase": "staging",
@@ -61,9 +115,17 @@ def persist_generation(authoritative_path: Path, files: dict[Path, str]) -> None
         _release_lock(lock_path)
 
 
-def recover_generation(authoritative_path: Path) -> None:
+def recover_generation(
+    authoritative_path: Path,
+    *,
+    allowed_generation_paths: Iterable[Path] = (),
+) -> None:
     """Recover retained state according to the authoritative ledger generation."""
     authoritative_path = authoritative_path.resolve()
+    allowed_paths = _allowed_generation_paths(
+        authoritative_path,
+        allowed_generation_paths,
+    )
     state_path = _state_path(authoritative_path)
     lock_path = _lock_path(authoritative_path)
     if lock_path.exists() and _lock_owner_is_active(lock_path):
@@ -78,8 +140,10 @@ def recover_generation(authoritative_path: Path) -> None:
         return
 
     try:
-        state = json.loads(state_path.read_text(encoding="utf-8"))
-        _validate_state(state, authoritative_path)
+        decoded_state: object = json.loads(
+            state_path.read_text(encoding="utf-8"),
+        )
+        state = _validate_state(decoded_state, authoritative_path, allowed_paths)
         entries = state["entries"]
         authoritative = next(
             entry for entry in entries if entry["target"] == str(authoritative_path)
@@ -101,7 +165,7 @@ def recover_generation(authoritative_path: Path) -> None:
         ) from error
 
 
-def _entry_for(target: Path, content: str, generation: str) -> dict[str, Any]:
+def _entry_for(target: Path, content: str, generation: str) -> GenerationEntry:
     existed = target.exists()
     mode = stat.S_IMODE(target.stat().st_mode) if existed else _default_file_mode()
     old_hash = _path_hash(target) if existed else None
@@ -118,7 +182,7 @@ def _entry_for(target: Path, content: str, generation: str) -> dict[str, Any]:
     }
 
 
-def _stage_entry(entry: dict[str, Any], content: str) -> None:
+def _stage_entry(entry: GenerationEntry, content: str) -> None:
     target = Path(entry["target"])
     target.parent.mkdir(parents=True, exist_ok=True)
     _write_new_file(Path(entry["staged"]), content, entry["mode"])
@@ -156,7 +220,7 @@ def _copy_file(source: Path, destination: Path, mode: int) -> None:
         raise
 
 
-def _complete_new_generation(state_path: Path, state: dict[str, Any]) -> None:
+def _complete_new_generation(state_path: Path, state: GenerationState) -> None:
     entries = state["entries"]
     for entry in entries:
         target = Path(entry["target"])
@@ -170,7 +234,7 @@ def _complete_new_generation(state_path: Path, state: dict[str, Any]) -> None:
     _finish_generation(state_path, state)
 
 
-def _restore_old_generation(state_path: Path, state: dict[str, Any]) -> None:
+def _restore_old_generation(state_path: Path, state: GenerationState) -> None:
     entries = state["entries"]
     for entry in entries:
         target = Path(entry["target"])
@@ -187,7 +251,7 @@ def _restore_old_generation(state_path: Path, state: dict[str, Any]) -> None:
     _finish_generation(state_path, state)
 
 
-def _finish_generation(state_path: Path, state: dict[str, Any]) -> None:
+def _finish_generation(state_path: Path, state: GenerationState) -> None:
     entries = state["entries"]
     for entry in entries:
         Path(entry["staged"]).unlink(missing_ok=True)
@@ -199,7 +263,7 @@ def _finish_generation(state_path: Path, state: dict[str, Any]) -> None:
     _fsync_directory(state_path.parent)
 
 
-def _write_state(path: Path, state: dict[str, Any]) -> None:
+def _write_state(path: Path, state: GenerationState) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = _state_temporary_path(path)
     temporary.unlink(missing_ok=True)
@@ -209,31 +273,141 @@ def _write_state(path: Path, state: dict[str, Any]) -> None:
     _fsync_directory(path.parent)
 
 
-def _validate_state(state: dict[str, Any], authoritative_path: Path) -> None:
+def _validate_state(
+    value: object,
+    authoritative_path: Path,
+    allowed_generation_paths: frozenset[Path],
+) -> GenerationState:
+    if not isinstance(value, dict):
+        raise ValueError("Retained generation state must be a JSON object")
+    state: Mapping[object, object] = value
+    if set(state) != _STATE_FIELDS:
+        raise ValueError("Retained generation state fields are invalid")
     if state.get("schema_version") != STATE_SCHEMA_VERSION:
         raise ValueError("Unsupported retained generation state")
-    if state.get("authoritative_path") != str(authoritative_path):
+    generation = state.get("generation")
+    if not _is_lower_hex(generation, length=32):
+        raise ValueError("Retained generation identifier is invalid")
+    phase = state.get("phase")
+    if not isinstance(phase, str) or phase not in {"staging", "prepared"}:
+        raise ValueError("Retained generation phase is invalid")
+    authoritative_value = state.get("authoritative_path")
+    if not isinstance(authoritative_value, str) or authoritative_value != str(
+        authoritative_path
+    ):
         raise ValueError("Retained generation belongs to another ledger")
-    entries = state.get("entries")
-    if not isinstance(entries, list) or not entries:
+    raw_entries = state.get("entries")
+    if not isinstance(raw_entries, list) or not raw_entries:
         raise ValueError("Retained generation has no output entries")
-    required = {
-        "target",
-        "staged",
-        "backup",
-        "install",
-        "existed",
-        "mode",
-        "old_sha256",
-        "new_sha256",
-    }
-    if any(not isinstance(entry, dict) or set(entry) != required for entry in entries):
-        raise ValueError("Retained generation entries are invalid")
+
+    entries: list[GenerationEntry] = []
+    targets: set[str] = set()
+    for raw_entry in raw_entries:
+        if not isinstance(raw_entry, dict):
+            raise ValueError("Retained generation entries are invalid")
+        entry: Mapping[object, object] = raw_entry
+        if set(entry) != _ENTRY_FIELDS:
+            raise ValueError("Retained generation entry fields are invalid")
+        target = entry.get("target")
+        staged = entry.get("staged")
+        backup = entry.get("backup")
+        install = entry.get("install")
+        existed = entry.get("existed")
+        mode = entry.get("mode")
+        old_sha256 = entry.get("old_sha256")
+        new_sha256 = entry.get("new_sha256")
+        if (
+            not isinstance(target, str)
+            or not isinstance(staged, str)
+            or not isinstance(backup, str)
+            or not isinstance(install, str)
+        ):
+            raise ValueError("Retained generation paths are invalid")
+        target_path = Path(target)
+        if not target_path.is_absolute() or target != str(target_path.resolve()):
+            raise ValueError("Retained generation target is not canonical")
+        if target_path not in allowed_generation_paths:
+            raise ValueError("Retained generation target is not trusted")
+        if target in targets:
+            raise ValueError("Retained generation targets are not unique")
+        targets.add(target)
+        stem = f".{target_path.name}.honeymoney-{generation}"
+        expected_paths = (
+            str(target_path.parent / f"{stem}.new"),
+            str(target_path.parent / f"{stem}.old"),
+            str(target_path.parent / f"{stem}.install"),
+        )
+        if (staged, backup, install) != expected_paths:
+            raise ValueError("Retained generation paths are inconsistent")
+        for retained_path in (Path(staged), Path(backup), Path(install)):
+            if str(retained_path.resolve()) != str(retained_path):
+                raise ValueError("Retained generation path is not canonical")
+        if not isinstance(existed, bool):
+            raise ValueError("Retained generation existence flag is invalid")
+        if (
+            isinstance(mode, bool)
+            or not isinstance(mode, int)
+            or mode < 0
+            or mode > 0o7777
+        ):
+            raise ValueError("Retained generation file mode is invalid")
+        if not _is_lower_hex(new_sha256, length=64):
+            raise ValueError("Retained generation new hash is invalid")
+        if existed:
+            if not _is_lower_hex(old_sha256, length=64):
+                raise ValueError("Retained generation old hash is invalid")
+        elif old_sha256 is not None:
+            raise ValueError("Retained generation old hash is inconsistent")
+        entries.append(
+            {
+                "target": target,
+                "staged": staged,
+                "backup": backup,
+                "install": install,
+                "existed": existed,
+                "mode": mode,
+                "old_sha256": old_sha256,
+                "new_sha256": new_sha256,
+            }
+        )
+
     if sum(entry["target"] == str(authoritative_path) for entry in entries) != 1:
         raise ValueError("Retained generation has no unique authoritative ledger")
+    return {
+        "schema_version": STATE_SCHEMA_VERSION,
+        "generation": generation,
+        "phase": phase,
+        "authoritative_path": authoritative_value,
+        "entries": entries,
+    }
 
 
-def _fsync_directories(entries: list[dict[str, Any]]) -> None:
+def _is_lower_hex(value: object, *, length: int) -> TypeGuard[str]:
+    return (
+        isinstance(value, str)
+        and len(value) == length
+        and all(character in "0123456789abcdef" for character in value)
+    )
+
+
+def _allowed_generation_paths(
+    authoritative_path: Path,
+    additional_paths: Iterable[Path],
+) -> frozenset[Path]:
+    output_directory = authoritative_path.parent
+    allowed = {
+        authoritative_path,
+        (output_directory / "review_needed.csv").resolve(),
+        (output_directory / "import_report.json").resolve(),
+        (output_directory / IDENTITY_MANIFEST_NAME).resolve(),
+        (output_directory / SOURCE_OCCURRENCES_NAME).resolve(),
+        (output_directory / OVERLAP_MANIFEST_NAME).resolve(),
+    }
+    allowed.update(Path(path).resolve() for path in additional_paths)
+    return frozenset(allowed)
+
+
+def _fsync_directories(entries: list[GenerationEntry]) -> None:
     directories = {
         Path(entry["target"]).parent
         for entry in entries
@@ -243,7 +417,9 @@ def _fsync_directories(entries: list[dict[str, Any]]) -> None:
         _fsync_directory(directory)
 
 
-def _replace_from_retained(entry: dict[str, Any], source_field: str) -> None:
+def _replace_from_retained(
+    entry: GenerationEntry, source_field: Literal["staged", "backup"]
+) -> None:
     source = Path(entry[source_field])
     install = Path(entry["install"])
     install.unlink(missing_ok=True)

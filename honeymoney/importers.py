@@ -34,6 +34,7 @@ from honeymoney.normalization import (
     _parse_decimal,
     _parse_profile_date,
 )
+from honeymoney.parser_contracts import Profile
 from honeymoney.schema import (
     ALLOWED_ACCOUNT_TYPES,
     allowed_owners,
@@ -55,19 +56,18 @@ def _relative_source(path: Path, input_root: Path) -> str:
         return path.name
 
 
-def _load_profiles(config: dict[str, Any]) -> list[dict[str, Any]]:
-    profiles = []
+def _load_profiles(config: dict[str, Any]) -> list[Profile]:
+    profiles: list[Profile] = []
     for profile_path in config.get("profiles", []):
         with Path(profile_path).open(encoding="utf-8") as fh:
             profile = json.load(fh)
-            _validate_profile(profile, Path(profile_path), config)
-            profiles.append(profile)
+            profiles.append(_validate_profile(profile, Path(profile_path), config))
     return profiles
 
 
 def _validate_profile(
     profile: dict[str, Any], profile_path: Path, config: dict[str, Any]
-) -> None:
+) -> Profile:
     if not isinstance(profile, dict):
         raise ValueError(f"Profile {profile_path.name} must be a JSON object")
     raw_id = profile.get("id")
@@ -196,6 +196,7 @@ def _validate_profile(
         _validate_csv_profile(profile_id, settings)
     else:
         _validate_pdf_profile(profile_id, settings)
+    return profile
 
 
 def _validate_profile_amount_strategy(

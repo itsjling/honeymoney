@@ -205,6 +205,12 @@ changing it.
   compatibility helpers.
 - `honeymoney/overlap.py`: canonical multiset slots, membership-bound duplicate
   review, resolution safety, manifest validation, and privacy-safe evidence.
+- `honeymoney/contracts.py`, `honeymoney/identity_contracts.py`,
+  `honeymoney/overlap_contracts.py`, and `honeymoney/parser_contracts.py`:
+  checked static contracts shared by the financial core, identity and overlap
+  boundaries, and statement parsers.
+- `honeymoney/duplicates.py`: pure identity-backed duplicate evaluation,
+  idempotent candidate annotation, and privacy-safe diagnostics.
 - `honeymoney/identity.py`: identity-v2 digests, validation, source and record
   resolution, manifest ownership, and safe identity diagnostics.
 - `honeymoney/identity_state.py`: ledger and manifest loading, bootstrap rules,
@@ -261,3 +267,11 @@ set flow treatment.
 Only synthetic fixtures may enter git or cloud Codex. Real statement files,
 local workspaces, generated outputs, and live Ollama transcripts stay local.
 Ollama is disabled by default and is never part of CI.
+
+## Quality gates
+
+The offline project check runs strict mypy over a named financial-core scope
+and measures branch coverage over the default synthetic unittest suite.
+Coverage includes child CLI processes and fails below the reviewed threshold in
+`pyproject.toml`. The checked scope, excluded modules, expansion rule, baseline,
+and critical-path test map are in [`quality-gates.md`](quality-gates.md).

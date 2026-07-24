@@ -10,3 +10,8 @@ build/
 dist/
 *.egg-info/
 .ruff_cache/
+.mypy_cache/
+.coverage
+.coverage.*
+coverage.json
+htmlcov/

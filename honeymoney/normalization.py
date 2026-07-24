@@ -4,14 +4,14 @@ from __future__ import annotations
 
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
-from typing import Any
+from typing import Mapping
 
 
 def _normalized_row(
     source_row: dict[str, str],
     row_number: int | str,
-    profile: dict[str, Any],
-    config: dict[str, Any],
+    profile: Mapping[str, object],
+    config: Mapping[str, object],
     columns: dict[str, str],
     source_file: str,
     source_page: str = "",
@@ -27,14 +27,14 @@ def _normalized_row(
     merchant = _value(source_row, columns.get("merchant")) or description
     original_currency = (
         _value(source_row, columns.get("original_currency"))
-        or profile.get("account_currency", "")
+        or str(profile.get("account_currency", ""))
     ).upper()
     invalid_amount_columns: list[str] = []
     original_amount = _signed_amount(source_row, columns, invalid_amount_columns)
     posted_currency = (
         _value(source_row, columns.get("posted_currency"))
         or original_currency
-        or profile.get("account_currency", "")
+        or str(profile.get("account_currency", ""))
     ).upper()
     posted_amount = _posted_amount(
         source_row, columns, original_amount, invalid_amount_columns
@@ -107,7 +107,7 @@ def _normalized_row(
     }
 
 
-def _normalized_match_text(value: Any) -> str:
+def _normalized_match_text(value: object) -> str:
     return " ".join(str(value).strip().casefold().split())
 
 
@@ -118,7 +118,7 @@ def _append_flag(existing: str, flag: str) -> str:
     return ";".join(flags)
 
 
-def _default_profile() -> dict[str, Any]:
+def _default_profile() -> dict[str, object]:
     return {
         "account_id": "",
         "account": "",
@@ -156,7 +156,7 @@ def _optional_decimal_value(row: dict[str, str], column: str | None) -> str:
     return _format_decimal(parsed) if parsed.is_finite() else ""
 
 
-def _clean_text(value: Any) -> str:
+def _clean_text(value: object) -> str:
     text = str(value or "")
     cleaned = "".join(
         character
@@ -194,11 +194,18 @@ def _parse_profile_date(
     return datetime.strptime(f"{value};{fallback_year}", f"{date_format};%Y")
 
 
-def _normalize_date(value: str, profile: dict[str, Any]) -> str:
+def _normalize_date(value: str, profile: Mapping[str, object]) -> str:
     if not value:
         return ""
 
-    date_formats = profile.get("date_formats", ["%Y-%m-%d"])
+    raw_date_formats = profile.get("date_formats", ["%Y-%m-%d"])
+    date_formats = (
+        [item for item in raw_date_formats if isinstance(item, str)]
+        if isinstance(raw_date_formats, list)
+        else ["%Y-%m-%d"]
+    )
+    if not date_formats:
+        date_formats = ["%Y-%m-%d"]
     for date_format in date_formats:
         try:
             has_year = _date_format_has_year(date_format)
@@ -206,7 +213,7 @@ def _normalize_date(value: str, profile: dict[str, Any]) -> str:
             parsed = _parse_profile_date(
                 value,
                 date_format,
-                fallback_year=int(statement_year) if statement_year else 1900,
+                fallback_year=int(str(statement_year)) if statement_year else 1900,
             ).date()
         except ValueError:
             continue
@@ -272,13 +279,15 @@ def _apply_amount_sign(
 
 
 def _amount_hkd(
-    amount: Decimal, currency: str, config: dict[str, Any]
+    amount: Decimal, currency: str, config: Mapping[str, object]
 ) -> tuple[Decimal | None, list[str], str]:
     base_currency = str(config.get("base_currency", "HKD")).upper()
     if currency == base_currency:
         return amount, [], ""
 
-    rate = config.get("exchange_rates", {}).get(currency)
+    raw_rates = config.get("exchange_rates", {})
+    rates = raw_rates if isinstance(raw_rates, Mapping) else {}
+    rate = rates.get(currency)
     if rate is None:
         return None, ["missing_exchange_rate"], f"Missing exchange rate for {currency}"
 

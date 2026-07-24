@@ -4,22 +4,26 @@ import json
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Mapping, cast
 
+from honeymoney.contracts import Config
 from honeymoney.csv_artifacts import csv_document, read_csv_artifact
 from honeymoney.duplicates import (
     refresh_duplicate_candidates,
     release_duplicate_review_ownership,
 )
 from honeymoney.identity import IdentityError, ambiguous_legacy_transaction_ids
+from honeymoney.identity_contracts import IdentityManifest
 from honeymoney.identity_state import (
     IdentityState,
     identity_manifest_path,
+    load_configured_identity_state,
     load_identity_state,
     validate_source_evidence_manifest_agreement,
     validated_manifest_document,
 )
 from honeymoney.overlap import (
+    CanonicalizationResult,
     apply_history_ambiguity,
     canonicalize_overlaps,
     clear_history_ambiguity,
@@ -30,6 +34,7 @@ from honeymoney.overlap import (
     source_occurrences_path,
     validate_overlap_agreement,
 )
+from honeymoney.overlap_contracts import OverlapManifest
 from honeymoney.persistence import persist_generation
 from honeymoney.reconciliation import reconcile_ledger
 from honeymoney.rules import validate_rules
@@ -65,12 +70,12 @@ class CorrectionOperationResult:
     rules_added: int = 0
 
 
-def load_corrections(config: dict[str, Any]) -> dict[str, dict[str, str]]:
+def load_corrections(config: Config) -> dict[str, dict[str, str]]:
     corrections_path = config.get("corrections")
-    if not corrections_path or not Path(corrections_path).exists():
+    if not corrections_path or not Path(str(corrections_path)).exists():
         return {}
 
-    artifact = read_csv_artifact(Path(corrections_path), CORRECTION_COLUMNS)
+    artifact = read_csv_artifact(Path(str(corrections_path)), CORRECTION_COLUMNS)
     corrections: dict[str, dict[str, str]] = {}
     for row_index, row in enumerate(artifact.rows):
         transaction_id = row.get("transaction_id", "").strip()
@@ -101,7 +106,7 @@ def load_corrections(config: dict[str, Any]) -> dict[str, dict[str, str]]:
 
 
 def validate_correction(
-    transaction_id: str, correction: dict[str, str], config: dict[str, Any]
+    transaction_id: str, correction: dict[str, str], config: Config
 ) -> None:
     unknown = set(correction) - set(CORRECTION_FIELDS)
     if unknown:
@@ -195,7 +200,7 @@ def apply_corrections(
 
 
 def prepare_corrections_document(
-    config: dict[str, Any],
+    config: Config,
     correction_patches: dict[str, dict[str, str]] | None = None,
     *,
     removed_transaction_ids: set[str] | None = None,
@@ -215,7 +220,7 @@ def prepare_corrections_document(
         for transaction_id, correction in sorted(merged.items())
     ]
     return (
-        Path(corrections_value),
+        Path(str(corrections_value)),
         csv_document(CORRECTION_COLUMNS, rows),
         merged,
     )
@@ -252,15 +257,14 @@ def ledger_output_documents(
         and (identity_manifest is not None or identity_manifest_document is not None)
         and bool(ledger_rows)
     )
-    evidence = (
-        source_occurrences
-        if source_occurrences is not None
-        else (
-            [dict(row) for row in ledger_rows]
-            if explicit_v2_bootstrap
-            else state.source_rows
-        )
-    )
+    if source_occurrences is not None:
+        evidence = source_occurrences
+    elif explicit_v2_bootstrap:
+        evidence = [dict(row) for row in ledger_rows]
+    else:
+        if state is None or state.source_rows is None:
+            raise AssertionError("identity state did not provide source occurrences")
+        evidence = state.source_rows
     supplied_by_id = {row.get("transaction_id", ""): row for row in ledger_rows}
     evidence = [dict(row) for row in evidence]
     for row in evidence:
@@ -281,6 +285,8 @@ def ledger_output_documents(
     )
     migrated_overlap = None
     if write_time_migration or explicit_v2_bootstrap:
+        if state is None or state.overlap_manifest is None:
+            raise AssertionError("identity state did not provide an overlap manifest")
         for row in evidence:
             supplied = supplied_by_id.get(row.get("transaction_id", ""))
             if supplied is None:
@@ -310,16 +316,19 @@ def ledger_output_documents(
         manifest = parse_manifest(identity_manifest_document)
         manifest_content = validated_manifest_document(evidence, manifest)
     elif identity_manifest is not None:
-        manifest = identity_manifest
+        manifest = cast(IdentityManifest, identity_manifest)
         manifest_content = validated_manifest_document(evidence, manifest)
     else:
+        if state is None:
+            raise AssertionError("identity state did not provide an identity manifest")
         manifest = state.manifest
         manifest_content = validated_manifest_document(evidence, manifest)
-    retained_evidence = (
-        source_evidence
-        if source_evidence is not None
-        else (state.source_evidence_rows if state is not None else evidence)
-    )
+    if source_evidence is not None:
+        retained_evidence = source_evidence
+    elif state is not None and state.source_evidence_rows is not None:
+        retained_evidence = state.source_evidence_rows
+    else:
+        retained_evidence = evidence
     by_transaction_id = {row["transaction_id"]: dict(row) for row in retained_evidence}
     by_transaction_id.update({row["transaction_id"]: dict(row) for row in evidence})
     manifest_ids = {
@@ -360,12 +369,14 @@ def ledger_output_documents(
         canonical_manifest = parse_overlap_manifest(overlap_manifest_document_value)
         overlap_content = overlap_manifest_document_value
     elif overlap_manifest is not None:
-        canonical_manifest = overlap_manifest
         overlap_content = overlap_manifest_document(overlap_manifest)
+        canonical_manifest = cast(OverlapManifest, overlap_manifest)
     elif migrated_overlap is not None:
         canonical_manifest = migrated_overlap.manifest
         overlap_content = overlap_manifest_document(canonical_manifest)
     else:
+        if state is None or state.overlap_manifest is None:
+            raise AssertionError("identity state did not provide an overlap manifest")
         canonical_manifest = state.overlap_manifest
         overlap_content = state.overlap_manifest_document
     validate_overlap_agreement(ledger_rows, evidence, canonical_manifest)
@@ -386,18 +397,18 @@ def ledger_output_documents(
 
 
 def apply_correction_operation(
-    config: dict[str, Any],
+    config: Config,
     categorized_path: Path,
     correction_patches: dict[str, dict[str, str]],
     *,
-    remembered_rules: list[dict[str, Any]] | None = None,
+    remembered_rules: list[dict[str, object]] | None = None,
 ) -> CorrectionOperationResult:
     """Validate, merge, reconcile, and recoverably persist a correction operation."""
     corrections_value = config.get("corrections")
     if not corrections_value:
         raise ValueError("Config must define a corrections CSV path")
-    corrections_path = Path(corrections_value)
-    state = load_identity_state(categorized_path)
+    corrections_path = Path(str(corrections_value))
+    state = load_configured_identity_state(categorized_path, config)
     ledger_rows = _normalize_ledger_rows(state)
     ambiguous_ids = ambiguous_legacy_transaction_ids(ledger_rows)
     if ambiguous_ids:
@@ -438,11 +449,14 @@ def apply_correction_operation(
         effective_batch[transaction_id] = merged_correction
         merged_corrections[transaction_id] = merged_correction
 
+    source_rows = state.source_rows
     operation_overlap_manifest = state.overlap_manifest
+    if source_rows is None or operation_overlap_manifest is None:
+        raise AssertionError("identity state did not provide canonical source state")
     migration_ambiguous_ids: tuple[str, ...] = ()
-    operation_overlap_result = None
+    operation_overlap_result: CanonicalizationResult | None = None
     if state.canonical_migration_required and not state.bootstrap_required:
-        canonical = canonicalize_overlaps(state.source_rows, [], state.overlap_manifest)
+        canonical = canonicalize_overlaps(source_rows, [], operation_overlap_manifest)
         ledger_rows = canonical.rows
         operation_overlap_manifest = canonical.manifest
         operation_overlap_result = canonical
@@ -451,14 +465,14 @@ def apply_correction_operation(
         migration_ambiguous_ids = projection.ambiguous_transaction_ids
     elif any(row.get("canonical_group_id") for row in ledger_rows):
         operation_overlap_result = canonicalize_overlaps(
-            state.source_rows, ledger_rows, state.overlap_manifest
+            source_rows, ledger_rows, operation_overlap_manifest
         )
 
     baseline_ledger = [dict(row) for row in ledger_rows]
-    reconcile_ledger(baseline_ledger, config, statement_rows=state.source_rows)
+    reconcile_ledger(baseline_ledger, config, statement_rows=source_rows)
     corrected_ledger = [dict(row) for row in ledger_rows]
     apply_corrections(corrected_ledger, effective_batch)
-    reconcile_ledger(corrected_ledger, config, statement_rows=state.source_rows)
+    reconcile_ledger(corrected_ledger, config, statement_rows=source_rows)
     refresh_duplicate_candidates(
         corrected_ledger,
         final_review_ids=_final_review_ids(merged_corrections),
@@ -488,7 +502,7 @@ def apply_correction_operation(
         categorized_path,
         corrected_ledger,
         identity_manifest_document=state.manifest_document,
-        source_occurrences=state.source_rows,
+        source_occurrences=source_rows,
         source_evidence=state.source_evidence_rows,
         overlap_manifest=operation_overlap_manifest,
     )
@@ -498,7 +512,7 @@ def apply_correction_operation(
         rules_path_value = config.get("rules")
         if not rules_path_value:
             raise ValueError("Config must define a rules JSON path to remember a rule")
-        rules_path = Path(rules_path_value)
+        rules_path = Path(str(rules_path_value))
         if not rules_path.exists():
             raise ValueError(f"Rules file does not exist: {rules_path}")
         with rules_path.open(encoding="utf-8") as fh:
@@ -582,8 +596,17 @@ def _correction_csv_value(field: str, value: str, encoded_cell: bool) -> str:
     return value.strip()
 
 
-def read_ledger(path: Path) -> list[dict[str, str]]:
-    return _normalize_ledger_rows(load_identity_state(path))
+def read_ledger(
+    path: Path,
+    *,
+    config: Config | None = None,
+) -> list[dict[str, str]]:
+    state = (
+        load_identity_state(path)
+        if config is None
+        else load_configured_identity_state(path, config)
+    )
+    return _normalize_ledger_rows(state)
 
 
 def _normalize_ledger_rows(state: IdentityState) -> list[dict[str, str]]:

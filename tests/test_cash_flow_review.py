@@ -8,14 +8,24 @@ import unittest
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+OFFLINE_OLLAMA_HOOK = REPO_ROOT / "tests" / "offline_ollama_hook"
 
 
 class CashFlowReviewTest(unittest.TestCase):
     def _run_cli(
-        self, args: list[str], *, cwd: Path, input_text: str | None = None
+        self,
+        args: list[str],
+        *,
+        cwd: Path,
+        input_text: str | None = None,
+        ollama_mode: str | None = None,
     ) -> subprocess.CompletedProcess[str]:
         env = dict(os.environ)
-        env["PYTHONPATH"] = str(REPO_ROOT)
+        python_paths = [str(REPO_ROOT)]
+        if ollama_mode is not None:
+            python_paths.insert(0, str(OFFLINE_OLLAMA_HOOK))
+            env["HONEYMONEY_TEST_OLLAMA_MODE"] = ollama_mode
+        env["PYTHONPATH"] = os.pathsep.join(python_paths)
         return subprocess.run(
             [sys.executable, "-m", "honeymoney.cli", *args],
             cwd=cwd,
@@ -33,13 +43,24 @@ class CashFlowReviewTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         return root
 
-    def _import_rows(self, root: Path, filename: str, rows: list[str]) -> None:
+    def _import_rows(
+        self,
+        root: Path,
+        filename: str,
+        rows: list[str],
+        *,
+        ollama_mode: str | None = None,
+    ) -> None:
         statement = root / filename
         statement.write_text(
             "\n".join(["Date,Description,Amount,Currency", *rows]),
             encoding="utf-8",
         )
-        result = self._run_cli(["import", str(statement), "--no-interactive"], cwd=root)
+        result = self._run_cli(
+            ["import", str(statement), "--no-interactive"],
+            cwd=root,
+            ollama_mode=ollama_mode,
+        )
         self.assertEqual(result.returncode, 0, result.stderr)
 
     def _ledger(self, root: Path) -> list[dict[str, str]]:
@@ -511,6 +532,7 @@ class CashFlowReviewTest(unittest.TestCase):
                     "2026-06-05,RECURRING CREDIT,-20.00,HKD",
                     "2026-06-06,OTHER CREDIT,650.00,HKD",
                 ],
+                ollama_mode="unavailable",
             )
             rows = {(row["date"], row["merchant"]): row for row in self._ledger(root)}
             future = rows[("2026-06-04", "RECURRING CREDIT")]

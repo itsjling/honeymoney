@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import csv
 import secrets
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Mapping
+from typing import Mapping, Sequence, cast
 
+from honeymoney.contracts import Config
 from honeymoney.csv_artifacts import read_csv_artifact
 from honeymoney.identity import (
     ID_FIELDS,
@@ -19,6 +21,11 @@ from honeymoney.identity import (
     record_fingerprint,
     validate_ledger_manifest_agreement,
 )
+from honeymoney.identity_contracts import (
+    IdentityManifest,
+    IdentityRecordManifest,
+    IdentitySourceManifest,
+)
 from honeymoney.overlap import (
     canonicalize_overlaps,
     empty_overlap_manifest,
@@ -28,7 +35,8 @@ from honeymoney.overlap import (
     source_occurrences_path,
     validate_overlap_agreement,
 )
-from honeymoney.persistence import recover_generation
+from honeymoney.overlap_contracts import OverlapManifest
+from honeymoney.persistence import configured_generation_paths, recover_generation
 from honeymoney.schema import CATEGORIZED_COLUMNS, SOURCE_OCCURRENCE_COLUMNS
 
 LEGACY_CATEGORIZED_COLUMNS = [
@@ -41,12 +49,12 @@ class IdentityState:
     """Validated canonical ledger, source evidence, and hidden manifests."""
 
     rows: list[dict[str, str]]
-    manifest: dict[str, object]
+    manifest: IdentityManifest
     manifest_document: str
     bootstrap_required: bool = False
     source_rows: list[dict[str, str]] | None = None
     source_evidence_rows: list[dict[str, str]] | None = None
-    overlap_manifest: dict[str, object] | None = None
+    overlap_manifest: OverlapManifest | None = None
     overlap_manifest_document: str = ""
     canonical_migration_required: bool = False
     overlap_migration_required: bool = False
@@ -56,29 +64,38 @@ class IdentityState:
             object.__setattr__(self, "source_rows", self.rows)
         if self.source_evidence_rows is None:
             object.__setattr__(self, "source_evidence_rows", self.source_rows)
-        if self.overlap_manifest is None:
+        overlap = self.overlap_manifest
+        if overlap is None:
+            overlap = empty_overlap_manifest("ovns_" + secrets.token_hex(32))
             object.__setattr__(
                 self,
                 "overlap_manifest",
-                empty_overlap_manifest("ovns_" + secrets.token_hex(32)),
+                overlap,
             )
         if not self.overlap_manifest_document:
             object.__setattr__(
                 self,
                 "overlap_manifest_document",
-                overlap_manifest_document(self.overlap_manifest),
+                overlap_manifest_document(overlap),
             )
 
 
 def identity_manifest_path(categorized_path: Path) -> Path:
     """Return the manifest's fixed sibling path."""
-    return Path(categorized_path).parent / IDENTITY_MANIFEST_NAME
+    return Path(categorized_path).parent / str(IDENTITY_MANIFEST_NAME)
 
 
-def load_identity_state(categorized_path: Path) -> IdentityState:
+def load_identity_state(
+    categorized_path: Path,
+    *,
+    allowed_generation_paths: Iterable[Path] = (),
+) -> IdentityState:
     """Recover and validate canonical ledger plus source-occurrence ownership."""
     categorized_path = Path(categorized_path)
-    recover_generation(categorized_path)
+    recover_generation(
+        categorized_path,
+        allowed_generation_paths=allowed_generation_paths,
+    )
     manifest_path = identity_manifest_path(categorized_path)
     occurrences_path = source_occurrences_path(categorized_path)
     canonical_manifest_path = overlap_manifest_path(categorized_path)
@@ -131,11 +148,15 @@ def load_identity_state(categorized_path: Path) -> IdentityState:
         validate_source_evidence_manifest_agreement(source_evidence_rows, manifest)
         try:
             overlap_document = canonical_manifest_path.read_text(encoding="utf-8")
-            overlap = parse_overlap_manifest(overlap_document)
-            overlap_migration_required = overlap["schema_version"] == 1
+            parsed_overlap = parse_overlap_manifest(overlap_document)
+            overlap_migration_required = parsed_overlap["schema_version"] == 1
             if overlap_migration_required:
-                overlap = canonicalize_overlaps(source_rows, rows, overlap).manifest
+                overlap = canonicalize_overlaps(
+                    source_rows, rows, parsed_overlap
+                ).manifest
                 overlap_document = overlap_manifest_document(overlap)
+            else:
+                overlap = cast(OverlapManifest, parsed_overlap)
             validate_overlap_agreement(rows, source_rows, overlap)
         except (OSError, UnicodeError, ValueError) as error:
             raise IdentityError("identity_manifest_invalid") from error
@@ -214,8 +235,19 @@ def load_identity_state(categorized_path: Path) -> IdentityState:
     raise IdentityError("identity_manifest_invalid")
 
 
+def load_configured_identity_state(
+    categorized_path: Path,
+    config: Config,
+) -> IdentityState:
+    """Load state with the exact configured generation members allowed."""
+    return load_identity_state(
+        categorized_path,
+        allowed_generation_paths=configured_generation_paths(config),
+    )
+
+
 def validated_manifest_document(
-    ledger_rows: list[Mapping[str, str]], manifest: Mapping[str, object]
+    ledger_rows: Sequence[Mapping[str, str]], manifest: IdentityManifest
 ) -> str:
     """Validate an output ledger and return its canonical manifest document."""
     validate_ledger_manifest_agreement(ledger_rows, manifest)
@@ -230,7 +262,7 @@ def _ledger_header(path: Path) -> list[str]:
         raise IdentityError("identity_manifest_invalid") from error
 
 
-def _read_identity_manifest(path: Path) -> tuple[str, dict[str, object]]:
+def _read_identity_manifest(path: Path) -> tuple[str, IdentityManifest]:
     try:
         document = path.read_text(encoding="utf-8")
     except (OSError, UnicodeError) as error:
@@ -247,7 +279,7 @@ def _canonical_column_order(
     ]
 
 
-def _active_transaction_ids(manifest: Mapping[str, object]) -> set[str]:
+def _active_transaction_ids(manifest: IdentityManifest) -> set[str]:
     return {
         str(record["transaction_id"])
         for source in manifest["sources"]
@@ -257,9 +289,9 @@ def _active_transaction_ids(manifest: Mapping[str, object]) -> set[str]:
 
 
 def validate_source_evidence_manifest_agreement(
-    rows: list[Mapping[str, str]], manifest: Mapping[str, object]
+    rows: Sequence[Mapping[str, str]], manifest: IdentityManifest
 ) -> None:
-    expected: dict[str, tuple[Mapping[str, object], Mapping[str, object]]] = {}
+    expected: dict[str, tuple[IdentitySourceManifest, IdentityRecordManifest]] = {}
     for source in manifest["sources"]:
         for record in source["records"]:
             identifier = str(record["transaction_id"])

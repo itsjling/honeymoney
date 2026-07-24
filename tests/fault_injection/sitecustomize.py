@@ -79,3 +79,11 @@ if _fault:
     os.open = _open
     os.replace = _replace
     os.fsync = _fsync
+
+if os.environ.get("HONEYMONEY_TEST_OFFLINE") == "1":
+    import ssl
+
+    from scripts.offline_network_guard import install
+
+    del ssl
+    install()

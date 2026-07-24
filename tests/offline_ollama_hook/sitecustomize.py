@@ -49,3 +49,8 @@ def _request(self, request):
 
 
 LoopbackOllamaTransport.request = _request
+
+if os.environ.get("HONEYMONEY_TEST_OFFLINE") == "1":
+    from scripts.offline_network_guard import install
+
+    install()

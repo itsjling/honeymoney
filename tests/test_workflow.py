@@ -20,7 +20,10 @@ from honeymoney.cli import (
 )
 from honeymoney.corrections import ledger_output_documents
 from honeymoney.duplicates import DUPLICATE_MATCH_TYPE
-from honeymoney.identity_state import load_identity_state
+from honeymoney.identity_state import (
+    load_configured_identity_state,
+    load_identity_state,
+)
 from honeymoney.ollama import OllamaHttpRequest, apply_ollama_fallback
 from honeymoney.schema import ALLOWED_CATEGORIES
 
@@ -798,8 +801,8 @@ def open(source_path):
             try:
                 os.chdir(root)
                 with patch(
-                    "honeymoney.cli.load_identity_state",
-                    wraps=load_identity_state,
+                    "honeymoney.cli.load_configured_identity_state",
+                    wraps=load_configured_identity_state,
                 ) as load_patch:
                     result = cli._run_pipeline(
                         ["--input", str(statement), "--no-interactive"]
@@ -1933,6 +1936,114 @@ def open(source_path):
                     list((root / "output").glob(".*honeymoney-state.json")),
                     [],
                 )
+
+    def test_duplicate_resolution_recovers_custom_output_with_external_corrections(
+        self,
+    ) -> None:
+        repeated_row = "2026-05-04,SYNTHETIC CUSTOM RESOLUTION,-12.00,HKD"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._setup_workspace(tmp)
+            custom_output = root / "custom-output" / "nested" / "ledger.csv"
+            statements = root / "statements"
+            statements.mkdir()
+            self._write_statement(statements / "a.csv", [repeated_row] * 2)
+            self._write_statement(statements / "b.csv", [repeated_row])
+            imported = self._run_cli(
+                [
+                    "import",
+                    str(statements),
+                    "--output",
+                    str(custom_output),
+                    "--no-interactive",
+                ],
+                cwd=root,
+            )
+            self.assertEqual(imported.returncode, 0, imported.stderr)
+            listed = self._run_cli(
+                ["duplicates", "--output", str(custom_output), "--json"],
+                cwd=root,
+            )
+            [group] = json.loads(listed.stdout)["data"]["groups"]
+            with custom_output.open(newline="", encoding="utf-8") as handle:
+                rows = sorted(
+                    csv.DictReader(handle),
+                    key=lambda row: int(row["canonical_slot"]),
+                )
+            tail_id = rows[-1]["transaction_id"]
+            corrected = self._run_cli(
+                [
+                    "correct",
+                    "--output",
+                    str(custom_output),
+                    "--file",
+                    "-",
+                    "--json",
+                ],
+                cwd=root,
+                input_text=json.dumps(
+                    [
+                        {
+                            "transaction_id": tail_id,
+                            "category": "Dining",
+                            "needs_review": False,
+                        }
+                    ]
+                ),
+            )
+            self.assertEqual(corrected.returncode, 0, corrected.stderr)
+
+            interrupted = self._run_cli(
+                [
+                    "duplicates",
+                    "resolve",
+                    group["group_id"],
+                    "--as",
+                    "same-event",
+                    "--output",
+                    str(custom_output),
+                    "--json",
+                ],
+                cwd=root,
+                filesystem_fault="replace-after:ledger.csv",
+            )
+            self.assertEqual(interrupted.returncode, 75, interrupted.stderr)
+
+            recovered = self._run_cli(
+                [
+                    "correct",
+                    "--output",
+                    str(custom_output),
+                    "--file",
+                    "-",
+                    "--json",
+                ],
+                cwd=root,
+                input_text=json.dumps(
+                    [
+                        {
+                            "transaction_id": rows[0]["transaction_id"],
+                            "notes": "Synthetic recovered correction",
+                        }
+                    ]
+                ),
+            )
+            self.assertEqual(recovered.returncode, 0, recovered.stderr)
+            listed_after_recovery = self._run_cli(
+                ["duplicates", "--output", str(custom_output), "--json"],
+                cwd=root,
+            )
+            self.assertEqual(
+                json.loads(listed_after_recovery.stdout)["data"],
+                {"group_count": 0, "groups": []},
+            )
+            self.assertEqual(
+                list(custom_output.parent.glob(".*honeymoney-state.json")),
+                [],
+            )
+            self.assertIn(
+                "Dining",
+                (root / "corrections.csv").read_text(encoding="utf-8"),
+            )
 
     def test_source_replacement_excludes_retired_rows_from_duplicate_checks(
         self,
