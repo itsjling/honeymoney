@@ -398,10 +398,8 @@ class CashFlowWorkflowTest(unittest.TestCase):
                 self.assertNotIn("reconciliation_ambiguous", row["flags"])
                 self.assertNotIn("Ambiguous transfer candidates", row["reason"])
             self.assertEqual(rows["txn_out"]["needs_review"], "true")
-            self.assertEqual(rows["txn_out"]["flags"], "duplicate_suspected")
-            self.assertEqual(
-                rows["txn_out"]["reason"], "Possible duplicate transaction"
-            )
+            self.assertEqual(rows["txn_out"]["flags"], "")
+            self.assertEqual(rows["txn_out"]["reason"], "")
             self.assertEqual(rows["txn_unique_in"]["needs_review"], "false")
             self.assertEqual(rows["txn_excluded_in"]["needs_review"], "false")
             with (root / "output" / "review_needed.csv").open(

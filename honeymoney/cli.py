@@ -39,6 +39,12 @@ from honeymoney.corrections import (
     to_review_row,
     validate_correction,
 )
+from honeymoney.duplicates import (
+    DuplicateEvaluation,
+    evaluate_duplicate_candidates,
+    refresh_duplicate_candidates,
+    release_duplicate_review_ownership,
+)
 from honeymoney.identity import (
     IdentityError,
     ambiguous_legacy_transaction_ids,
@@ -300,9 +306,9 @@ def _run_pipeline(
     _status.update("Applying local categorization memory...")
     apply_local_categorization_memory(transactions, local_memory, config)
     _status.update("Checking for duplicates...")
-    normalization._annotate_duplicate_suspicions(
-        transactions, resolution.retained_ledger_rows
-    )
+    retained_ledger_rows = [dict(row) for row in resolution.retained_ledger_rows]
+    ledger_rows = [*retained_ledger_rows, *transactions]
+    duplicate_evaluation = refresh_duplicate_candidates(ledger_rows)
     _status.update("Applying structural classifications...")
     structural_count = apply_structural_classification(transactions, config)
     ollama_report, ollama_warnings = apply_ollama_fallback(
@@ -320,15 +326,11 @@ def _run_pipeline(
         categorized_interactively = _prompt_uncategorized(transactions, config)
     else:
         categorized_interactively = []
-    review_rows = [row for row in transactions if row["needs_review"] == "true"]
-
     _status.update("Writing output files...")
-    ledger_rows = [
-        *(dict(row) for row in resolution.retained_ledger_rows),
-        *transactions,
-    ]
     reconciliation = reconcile_ledger(ledger_rows, config)
+    duplicate_evaluation = refresh_duplicate_candidates(ledger_rows)
     _enforce_identity_review(ledger_rows)
+    review_rows = [row for row in transactions if row["needs_review"] == "true"]
     report = {
         "status": "partial_success" if import_warnings else "success",
         "input_count": len(input_files),
@@ -337,7 +339,9 @@ def _run_pipeline(
         "unsuccessful_record_count": _unsuccessful_record_count(file_reports),
         "review_count": len(review_rows),
         "uncategorized_count": _uncategorized_count(transactions),
-        "duplicate_count": _count_flag(transactions, "duplicate_suspected"),
+        "duplicate_count": duplicate_evaluation.occurrence_count,
+        "duplicate_group_count": len(duplicate_evaluation.groups),
+        "duplicate_candidates": duplicate_evaluation.as_diagnostic(),
         "categorization": {"structural_count": structural_count},
         "strict": args.strict,
         "interactive": interactive,
@@ -356,8 +360,10 @@ def _run_pipeline(
             "uncategorized_count": _uncategorized_count(ledger_rows),
         },
         "files": file_reports,
-        "transaction_flags": _transaction_flags(transactions),
-        "transaction_diagnostics": _transaction_diagnostics(transactions),
+        "transaction_flags": _transaction_flags(ledger_rows),
+        "transaction_diagnostics": _transaction_diagnostics(
+            ledger_rows, duplicate_evaluation
+        ),
         "warnings": import_warnings + ollama_warnings,
         "errors": [],
         "ollama": ollama_report,
@@ -1008,6 +1014,14 @@ def _print_import_summary(report: dict[str, Any]) -> None:
             f"{uncategorized} records are still uncategorized; "
             "run `honeymoney status` to see totals or `honeymoney review` to categorize"
         )
+    duplicate_count = report.get("duplicate_count", 0)
+    if duplicate_count:
+        print(
+            "Duplicate candidates: "
+            + _duplicate_summary_text(
+                duplicate_count, report.get("duplicate_group_count", 0)
+            )
+        )
     ledger = report.get("ledger", {})
     if ledger:
         print(
@@ -1555,6 +1569,9 @@ def _status_command(argv: list[str]) -> int:
                     "categorized": 0,
                     "uncategorized": 0,
                     "needs_review": 0,
+                    "duplicate_count": 0,
+                    "duplicate_group_count": 0,
+                    "duplicate_candidates": DuplicateEvaluation(()).as_diagnostic(),
                     "unresolved_inflows": 0,
                     "unresolved_outflows": 0,
                     "ledger": {
@@ -1574,6 +1591,9 @@ def _status_command(argv: list[str]) -> int:
     categorized = [row for row in rows if _is_categorized(row)]
     statements = {row.get("source_file", "") for row in rows if row.get("source_file")}
     review = [row for row in rows if row.get("needs_review") == "true"]
+    duplicate_evaluation = evaluate_duplicate_candidates(ledger_rows)
+    period_ids = {row.get("transaction_id", "") for row in rows}
+    period_duplicates = duplicate_evaluation.restricted_to(period_ids)
     unresolved_inflows = sum(
         1
         for row in rows
@@ -1602,6 +1622,9 @@ def _status_command(argv: list[str]) -> int:
                 "categorized": len(categorized),
                 "uncategorized": len(rows) - len(categorized),
                 "needs_review": len(review),
+                "duplicate_count": period_duplicates.occurrence_count,
+                "duplicate_group_count": len(period_duplicates.groups),
+                "duplicate_candidates": period_duplicates.as_diagnostic(),
                 "unresolved_inflows": unresolved_inflows,
                 "unresolved_outflows": unresolved_outflows,
                 "ledger": {
@@ -1620,6 +1643,12 @@ def _status_command(argv: list[str]) -> int:
     print(f"  Categorized:          {len(categorized)}")
     print(f"  Uncategorized:        {len(rows) - len(categorized)}")
     print(f"  Needs review:         {len(review)}")
+    print(
+        "  Duplicate candidates: "
+        + _duplicate_summary_text(
+            period_duplicates.occurrence_count, len(period_duplicates.groups)
+        )
+    )
     print(f"  Unresolved inflows:   {unresolved_inflows}")
     print(f"  Unresolved outflows:  {unresolved_outflows}")
     print(
@@ -1652,6 +1681,7 @@ def _report_command(argv: list[str]) -> int:
     categorized_path = Path(config["paths"]["output"])
     ledger_rows = read_ledger(categorized_path)
     reconcile_ledger(ledger_rows, config)
+    duplicate_evaluation = evaluate_duplicate_candidates(ledger_rows)
 
     start, end = _resolve_period(args.month or args.period, args.start, args.end)
     rows = _rows_in_period(ledger_rows, start, end)
@@ -1659,7 +1689,12 @@ def _report_command(argv: list[str]) -> int:
 
     report_path = Path(args.output_path or categorized_path.parent / "report.html")
     report_path.parent.mkdir(parents=True, exist_ok=True)
-    report_path.write_text(build_report_html(rows, period_label), encoding="utf-8")
+    report_path.write_text(
+        build_report_html(
+            rows, period_label, duplicate_evaluation=duplicate_evaluation
+        ),
+        encoding="utf-8",
+    )
     if args.json:
         _emit_json(
             "report",
@@ -1667,6 +1702,9 @@ def _report_command(argv: list[str]) -> int:
             data={
                 "period": {"start": start.isoformat(), "end": end.isoformat()},
                 "transaction_count": len(rows),
+                "duplicate_candidates": duplicate_evaluation.restricted_to(
+                    {row.get("transaction_id", "") for row in rows}
+                ).as_diagnostic(),
             },
             artifacts={"report_html": str(report_path.resolve())},
         )
@@ -1692,6 +1730,7 @@ def _reconcile_command(argv: list[str]) -> int:
     config = _load_config(args.config_path)
     categorized_path = Path(args.output_path or config["paths"]["output"])
     rows = read_ledger(categorized_path)
+    duplicate_evaluation = refresh_duplicate_candidates(rows)
     summary = reconcile_ledger(rows, config)
     if not args.dry_run:
         _write_ledger_outputs(categorized_path, rows)
@@ -1701,7 +1740,11 @@ def _reconcile_command(argv: list[str]) -> int:
         _emit_json(
             "reconcile",
             "success",
-            data={**summary, "dry_run": args.dry_run},
+            data={
+                **summary,
+                "dry_run": args.dry_run,
+                "duplicate_candidates": duplicate_evaluation.as_diagnostic(),
+            },
             artifacts=artifacts,
         )
         return 0
@@ -1713,6 +1756,14 @@ def _reconcile_command(argv: list[str]) -> int:
         f"{summary['unmatched_transactions']} unmatched, "
         f"{summary['unresolved_transactions']} unresolved"
     )
+    if duplicate_evaluation.occurrence_count:
+        print(
+            "Duplicate candidates: "
+            + _duplicate_summary_text(
+                duplicate_evaluation.occurrence_count,
+                len(duplicate_evaluation.groups),
+            )
+        )
     return 0
 
 
@@ -1734,11 +1785,14 @@ def _pending_command(argv: list[str]) -> int:
     config = _load_config(args.config_path)
     categorized_path = Path(config["paths"]["output"])
     ledger_rows = read_ledger(categorized_path)
+    duplicate_evaluation = evaluate_duplicate_candidates(ledger_rows)
     pending_rows = [
         to_review_row(row)
         for row in _rows_in_period(ledger_rows, start, end)
         if row.get("needs_review") == "true"
     ]
+    pending_ids = {row.get("transaction_id", "") for row in pending_rows}
+    pending_duplicates = duplicate_evaluation.restricted_to(pending_ids)
 
     if args.json:
         _emit_json(
@@ -1748,6 +1802,7 @@ def _pending_command(argv: list[str]) -> int:
                 "period": {"start": start.isoformat(), "end": end.isoformat()},
                 "count": len(pending_rows),
                 "transactions": pending_rows,
+                "duplicate_candidates": pending_duplicates.as_diagnostic(),
             },
             artifacts={
                 "categorized_csv": str(categorized_path.resolve()),
@@ -1760,6 +1815,14 @@ def _pending_command(argv: list[str]) -> int:
 
     print(f"Pending review for {start.isoformat()} to {end.isoformat()}")
     print(f"  Transactions: {len(pending_rows)}")
+    if pending_duplicates.occurrence_count:
+        print(
+            "  Duplicate candidates: "
+            + _duplicate_summary_text(
+                pending_duplicates.occurrence_count,
+                len(pending_duplicates.groups),
+            )
+        )
     for row in pending_rows:
         print(f"  {row['transaction_id']}  {row['date']}  {row['merchant']}")
     return 0
@@ -1997,6 +2060,7 @@ def _reject_ambiguous_legacy_transaction_ids(
 def _write_ledger_outputs(
     categorized_path: Path, ledger_rows: list[dict[str, str]]
 ) -> None:
+    refresh_duplicate_candidates(ledger_rows)
     persist_generation(
         categorized_path, ledger_output_documents(categorized_path, ledger_rows)
     )
@@ -2116,6 +2180,7 @@ def _transaction_prompt_line(transaction: dict[str, str]) -> str:
 def _apply_interactive_category(transaction: dict[str, str], category: str) -> None:
     transaction["category"] = category
     transaction["confidence"] = "1.00"
+    release_duplicate_review_ownership(transaction)
     transaction["needs_review"] = "false"
     transaction["reason"] = "Categorized interactively"
     transaction["flags"] = _remove_flag(transaction["flags"], "uncategorized")
@@ -2335,12 +2400,10 @@ def _identity_diagnostic_warning(diagnostic: Any) -> str:
     )
 
 
-def _count_flag(transactions: list[dict[str, str]], flag: str) -> int:
-    return sum(
-        1
-        for transaction in transactions
-        if flag in [item for item in transaction.get("flags", "").split(";") if item]
-    )
+def _duplicate_summary_text(occurrence_count: int, group_count: int) -> str:
+    occurrence_label = "occurrence" if occurrence_count == 1 else "occurrences"
+    group_label = "group" if group_count == 1 else "groups"
+    return f"{occurrence_count} {occurrence_label} in {group_count} {group_label}"
 
 
 def _transaction_flags(transactions: list[dict[str, str]]) -> dict[str, list[str]]:
@@ -2354,10 +2417,22 @@ def _transaction_flags(transactions: list[dict[str, str]]) -> dict[str, list[str
 
 def _transaction_diagnostics(
     transactions: list[dict[str, str]],
-) -> dict[str, dict[str, str | bool]]:
-    diagnostics: dict[str, dict[str, str | bool]] = {}
+    duplicate_evaluation: DuplicateEvaluation | None = None,
+) -> dict[str, dict[str, Any]]:
+    diagnostics: dict[str, dict[str, Any]] = {}
     for transaction in transactions:
         if transaction.get("needs_review") != "true" and not transaction.get("reason"):
+            continue
+        duplicate_candidate = (
+            duplicate_evaluation.diagnostic_for(transaction["transaction_id"])
+            if duplicate_evaluation is not None
+            else None
+        )
+        if duplicate_candidate is not None:
+            diagnostics[transaction["transaction_id"]] = {
+                "needs_review": transaction.get("needs_review") == "true",
+                "duplicate_candidate": duplicate_candidate,
+            }
             continue
         diagnostics[transaction["transaction_id"]] = {
             "needs_review": transaction.get("needs_review") == "true",
@@ -2373,6 +2448,7 @@ def _enforce_identity_review(transactions: list[dict[str, str]]) -> None:
         flags = {flag for flag in transaction.get("flags", "").split(";") if flag}
         if IDENTITY_MIGRATION_AMBIGUITY_FLAG not in flags:
             continue
+        release_duplicate_review_ownership(transaction)
         transaction["needs_review"] = "true"
         transaction["reason"] = (
             "Identity migration is ambiguous; explicit resolution is required"
@@ -2450,7 +2526,6 @@ _import_pdf = importers._import_pdf
 _load_profiles = importers._load_profiles
 _load_profile_mappings = importers._load_profile_mappings
 _validate_profile = importers._validate_profile
-_annotate_duplicate_suspicions = normalization._annotate_duplicate_suspicions
 _normalized_row = normalization._normalized_row
 _append_flag = normalization._append_flag
 _append_reason = normalization._append_reason

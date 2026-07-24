@@ -16,7 +16,7 @@ profile detection and CSV/PDF parsing
 normalized rows + batch-wide identity resolution against the ledger and manifest
                  |
                  v
-deterministic rules -> opt-in local memory -> duplicate checks -> structural classification -> optional local Ollama
+deterministic rules -> opt-in local memory -> identity-backed duplicate checks -> structural classification -> optional local Ollama
                  |
                  v
 validated corrections
@@ -96,6 +96,13 @@ or `unavailable`. The added `result` field reports `matched`, `mismatched`, or
 `unavailable`; unavailable results include a reason. Conflicting balance values
 add a safe row flag and make the result unavailable.
 
+Duplicate candidates are recomputed over the complete prospective ledger after
+replacement has removed retired source rows. The pure evaluator accepts only
+full identity-v2 rows with a non-empty account, the same identity-v2 record
+fingerprint, and at least two distinct source IDs. See
+[Duplicate candidates](duplicate-candidates.md) for the public match type and
+diagnostic contract.
+
 ## Transaction identity
 
 Identity v2 gives each resolved ledger row four public fields, directly after
@@ -155,7 +162,9 @@ changing it.
 - `honeymoney/importers.py`: input discovery, profile validation and selection,
   CSV/PDF parsing, parser locators, and private source identity inputs.
 - `honeymoney/normalization.py`: pure row/date/amount/text normalization and
-  incoming duplicate suspicion checks.
+  compatibility helpers.
+- `honeymoney/duplicates.py`: pure identity-backed duplicate evaluation,
+  idempotent candidate annotation, and privacy-safe diagnostics.
 - `honeymoney/identity.py`: identity-v2 digests, validation, source and record
   resolution, manifest ownership, and safe identity diagnostics.
 - `honeymoney/identity_state.py`: ledger and manifest loading, bootstrap rules,

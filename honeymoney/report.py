@@ -4,6 +4,8 @@ import html
 import json
 from decimal import Decimal, InvalidOperation
 
+from honeymoney.duplicates import DuplicateEvaluation, evaluate_duplicate_candidates
+
 _PAGE_TEMPLATE = """<!doctype html>
 <html lang="en">
 <head>
@@ -251,6 +253,7 @@ _PAGE_TEMPLATE = """<!doctype html>
   .cat-cell { display: flex; align-items: center; gap: 0.5rem; min-width: 0; }
   .cat-cell span.name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .cat-cell .review { flex: none; font-size: 0.68rem; letter-spacing: 0.04em; color: var(--neg); }
+  .cat-cell .duplicate { flex: none; font-size: 0.68rem; letter-spacing: 0.04em; color: var(--neg); }
 
   .empty { color: var(--ink-faint); font-style: italic; padding: 1rem 0.75rem; }
 
@@ -546,6 +549,15 @@ _PAGE_TEMPLATE = """<!doctype html>
           rv.textContent = "review";
           wrap.appendChild(rv);
         }
+        if (row.duplicate_candidate) {
+          var duplicate = document.createElement("span");
+          duplicate.className = "duplicate";
+          duplicate.textContent = "duplicate";
+          duplicate.title = row.duplicate_candidate.match_type +
+            " · counterparts " +
+            row.duplicate_candidate.counterpart_occurrence_ids.join(", ");
+          wrap.appendChild(duplicate);
+        }
         catCell.appendChild(wrap);
 
         var amtCell = tr.insertCell();
@@ -576,9 +588,17 @@ _PAGE_TEMPLATE = """<!doctype html>
 """
 
 
-def build_report_html(rows: list[dict[str, str]], period_label: str) -> str:
+def build_report_html(
+    rows: list[dict[str, str]],
+    period_label: str,
+    *,
+    duplicate_evaluation: DuplicateEvaluation | None = None,
+) -> str:
+    duplicates = duplicate_evaluation or evaluate_duplicate_candidates(rows)
     data = json.dumps(
-        [_report_row(row) for row in rows], ensure_ascii=True, sort_keys=True
+        [_report_row(row, duplicates) for row in rows],
+        ensure_ascii=True,
+        sort_keys=True,
     ).replace("</", "<\\/")
     summary = _flow_summary(rows)
     replacements = {
@@ -597,7 +617,9 @@ def build_report_html(rows: list[dict[str, str]], period_label: str) -> str:
     return document
 
 
-def _report_row(row: dict[str, str]) -> dict[str, object]:
+def _report_row(
+    row: dict[str, str], duplicate_evaluation: DuplicateEvaluation
+) -> dict[str, object]:
     return {
         "date": row.get("date", ""),
         "merchant": row.get("merchant", ""),
@@ -607,6 +629,9 @@ def _report_row(row: dict[str, str]) -> dict[str, object]:
         "account": row.get("account", ""),
         "owner": row.get("owner", ""),
         "needs_review": row.get("needs_review") == "true",
+        "duplicate_candidate": duplicate_evaluation.diagnostic_for(
+            row.get("transaction_id", "")
+        ),
     }
 
 

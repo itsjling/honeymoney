@@ -17,6 +17,10 @@ from honeymoney.classification_policy import (
     model_boundary_guidance,
     model_category_descriptions,
 )
+from honeymoney.duplicates import (
+    DUPLICATE_FLAG,
+    release_duplicate_review_ownership,
+)
 from honeymoney.schema import allowed_categories
 
 _TICK_INTERVAL_SECONDS = 1.0
@@ -758,6 +762,7 @@ def _apply_ollama_response(
             transaction["reason"] = _append_reason(
                 transaction["reason"], outcome.reason
             )
+            release_duplicate_review_ownership(transaction)
             transaction["needs_review"] = "true"
             counts["rejected"] += 1
             continue
@@ -772,6 +777,10 @@ def _apply_ollama_response(
         transaction["reason"] = reason
         transaction["flags"] = _remove_flag(transaction["flags"], "uncategorized")
         transaction["flags"] = _append_flag(transaction["flags"], "ollama_categorized")
+        if outcome.outcome == "accepted" or _model_requires_independent_review(
+            transaction, category, confidence, config
+        ):
+            release_duplicate_review_ownership(transaction)
         transaction["needs_review"] = (
             "false" if outcome.outcome == "accepted" else "true"
         )
@@ -784,6 +793,24 @@ def _apply_ollama_response(
             f"Ollama returned no categorization for {unanswered} transaction(s)"
         )
     return counts, invalid, details
+
+
+def _model_requires_independent_review(
+    transaction: dict[str, str],
+    category: str,
+    confidence: Decimal,
+    config: dict[str, Any],
+) -> bool:
+    without_duplicate = {
+        **transaction,
+        "flags": _remove_flag(transaction.get("flags", ""), DUPLICATE_FLAG),
+    }
+    return (
+        evaluate_model_suggestion(
+            without_duplicate, category, confidence, config
+        ).outcome
+        != "accepted"
+    )
 
 
 def _snippet(value: Any, limit: int = 120) -> str:

@@ -18,6 +18,7 @@ from honeymoney.cli import (
     _starter_csv_profile,
     _StatusLine,
 )
+from honeymoney.duplicates import DUPLICATE_MATCH_TYPE
 from honeymoney.identity_state import load_identity_state
 from honeymoney.ollama import OllamaHttpRequest, apply_ollama_fallback
 from honeymoney.schema import ALLOWED_CATEGORIES
@@ -832,7 +833,9 @@ def open(source_path):
                 ["import", str(candidate), "--no-interactive", "--json"], cwd=root
             )
             self.assertEqual(imported.returncode, 0, imported.stderr)
-            self.assertEqual(json.loads(imported.stdout)["data"]["duplicate_count"], 1)
+            report = json.loads(imported.stdout)["data"]
+            self.assertEqual(report["duplicate_count"], 2)
+            self.assertEqual(report["duplicate_group_count"], 1)
 
             state = load_identity_state(categorized_path)
             historical = next(
@@ -845,38 +848,223 @@ def open(source_path):
                 and row["merchant"] == "REVIEWED REPEAT"
             )
             self.assertEqual(historical["category"], "Dining")
-            self.assertEqual(historical["needs_review"], "false")
-            self.assertNotIn("duplicate_suspected", historical["flags"])
-            self.assertEqual(
-                incoming["flags"].split(";").count("duplicate_suspected"), 1
+            expected_ids = sorted(
+                [historical["transaction_id"], incoming["transaction_id"]]
             )
             self.assertEqual(
-                incoming["reason"].count("Possible duplicate transaction"), 1
+                report["duplicate_candidates"]["groups"],
+                [
+                    {
+                        "match_type": DUPLICATE_MATCH_TYPE,
+                        "occurrence_ids": expected_ids,
+                    }
+                ],
             )
+            for row in (historical, incoming):
+                self.assertEqual(row["needs_review"], "true")
+                self.assertEqual(
+                    row["flags"].split(";").count("duplicate_suspected"), 1
+                )
+                self.assertIn(DUPLICATE_MATCH_TYPE, row["reason"])
+                self.assertIn(
+                    next(
+                        item for item in expected_ids if item != row["transaction_id"]
+                    ),
+                    row["reason"],
+                )
+
+            with (root / "output" / "review_needed.csv").open(
+                newline="", encoding="utf-8"
+            ) as fh:
+                review_ids = {
+                    row["transaction_id"]
+                    for row in csv.DictReader(fh)
+                    if "duplicate_suspected" in row["flags"]
+                }
+            self.assertEqual(review_ids, set(expected_ids))
+
+            pending = self._run_cli(["pending", "2026-05", "--json"], cwd=root)
+            self.assertEqual(pending.returncode, 0, pending.stderr)
+            pending_data = json.loads(pending.stdout)["data"]
+            self.assertEqual(
+                pending_data["duplicate_candidates"],
+                report["duplicate_candidates"],
+            )
+            self.assertEqual(
+                {
+                    row["transaction_id"]
+                    for row in pending_data["transactions"]
+                    if "duplicate_suspected" in row["flags"]
+                },
+                set(expected_ids),
+            )
+
+            status = self._run_cli(["status", "2026-05", "--json"], cwd=root)
+            self.assertEqual(status.returncode, 0, status.stderr)
+            status_data = json.loads(status.stdout)["data"]
+            self.assertEqual(status_data["records_processed"], 4)
+            self.assertEqual(status_data["duplicate_count"], 2)
+            self.assertEqual(status_data["duplicate_group_count"], 1)
+            self.assertEqual(
+                status_data["duplicate_candidates"], report["duplicate_candidates"]
+            )
+            status_text = self._run_cli(["status", "2026-05"], cwd=root)
+            self.assertEqual(status_text.returncode, 0, status_text.stderr)
+            self.assertIn(
+                "Duplicate candidates: 2 occurrences in 1 group",
+                status_text.stdout,
+            )
+
+            reconcile = self._run_cli(["reconcile", "--json"], cwd=root)
+            self.assertEqual(reconcile.returncode, 0, reconcile.stderr)
+            self.assertEqual(
+                json.loads(reconcile.stdout)["data"]["duplicate_candidates"],
+                report["duplicate_candidates"],
+            )
+            reconcile_text = self._run_cli(["reconcile"], cwd=root)
+            self.assertEqual(reconcile_text.returncode, 0, reconcile_text.stderr)
+            self.assertIn(
+                "Duplicate candidates: 2 occurrences in 1 group",
+                reconcile_text.stdout,
+            )
+
+            html_path = root / "output" / "duplicates.html"
+            html_report = self._run_cli(
+                [
+                    "report",
+                    "2026-05",
+                    "--output",
+                    str(html_path),
+                    "--no-open",
+                    "--json",
+                ],
+                cwd=root,
+            )
+            self.assertEqual(html_report.returncode, 0, html_report.stderr)
+            html_data = json.loads(html_report.stdout)["data"]
+            self.assertEqual(html_data["transaction_count"], 4)
+            self.assertEqual(
+                html_data["duplicate_candidates"], report["duplicate_candidates"]
+            )
+            html = html_path.read_text(encoding="utf-8")
+            self.assertIn(DUPLICATE_MATCH_TYPE, html)
+            for transaction_id in expected_ids:
+                self.assertIn(transaction_id, html)
+
+            for transaction_id in expected_ids:
+                transaction_diagnostic = report["transaction_diagnostics"][
+                    transaction_id
+                ]
+                self.assertEqual(
+                    set(transaction_diagnostic),
+                    {"needs_review", "duplicate_candidate"},
+                )
+                duplicate_diagnostic = transaction_diagnostic["duplicate_candidate"]
+                self.assertEqual(
+                    duplicate_diagnostic["match_type"], DUPLICATE_MATCH_TYPE
+                )
+                self.assertEqual(duplicate_diagnostic["occurrence_ids"], expected_ids)
+
+    def test_combined_and_sequential_imports_produce_same_duplicate_group(
+        self,
+    ) -> None:
+        def prepare_workspace(parent: str) -> tuple[Path, Path]:
+            root = self._setup_workspace(parent)
+            statements = root / "statements"
+            statements.mkdir()
+            for name in ("a.csv", "b.csv"):
+                self._write_statement(
+                    statements / name,
+                    ["2026-05-04,SYNTHETIC OVERLAP,-12.00,HKD"],
+                )
+            return root, statements
+
+        with tempfile.TemporaryDirectory() as tmp:
+            combined_root, combined_statements = prepare_workspace(
+                str(Path(tmp) / "combined")
+            )
+            combined = self._run_cli(
+                [
+                    "import",
+                    str(combined_statements),
+                    "--no-interactive",
+                ],
+                cwd=combined_root,
+            )
+            self.assertEqual(combined.returncode, 0, combined.stderr)
+            self.assertIn(
+                "Duplicate candidates: 2 occurrences in 1 group",
+                combined.stdout,
+            )
+
+            sequential_root, sequential_statements = prepare_workspace(
+                str(Path(tmp) / "sequential")
+            )
+            first = self._run_cli(
+                [
+                    "import",
+                    str(sequential_statements / "b.csv"),
+                    "--no-interactive",
+                    "--json",
+                ],
+                cwd=sequential_root,
+            )
+            self.assertEqual(first.returncode, 0, first.stderr)
+            second = self._run_cli(
+                [
+                    "import",
+                    str(sequential_statements / "a.csv"),
+                    "--no-interactive",
+                    "--json",
+                ],
+                cwd=sequential_root,
+            )
+            self.assertEqual(second.returncode, 0, second.stderr)
+
+            combined_report = json.loads(
+                (combined_root / "output" / "import_report.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            sequential_report = json.loads(second.stdout)["data"]
+            self.assertEqual(
+                combined_report["duplicate_candidates"],
+                sequential_report["duplicate_candidates"],
+            )
+            self.assertEqual(combined_report["duplicate_count"], 2)
+            self.assertEqual(sequential_report["duplicate_count"], 2)
+            for root in (combined_root, sequential_root):
+                rows = self._ledger_rows(root)
+                self.assertEqual(len(rows), 2)
+                self.assertTrue(
+                    all("duplicate_suspected" in row["flags"] for row in rows)
+                )
 
     def test_source_replacement_excludes_retired_rows_from_duplicate_checks(
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = self._setup_workspace(tmp)
-            statement = root / "replacement.csv"
-            self._write_statement(
-                statement,
-                [
-                    "2026-05-04,REPLACED ROW,-12.00,HKD",
-                    "2026-05-01,CONTEXT,-1.00,HKD",
-                ],
-            )
+            statements = root / "statements"
+            statements.mkdir()
+            statement = statements / "replacement.csv"
+            overlap = statements / "overlap.csv"
+            repeated_row = "2026-05-04,REPLACED ROW,-12.00,HKD"
+            self._write_statement(statement, [repeated_row])
+            self._write_statement(overlap, [repeated_row])
             first = self._run_cli(
-                ["import", str(statement), "--no-interactive"], cwd=root
+                ["import", str(statements), "--no-interactive"], cwd=root
             )
             self.assertEqual(first.returncode, 0, first.stderr)
+            self.assertTrue(
+                all(
+                    "duplicate_suspected" in row["flags"]
+                    for row in self._ledger_rows(root)
+                )
+            )
             self._write_statement(
                 statement,
-                [
-                    "2026-05-05,REPLACED ROW,-12.00,HKD",
-                    "2026-05-01,CONTEXT,-1.00,HKD",
-                ],
+                ["2026-05-05,REPLACED ROW,-12.00,HKD"],
             )
 
             replaced = self._run_cli(
@@ -885,12 +1073,13 @@ def open(source_path):
             )
             self.assertEqual(replaced.returncode, 0, replaced.stderr)
             self.assertEqual(json.loads(replaced.stdout)["data"]["duplicate_count"], 0)
-            state = load_identity_state(root / "output" / "categorized.csv")
-            replacement = next(
-                row for row in state.rows if row["merchant"] == "REPLACED ROW"
-            )
+            rows = self._ledger_rows(root)
+            self.assertEqual(len(rows), 2)
+            replacement = next(row for row in rows if row["date"] == "2026-05-05")
             self.assertEqual(replacement["date"], "2026-05-05")
-            self.assertNotIn("duplicate_suspected", replacement["flags"])
+            for row in rows:
+                self.assertNotIn("duplicate_suspected", row["flags"])
+                self.assertNotIn(DUPLICATE_MATCH_TYPE, row["reason"])
 
     def _legacy_ledger_row(
         self,
@@ -2963,6 +3152,16 @@ def open(path):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn("No processed records found", result.stdout)
             self.assertIn("honeymoney import", result.stdout)
+
+            structured = self._run_cli(["status", "--json"], cwd=root)
+            self.assertEqual(structured.returncode, 0, structured.stderr)
+            data = json.loads(structured.stdout)["data"]
+            self.assertEqual(data["duplicate_count"], 0)
+            self.assertEqual(data["duplicate_group_count"], 0)
+            self.assertEqual(
+                data["duplicate_candidates"],
+                {"group_count": 0, "groups": [], "occurrence_count": 0},
+            )
 
     def test_report_command_writes_self_contained_html(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

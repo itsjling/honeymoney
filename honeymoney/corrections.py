@@ -7,6 +7,10 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from honeymoney.csv_artifacts import csv_document, read_csv_artifact
+from honeymoney.duplicates import (
+    refresh_duplicate_candidates,
+    release_duplicate_review_ownership,
+)
 from honeymoney.identity import IdentityError, ambiguous_legacy_transaction_ids
 from honeymoney.identity_state import (
     IdentityState,
@@ -169,6 +173,7 @@ def apply_corrections(
             transaction["flow_source"] = "correction"
 
         if "needs_review" in correction:
+            release_duplicate_review_ownership(transaction)
             transaction["needs_review"] = correction["needs_review"].casefold()
         transaction["flags"] = _append_flag(
             transaction.get("flags", ""), "manual_correction"
@@ -292,6 +297,7 @@ def apply_correction_operation(
     corrected_ledger = [dict(row) for row in ledger_rows]
     apply_corrections(corrected_ledger, effective_batch)
     reconcile_ledger(corrected_ledger, config)
+    refresh_duplicate_candidates(corrected_ledger)
     corrected_ids = set(normalized_patches)
     for index, (original, baseline, corrected) in enumerate(
         zip(ledger_rows, baseline_ledger, corrected_ledger)
