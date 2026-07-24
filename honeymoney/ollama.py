@@ -367,7 +367,11 @@ def apply_ollama_fallback(
 ) -> tuple[dict[str, Any], list[str]]:
     ollama_config = config.get("ollama", {})
     if not ollama_config.get("enabled", False):
-        return {"status": "disabled"}, []
+        return {
+            "status": "disabled",
+            "candidate_count": 0,
+            "skipped_exact_category_correction_count": 0,
+        }, []
 
     unresolved = [
         transaction
@@ -375,21 +379,12 @@ def apply_ollama_fallback(
         if transaction.get("category") == "Unknown"
         and transaction.get("needs_review") == "true"
     ]
-    correction_skips = [
-        transaction
+    correction_skip_ids = {
+        transaction["transaction_id"]
         for transaction in unresolved
         if _has_exact_category_correction(transaction, corrections, config)
-    ]
-    for transaction in correction_skips:
-        _apply_exact_category_correction_review_state(
-            transaction,
-            (corrections or {}).get(transaction["transaction_id"], {}),
-            config,
-        )
-    skipped_exact_category_correction_count = len(correction_skips)
-    correction_skip_ids = {
-        transaction["transaction_id"] for transaction in correction_skips
     }
+    skipped_exact_category_correction_count = len(correction_skip_ids)
     unresolved = [
         transaction
         for transaction in unresolved
@@ -544,27 +539,6 @@ def _has_exact_category_correction(
     correction = corrections.get(transaction.get("transaction_id", ""), {})
     category = correction.get("category", "")
     return category != "Unknown" and category in allowed_categories(config)
-
-
-def _apply_exact_category_correction_review_state(
-    transaction: dict[str, str],
-    correction: Mapping[str, str],
-    config: dict[str, Any],
-) -> None:
-    """Keep the prior review result when a saved correction supplies it."""
-    if "needs_review" in correction or "confidence" not in correction:
-        return
-    try:
-        confidence = Decimal(correction["confidence"])
-    except (InvalidOperation, ValueError):
-        return
-    if not confidence.is_finite():
-        return
-    outcome = evaluate_model_suggestion(
-        transaction, correction["category"], confidence, config
-    )
-    if outcome.outcome == "accepted":
-        transaction["needs_review"] = "false"
 
 
 def _batch_size(ollama_config: dict[str, Any]) -> int:

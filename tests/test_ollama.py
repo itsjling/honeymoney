@@ -80,6 +80,34 @@ class OllamaTest(unittest.TestCase):
         ollama.update(overrides)
         return {"ollama": ollama}
 
+    def test_disabled_report_has_zero_candidate_and_correction_skip_counts(
+        self,
+    ) -> None:
+        transaction = unresolved_transaction()
+        transport = FakeTransport(
+            lambda request: self.fail(f"disabled Ollama made a request: {request}")
+        )
+
+        report, warnings = apply_ollama_fallback(
+            [transaction],
+            self.config(enabled=False),
+            corrections={"txn_1": {"category": "Dining"}},
+            transport=transport,
+        )
+
+        self.assertEqual(warnings, [])
+        self.assertEqual(
+            report,
+            {
+                "status": "disabled",
+                "candidate_count": 0,
+                "skipped_exact_category_correction_count": 0,
+            },
+        )
+        self.assertEqual(transaction["category"], "Unknown")
+        self.assertEqual(transaction["needs_review"], "true")
+        self.assertEqual(transport.requests, [])
+
     def test_model_listing_uses_the_shared_transport_boundary(self) -> None:
         def handler(request: OllamaHttpRequest) -> bytes:
             self.assertEqual(request.method, "GET")
@@ -203,6 +231,47 @@ class OllamaTest(unittest.TestCase):
             ["txn_uncorrected", "txn_owner_only", "txn_unknown", "txn_invalid"],
         )
         self.assertEqual(corrected["category"], "Unknown")
+        self.assertEqual(corrected["needs_review"], "true")
+
+    def test_all_corrected_batch_is_skipped_without_mutating_review_state(
+        self,
+    ) -> None:
+        transaction = unresolved_transaction()
+        original = dict(transaction)
+        transport = FakeTransport(
+            lambda request: self.fail(f"corrected row was sent to Ollama: {request}")
+        )
+
+        report, warnings = apply_ollama_fallback(
+            [transaction],
+            self.config(),
+            corrections={
+                "txn_1": {
+                    "category": "Dining",
+                    "confidence": "1.0",
+                    "reason": "Reviewed locally",
+                }
+            },
+            transport=transport,
+        )
+
+        self.assertEqual(warnings, [])
+        self.assertEqual(
+            report,
+            {
+                "status": "skipped",
+                "reason": "no model candidates",
+                "candidate_count": 0,
+                "skipped_exact_category_correction_count": 1,
+                "accepted_count": 0,
+                "reviewable_count": 0,
+                "rejected_count": 0,
+                "applied_count": 0,
+                "invalid_count": 0,
+            },
+        )
+        self.assertEqual(transaction, original)
+        self.assertEqual(transport.requests, [])
 
     def test_unavailable_batch_reports_additive_partial_counts(self) -> None:
         calls = 0

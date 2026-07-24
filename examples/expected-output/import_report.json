@@ -23,6 +23,8 @@
     "uncategorized_count": 1
   },
   "ollama": {
+    "candidate_count": 0,
+    "skipped_exact_category_correction_count": 0,
     "status": "disabled"
   },
   "output": {
