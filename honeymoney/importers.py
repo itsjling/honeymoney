@@ -1469,7 +1469,6 @@ def _validate_pdf_word_row_dates(
     """Reject malformed word rows before they can become identity inputs."""
     date_formats = profile.get("date_formats", ["%Y-%m-%d"])
     statement_year = profile.get("statement_year")
-    profile_id = str(profile.get("id") or profile.get("account_id") or "unknown")
     seen_columns: set[str] = set()
 
     for field in ("transaction_date", "posting_date"):
@@ -1485,8 +1484,8 @@ def _validate_pdf_word_row_dates(
             continue
         raise ValueError(
             "pdf_word_row_invalid_date: "
-            f"profile={profile_id}; source={source_display}; "
-            f"page={page_number}; row={physical_line}; field={column_name}"
+            f"source={source_display}; page={page_number}; row={physical_line}; "
+            f"field={field}"
         )
 
 

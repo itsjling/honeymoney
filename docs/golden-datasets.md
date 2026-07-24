@@ -105,13 +105,13 @@ column to an empty value or zero amount.
 
 ### Regenerating the accepted PDF bytes
 
-The four `accepted_statement/input.pdf` files are deterministic clean-room
-documents generated from the adjacent reviewed synthetic `tables.json` or
-`words.json` layout. The generator uses only the Python standard library and
-emits no timestamps, random identifiers, document metadata, attachments,
-images, forms, scripts, or active content.
+The tracked `input.pdf` files are deterministic clean-room documents generated
+from the adjacent reviewed synthetic `tables.json` or `words.json` layout. The
+generator uses only the Python standard library and emits no timestamps, random
+identifiers, document metadata, attachments, images, forms, scripts, or active
+content.
 
-Regenerate all four fixtures intentionally:
+Regenerate all fixtures intentionally:
 
 ```bash
 python3 tests/fixtures/import_profiles/generate_pdf_byte_goldens.py

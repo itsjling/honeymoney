@@ -1,6 +1,7 @@
 import hashlib
 import json
 import os
+import runpy
 import subprocess
 import sys
 import tempfile
@@ -12,7 +13,7 @@ from unittest.mock import patch
 
 import pdfplumber
 
-from honeymoney.cli import _load_config_document, _preview_profile_input
+from honeymoney.cli import _load_config_document, _preview_profile_input, main
 from honeymoney.identity import (
     IdentityError,
     empty_manifest,
@@ -63,7 +64,7 @@ class HsbcCreditCardPdfProfileTest(unittest.TestCase):
         )
 
     def test_footer_boundary(self) -> None:
-        assert_import_case(
+        assert_pdf_byte_import_case(
             self,
             load_profile("hsbc_hk_credit_card_pdf.json"),
             "footer_boundary",
@@ -76,14 +77,19 @@ class HsbcCreditCardPdfProfileTest(unittest.TestCase):
             / "import_profiles"
             / "hsbc_hk_credit_card_pdf"
             / "footer_boundary"
-            / "words.json"
+            / "input.pdf"
         )
-        words = load_json(fixture)["pages"][0]
-
-        imported_rows, imported_warnings, _ = _import_fake_pdf(profile, words=words)
-        preview_rows, preview_warnings = _import_fake_pdf(
-            profile, words=words, preview=True
-        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            statement = root / "statement.pdf"
+            statement.write_bytes(fixture.read_bytes())
+            config = {"base_currency": "HKD", "exchange_rates": {"HKD": 1}}
+            imported_rows, imported_warnings = _import_pdf(
+                statement, profile, config, root
+            )
+            preview_rows, preview_warnings = _preview_profile_input(
+                profile, str(profile["id"]), statement, config
+            )
 
         self.assertEqual(preview_warnings, imported_warnings)
         self.assertEqual(preview_rows, imported_rows)
@@ -139,15 +145,8 @@ class PdfByteFixtureReviewTest(unittest.TestCase):
         review_path = fixture_root / "pdf_byte_privacy_review.json"
         self.assertTrue(review_path.is_file(), f"Missing review: {review_path}")
         review = load_json(review_path)
-        self.assertEqual(
-            set(review["fixtures"]),
-            {
-                "hsbc_one_pdf",
-                "hsbc_hk_credit_card_pdf",
-                "mox_bank_pdf",
-                "mox_credit_card_pdf",
-            },
-        )
+        fixtures = _pdf_byte_fixtures(generator)
+        self.assertEqual(set(review["fixtures"]), set(fixtures))
         prohibited_objects = [
             b"/EmbeddedFile",
             b"/EmbeddedFiles",
@@ -163,11 +162,9 @@ class PdfByteFixtureReviewTest(unittest.TestCase):
             b"/Subtype /Image",
             b"/Encrypt",
         ]
-        for profile_id, expected in review["fixtures"].items():
-            with self.subTest(profile=profile_id):
-                fixture_path = (
-                    fixture_root / profile_id / "accepted_statement/input.pdf"
-                )
+        for fixture_id, expected in review["fixtures"].items():
+            with self.subTest(fixture=fixture_id):
+                fixture_path = fixtures[fixture_id]
                 fixture_bytes = fixture_path.read_bytes()
                 self.assertEqual(
                     hashlib.sha256(fixture_bytes).hexdigest(), expected["sha256"]
@@ -502,10 +499,64 @@ class IdentityParserInputsTest(unittest.TestCase):
 
         with self.assertRaisesRegex(
             ValueError,
-            r"pdf_word_row_invalid_date: profile=word; source=statement\.pdf; "
-            r"page=1; row=2; field=Post date",
-        ):
+            r"pdf_word_row_invalid_date: source=statement\.pdf; "
+            r"page=1; row=2; field=transaction_date",
+        ) as raised:
             _import_fake_pdf(profile, words=words)
+        self.assertNotIn("profile=", str(raised.exception))
+        self.assertNotIn("Post date", str(raised.exception))
+
+    def test_malformed_pdf_word_date_surfaces_parser_code_before_identity_persistence(
+        self,
+    ) -> None:
+        profile = load_profile("hsbc_hk_credit_card_pdf.json")
+        profile["id"] = "synthetic_word_profile"
+        profile["pdf"] = dict(profile["pdf"])
+        profile["pdf"]["word_table_end_markers"] = []
+        fixture = (
+            FIXTURE_DIR
+            / "import_profiles"
+            / "hsbc_hk_credit_card_pdf"
+            / "footer_boundary"
+            / "input.pdf"
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            statement = root / "statement.pdf"
+            statement.write_bytes(fixture.read_bytes())
+            profile_path = root / "profile.json"
+            profile_path.write_text(json.dumps(profile), encoding="utf-8")
+            output = root / "output" / "categorized.csv"
+            config_path = root / "config.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "profiles": [str(profile_path)],
+                        "exchange_rates": {"HKD": 1.0},
+                        "paths": {"input": str(statement), "output": str(output)},
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            self.assertEqual(
+                main(["--config", str(config_path), "--no-interactive"]), 0
+            )
+            report = json.loads(
+                (root / "output" / "import_report.json").read_text(encoding="utf-8")
+            )
+            manifest = json.loads(
+                (root / "output" / ".honeymoney-identity-manifest.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+
+        warning = report["warnings"][0]
+        self.assertIn("pdf_word_row_invalid_date", warning)
+        self.assertNotIn("identity_manifest_invalid", warning)
+        self.assertEqual(report["files"][0]["status"], "failed")
+        self.assertEqual(manifest["sources"], [])
 
     def test_pdf_sectioned_identity_uses_physical_line(self) -> None:
         profile = load_profile("hsbc_one_pdf.json")
@@ -529,6 +580,13 @@ def _identity_config(root: Path) -> dict:
     config_path = root / "config.json"
     config_path.write_text("{}", encoding="utf-8")
     return _load_config_document(str(config_path), recover=False)
+
+
+def _pdf_byte_fixtures(generator: Path) -> dict[str, Path]:
+    namespace = runpy.run_path(str(generator))
+    return {
+        fixture.review_key: fixture.output_path for fixture in namespace["FIXTURES"]
+    }
 
 
 def _import_fake_pdf(
