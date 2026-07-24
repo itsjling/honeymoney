@@ -2,11 +2,14 @@ import errno
 import socket
 import unittest
 import urllib.error
+from unittest.mock import patch
 
 from honeymoney.ollama import (
     LoopbackOllamaTransport,
     OllamaHttpRequest,
     OllamaHttpResponse,
+    _default_sender,
+    _OllamaConnectFailure,
     list_ollama_models,
 )
 
@@ -27,6 +30,125 @@ def resolved(*addresses: str):
 
 
 class OllamaTransportTest(unittest.TestCase):
+    def test_default_sender_preserves_pinned_request_and_response(self) -> None:
+        connections = []
+
+        class Response:
+            status = 201
+            reason = "Created"
+
+            def getheaders(self) -> list[tuple[str, str]]:
+                return [("Content-Type", "application/json"), ("X-Synthetic", "yes")]
+
+            def read(self) -> bytes:
+                return b'{"synthetic": "response"}'
+
+        class Connection:
+            def __init__(self, host: str, port: int, timeout: float) -> None:
+                self.init = (host, port, timeout)
+                self.request_args = ()
+                self.closed = False
+                connections.append(self)
+
+            def connect(self) -> None:
+                return None
+
+            def request(self, *args: object, **kwargs: object) -> None:
+                self.request_args = (args, kwargs)
+
+            def getresponse(self) -> Response:
+                return Response()
+
+            def close(self) -> None:
+                self.closed = True
+
+        request = OllamaHttpRequest(
+            "POST",
+            "http://[::1]:11434/api/generate?format=json",
+            {"Host": "localhost:11434", "Content-Type": "application/json"},
+            b'{"synthetic": "request"}',
+            3.5,
+        )
+        with patch("honeymoney.ollama.http.client.HTTPConnection", Connection):
+            response = _default_sender(request)
+
+        [connection] = connections
+        self.assertEqual(connection.init, ("::1", 11434, 3.5))
+        self.assertEqual(
+            connection.request_args,
+            (
+                ("POST", "/api/generate?format=json"),
+                {
+                    "body": b'{"synthetic": "request"}',
+                    "headers": {
+                        "Host": "localhost:11434",
+                        "Content-Type": "application/json",
+                    },
+                },
+            ),
+        )
+        self.assertTrue(connection.closed)
+        self.assertEqual(response.status, 201)
+        self.assertEqual(response.reason, "Created")
+        self.assertEqual(response.headers["X-Synthetic"], "yes")
+        self.assertEqual(response.body, b'{"synthetic": "response"}')
+
+    def test_default_sender_marks_only_connect_phase_failures(self) -> None:
+        class Connection:
+            failure_phase = "connect"
+            failure: Exception = TimeoutError("synthetic connect timeout")
+
+            def __init__(self, host: str, port: int, timeout: float) -> None:
+                del host, port, timeout
+
+            def connect(self) -> None:
+                if self.failure_phase == "connect":
+                    raise self.failure
+
+            def request(self, *args: object, **kwargs: object) -> None:
+                del args, kwargs
+
+            def getresponse(self) -> object:
+                if self.failure_phase == "headers":
+                    raise self.failure
+
+                class Response:
+                    status = 200
+                    reason = "OK"
+
+                    def getheaders(self) -> list[tuple[str, str]]:
+                        return []
+
+                    def read(inner_self) -> bytes:
+                        del inner_self
+                        raise self.failure
+
+                return Response()
+
+            def close(self) -> None:
+                return None
+
+        request = OllamaHttpRequest(
+            "POST",
+            "http://127.0.0.1:11434/api/generate",
+            {"Host": "localhost:11434"},
+            b'{"synthetic": "payload"}',
+            1.0,
+        )
+        with patch("honeymoney.ollama.http.client.HTTPConnection", Connection):
+            with self.assertRaises(_OllamaConnectFailure):
+                _default_sender(request)
+
+            for phase, failure in (
+                ("headers", TimeoutError("synthetic response header timeout")),
+                ("body", ConnectionResetError("synthetic response body reset")),
+            ):
+                with self.subTest(phase=phase):
+                    Connection.failure_phase = phase
+                    Connection.failure = failure
+                    with self.assertRaises(type(failure)):
+                        _default_sender(request)
+
     def test_loopback_hosts_are_pinned_before_sending(self) -> None:
         cases = [
             ("localhost", resolved("127.0.0.1", "::1"), "127.0.0.1"),
@@ -67,7 +189,7 @@ class OllamaTransportTest(unittest.TestCase):
         def sender(request: OllamaHttpRequest) -> OllamaHttpResponse:
             sent.append(request)
             if request.url.startswith("http://[::1]"):
-                raise urllib.error.URLError(
+                raise _OllamaConnectFailure(
                     ConnectionRefusedError("synthetic IPv6 listener is absent")
                 )
             return OllamaHttpResponse(200, "OK", {}, b"{}")
@@ -108,7 +230,7 @@ class OllamaTransportTest(unittest.TestCase):
                 def sender(request: OllamaHttpRequest) -> OllamaHttpResponse:
                     sent.append(request)
                     if request.url.startswith("http://[::1]"):
-                        raise failure
+                        raise _OllamaConnectFailure(failure)
                     return OllamaHttpResponse(200, "OK", {}, b"{}")
 
                 body = LoopbackOllamaTransport(
@@ -138,7 +260,7 @@ class OllamaTransportTest(unittest.TestCase):
         def sender(request: OllamaHttpRequest) -> OllamaHttpResponse:
             sent.append(request)
             if request.url.startswith("http://[::1]"):
-                raise urllib.error.URLError(
+                raise _OllamaConnectFailure(
                     ConnectionRefusedError("synthetic IPv6 listener is absent")
                 )
             return OllamaHttpResponse(
@@ -162,6 +284,39 @@ class OllamaTransportTest(unittest.TestCase):
                 "http://127.0.0.1:11434/api/tags",
             ],
         )
+
+    def test_response_timeout_and_reset_do_not_retry_generation(self) -> None:
+        failures = [
+            TimeoutError("synthetic response timed out"),
+            ConnectionResetError("synthetic response was reset"),
+        ]
+        for failure in failures:
+            with self.subTest(failure=type(failure).__name__):
+                sent = []
+
+                def sender(request: OllamaHttpRequest) -> OllamaHttpResponse:
+                    sent.append(request)
+                    raise failure
+
+                transport = LoopbackOllamaTransport(
+                    resolver=resolved("::1", "127.0.0.1"), sender=sender
+                )
+
+                with self.assertRaises(type(failure)):
+                    transport.request(
+                        OllamaHttpRequest(
+                            "POST",
+                            "http://localhost:11434/api/generate",
+                            {"Content-Type": "application/json"},
+                            b'{"synthetic": "payload"}',
+                            1.0,
+                        )
+                    )
+
+                self.assertEqual(
+                    [request.url for request in sent],
+                    ["http://[::1]:11434/api/generate"],
+                )
 
     def test_first_working_address_is_used_once_for_generation_and_model_listing(
         self,

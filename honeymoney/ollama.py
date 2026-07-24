@@ -1,13 +1,12 @@
 from __future__ import annotations
 
-import errno
+import http.client
 import ipaddress
 import json
 import socket
 import threading
 import time
 import urllib.error
-import urllib.request
 from decimal import Decimal, InvalidOperation
 from io import BytesIO
 from typing import Any, Callable, Mapping, NamedTuple
@@ -24,15 +23,6 @@ _TICK_INTERVAL_SECONDS = 1.0
 _DEFAULT_OLLAMA_URL = "http://localhost:11434/api/generate"
 _REDIRECT_STATUSES = {301, 302, 303, 307, 308}
 _MAX_REDIRECTS = 5
-_CONNECTION_FAILURE_ERRNOS = {
-    errno.EADDRNOTAVAIL,
-    errno.ECONNABORTED,
-    errno.ECONNREFUSED,
-    errno.ECONNRESET,
-    errno.EHOSTUNREACH,
-    errno.ENETUNREACH,
-    errno.ETIMEDOUT,
-}
 
 
 class OllamaHttpRequest(NamedTuple):
@@ -55,37 +45,46 @@ class _ValidatedEndpoint(NamedTuple):
     host_header: str
 
 
-class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
-    def redirect_request(self, *args: Any, **kwargs: Any) -> None:
-        return None
+class _OllamaConnectFailure(OSError):
+    """A connection failure known to occur before request transmission."""
+
+    def __init__(self, cause: BaseException) -> None:
+        self.cause = cause
+        super().__init__(str(cause))
 
 
 def _default_sender(request: OllamaHttpRequest) -> OllamaHttpResponse:
-    opener = urllib.request.build_opener(
-        urllib.request.ProxyHandler({}),
-        _NoRedirectHandler(),
-    )
-    wire_request = urllib.request.Request(
-        request.url,
-        data=request.body,
-        headers=request.headers,
-        method=request.method,
+    parsed = urlsplit(request.url)
+    hostname = parsed.hostname
+    if hostname is None:
+        raise ValueError("Pinned Ollama endpoint is missing its host")
+    connection = http.client.HTTPConnection(
+        hostname,
+        parsed.port,
+        timeout=request.timeout,
     )
     try:
-        with opener.open(wire_request, timeout=request.timeout) as response:
-            return OllamaHttpResponse(
-                int(response.status),
-                str(response.reason),
-                dict(response.headers.items()),
-                response.read(),
-            )
-    except urllib.error.HTTPError as error:
-        return OllamaHttpResponse(
-            error.code,
-            str(error.reason),
-            dict(error.headers.items()) if error.headers is not None else {},
-            error.read(),
+        try:
+            connection.connect()
+        except OSError as error:
+            raise _OllamaConnectFailure(error) from error
+
+        target = urlunsplit(("", "", parsed.path or "/", parsed.query, ""))
+        connection.request(
+            request.method,
+            target,
+            body=request.body,
+            headers=request.headers,
         )
+        response = connection.getresponse()
+        return OllamaHttpResponse(
+            int(response.status),
+            str(response.reason),
+            dict(response.getheaders()),
+            response.read(),
+        )
+    finally:
+        connection.close()
 
 
 class LoopbackOllamaTransport:
@@ -148,10 +147,8 @@ class LoopbackOllamaTransport:
             pinned = request._replace(url=pinned_url, headers=headers)
             try:
                 return self._sender(pinned)
-            except Exception as error:
-                if index == len(endpoint.pinned_urls) - 1 or not _is_connection_failure(
-                    error
-                ):
+            except _OllamaConnectFailure:
+                if index == len(endpoint.pinned_urls) - 1:
                     raise
         raise AssertionError("validated address loop accounting failed")
 
@@ -220,25 +217,6 @@ def validate_ollama_endpoint(
             urlunsplit(("http", pinned_netloc, parsed.path or "/", parsed.query, ""))
         )
     return _ValidatedEndpoint(tuple(pinned_urls), parsed.netloc)
-
-
-def _is_connection_failure(error: Exception) -> bool:
-    if isinstance(error, urllib.error.HTTPError):
-        return False
-    if isinstance(error, urllib.error.URLError):
-        reason = error.reason
-        return isinstance(reason, BaseException) and _is_connection_failure(reason)
-    if isinstance(
-        error,
-        (
-            ConnectionAbortedError,
-            ConnectionRefusedError,
-            ConnectionResetError,
-            TimeoutError,
-        ),
-    ):
-        return True
-    return isinstance(error, OSError) and error.errno in _CONNECTION_FAILURE_ERRNOS
 
 
 def _header(headers: Mapping[str, str], name: str) -> str:
