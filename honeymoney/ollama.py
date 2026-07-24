@@ -41,7 +41,7 @@ class OllamaHttpResponse(NamedTuple):
 
 
 class _ValidatedEndpoint(NamedTuple):
-    pinned_url: str
+    pinned_urls: tuple[str, ...]
     host_header: str
 
 
@@ -98,8 +98,7 @@ class LoopbackOllamaTransport:
             endpoint = validate_ollama_endpoint(current.url, resolver=self._resolver)
             headers = dict(current.headers)
             headers["Host"] = endpoint.host_header
-            pinned = current._replace(url=endpoint.pinned_url, headers=headers)
-            response = self._sender(pinned)
+            response = self._send_to_validated_address(current, endpoint, headers)
             if response.status not in _REDIRECT_STATUSES:
                 if response.status >= 400:
                     raise urllib.error.HTTPError(
@@ -129,13 +128,30 @@ class LoopbackOllamaTransport:
             )
         raise AssertionError("redirect loop accounting failed")
 
+    def _send_to_validated_address(
+        self,
+        request: OllamaHttpRequest,
+        endpoint: _ValidatedEndpoint,
+        headers: dict[str, str],
+    ) -> OllamaHttpResponse:
+        for index, pinned_url in enumerate(endpoint.pinned_urls):
+            pinned = request._replace(url=pinned_url, headers=headers)
+            try:
+                return self._sender(pinned)
+            except Exception as error:
+                if index == len(endpoint.pinned_urls) - 1 or not _is_connection_failure(
+                    error
+                ):
+                    raise
+        raise AssertionError("validated address loop accounting failed")
+
 
 def validate_ollama_endpoint(
     url: str,
     *,
     resolver: Callable[..., list[tuple[Any, ...]]] | None = None,
 ) -> _ValidatedEndpoint:
-    """Validate and pin an HTTP Ollama URL to one resolved loopback address."""
+    """Validate an HTTP Ollama URL and pin it to resolved loopback addresses."""
     try:
         parsed = urlsplit(url)
         port = parsed.port
@@ -186,12 +202,28 @@ def validate_ollama_endpoint(
     if not addresses:
         raise ValueError("Ollama endpoint did not resolve to a usable loopback address")
 
-    selected = addresses[0]
-    pinned_host = f"[{selected}]" if ":" in selected else selected
-    pinned_netloc = f"{pinned_host}:{port}" if port is not None else pinned_host
-    path = parsed.path or "/"
-    pinned_url = urlunsplit(("http", pinned_netloc, path, parsed.query, ""))
-    return _ValidatedEndpoint(pinned_url, parsed.netloc)
+    pinned_urls = []
+    for address in addresses:
+        pinned_host = f"[{address}]" if ":" in address else address
+        pinned_netloc = f"{pinned_host}:{port}" if port is not None else pinned_host
+        pinned_urls.append(
+            urlunsplit(("http", pinned_netloc, parsed.path or "/", parsed.query, ""))
+        )
+    return _ValidatedEndpoint(tuple(pinned_urls), parsed.netloc)
+
+
+def _is_connection_failure(error: Exception) -> bool:
+    if isinstance(error, urllib.error.URLError):
+        reason = error.reason
+        return isinstance(reason, BaseException) and _is_connection_failure(reason)
+    return isinstance(
+        error,
+        (
+            ConnectionAbortedError,
+            ConnectionRefusedError,
+            ConnectionResetError,
+        ),
+    )
 
 
 def _header(headers: Mapping[str, str], name: str) -> str:

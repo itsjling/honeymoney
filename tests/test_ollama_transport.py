@@ -1,10 +1,12 @@
 import socket
 import unittest
+import urllib.error
 
 from honeymoney.ollama import (
     LoopbackOllamaTransport,
     OllamaHttpRequest,
     OllamaHttpResponse,
+    list_ollama_models,
 )
 
 
@@ -57,6 +59,123 @@ class OllamaTransportTest(unittest.TestCase):
                 )
                 self.assertEqual(sent[0].headers["Host"], f"{host}:11434")
                 self.assertEqual(sent[0].timeout, 3.5)
+
+    def test_retries_the_next_validated_address_after_connection_refused(self) -> None:
+        sent = []
+
+        def sender(request: OllamaHttpRequest) -> OllamaHttpResponse:
+            sent.append(request)
+            if request.url.startswith("http://[::1]"):
+                raise urllib.error.URLError(
+                    ConnectionRefusedError("synthetic IPv6 listener is absent")
+                )
+            return OllamaHttpResponse(200, "OK", {}, b"{}")
+
+        body = LoopbackOllamaTransport(
+            resolver=resolved("::1", "127.0.0.1"), sender=sender
+        ).request(
+            OllamaHttpRequest(
+                "POST",
+                "http://localhost:11434/api/generate",
+                {"Content-Type": "application/json"},
+                b"{}",
+                1.0,
+            )
+        )
+
+        self.assertEqual(body, b"{}")
+        self.assertEqual(
+            [request.url for request in sent],
+            [
+                "http://[::1]:11434/api/generate",
+                "http://127.0.0.1:11434/api/generate",
+            ],
+        )
+        self.assertTrue(
+            all(request.headers["Host"] == "localhost:11434" for request in sent)
+        )
+
+    def test_first_working_address_is_used_once_for_generation_and_model_listing(
+        self,
+    ) -> None:
+        sent = []
+
+        def sender(request: OllamaHttpRequest) -> OllamaHttpResponse:
+            sent.append(request)
+            if request.url.endswith("/api/tags"):
+                return OllamaHttpResponse(
+                    200, "OK", {}, b'{"models": [{"name": "synthetic:latest"}]}'
+                )
+            return OllamaHttpResponse(200, "OK", {}, b"{}")
+
+        transport = LoopbackOllamaTransport(
+            resolver=resolved("127.0.0.1", "::1"), sender=sender
+        )
+        self.assertEqual(
+            list_ollama_models(
+                {"url": "http://localhost:11434/api/generate"}, transport=transport
+            ),
+            ["synthetic:latest"],
+        )
+        self.assertEqual(
+            transport.request(
+                OllamaHttpRequest(
+                    "POST",
+                    "http://localhost:11434/api/generate",
+                    {"Content-Type": "application/json"},
+                    b"{}",
+                    1.0,
+                )
+            ),
+            b"{}",
+        )
+        self.assertEqual(
+            [request.url for request in sent],
+            [
+                "http://127.0.0.1:11434/api/tags",
+                "http://127.0.0.1:11434/api/generate",
+            ],
+        )
+
+    def test_ipv6_only_server_is_used(self) -> None:
+        sent = []
+        transport = LoopbackOllamaTransport(
+            resolver=resolved("::1"),
+            sender=lambda request: (
+                sent.append(request) or OllamaHttpResponse(200, "OK", {}, b"{}")
+            ),
+        )
+
+        self.assertEqual(
+            transport.request(
+                OllamaHttpRequest(
+                    "GET", "http://localhost:11434/api/tags", {}, None, 1.0
+                )
+            ),
+            b"{}",
+        )
+        self.assertEqual(sent[0].url, "http://[::1]:11434/api/tags")
+
+    def test_http_errors_do_not_try_another_validated_address(self) -> None:
+        sent = []
+        transport = LoopbackOllamaTransport(
+            resolver=resolved("::1", "127.0.0.1"),
+            sender=lambda request: (
+                sent.append(request)
+                or OllamaHttpResponse(503, "Service Unavailable", {}, b"synthetic")
+            ),
+        )
+
+        with self.assertRaisesRegex(urllib.error.HTTPError, "503"):
+            transport.request(
+                OllamaHttpRequest(
+                    "GET", "http://localhost:11434/api/tags", {}, None, 1.0
+                )
+            )
+
+        self.assertEqual(
+            [request.url for request in sent], ["http://[::1]:11434/api/tags"]
+        )
 
     def test_non_loopback_and_malformed_urls_fail_before_sending(self) -> None:
         cases = [
