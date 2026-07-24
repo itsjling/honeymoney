@@ -1,3 +1,4 @@
+import errno
 import socket
 import unittest
 import urllib.error
@@ -93,6 +94,73 @@ class OllamaTransportTest(unittest.TestCase):
         )
         self.assertTrue(
             all(request.headers["Host"] == "localhost:11434" for request in sent)
+        )
+
+    def test_retries_after_timeout_and_unreachable_connection_failures(self) -> None:
+        cases = [
+            TimeoutError("synthetic connection timed out"),
+            OSError(errno.EHOSTUNREACH, "synthetic host is unreachable"),
+        ]
+        for failure in cases:
+            with self.subTest(failure=type(failure).__name__):
+                sent = []
+
+                def sender(request: OllamaHttpRequest) -> OllamaHttpResponse:
+                    sent.append(request)
+                    if request.url.startswith("http://[::1]"):
+                        raise failure
+                    return OllamaHttpResponse(200, "OK", {}, b"{}")
+
+                body = LoopbackOllamaTransport(
+                    resolver=resolved("::1", "127.0.0.1"), sender=sender
+                ).request(
+                    OllamaHttpRequest(
+                        "GET",
+                        "http://localhost:11434/api/tags",
+                        {},
+                        None,
+                        1.0,
+                    )
+                )
+
+                self.assertEqual(body, b"{}")
+                self.assertEqual(
+                    [request.url for request in sent],
+                    [
+                        "http://[::1]:11434/api/tags",
+                        "http://127.0.0.1:11434/api/tags",
+                    ],
+                )
+
+    def test_model_listing_retries_the_next_validated_address(self) -> None:
+        sent = []
+
+        def sender(request: OllamaHttpRequest) -> OllamaHttpResponse:
+            sent.append(request)
+            if request.url.startswith("http://[::1]"):
+                raise urllib.error.URLError(
+                    ConnectionRefusedError("synthetic IPv6 listener is absent")
+                )
+            return OllamaHttpResponse(
+                200, "OK", {}, b'{"models": [{"name": "synthetic:latest"}]}'
+            )
+
+        transport = LoopbackOllamaTransport(
+            resolver=resolved("::1", "127.0.0.1"), sender=sender
+        )
+
+        self.assertEqual(
+            list_ollama_models(
+                {"url": "http://localhost:11434/api/generate"}, transport=transport
+            ),
+            ["synthetic:latest"],
+        )
+        self.assertEqual(
+            [request.url for request in sent],
+            [
+                "http://[::1]:11434/api/tags",
+                "http://127.0.0.1:11434/api/tags",
+            ],
         )
 
     def test_first_working_address_is_used_once_for_generation_and_model_listing(

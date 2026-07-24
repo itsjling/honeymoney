@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import ipaddress
 import json
 import socket
@@ -23,6 +24,15 @@ _TICK_INTERVAL_SECONDS = 1.0
 _DEFAULT_OLLAMA_URL = "http://localhost:11434/api/generate"
 _REDIRECT_STATUSES = {301, 302, 303, 307, 308}
 _MAX_REDIRECTS = 5
+_CONNECTION_FAILURE_ERRNOS = {
+    errno.EADDRNOTAVAIL,
+    errno.ECONNABORTED,
+    errno.ECONNREFUSED,
+    errno.ECONNRESET,
+    errno.EHOSTUNREACH,
+    errno.ENETUNREACH,
+    errno.ETIMEDOUT,
+}
 
 
 class OllamaHttpRequest(NamedTuple):
@@ -213,17 +223,22 @@ def validate_ollama_endpoint(
 
 
 def _is_connection_failure(error: Exception) -> bool:
+    if isinstance(error, urllib.error.HTTPError):
+        return False
     if isinstance(error, urllib.error.URLError):
         reason = error.reason
         return isinstance(reason, BaseException) and _is_connection_failure(reason)
-    return isinstance(
+    if isinstance(
         error,
         (
             ConnectionAbortedError,
             ConnectionRefusedError,
             ConnectionResetError,
+            TimeoutError,
         ),
-    )
+    ):
+        return True
+    return isinstance(error, OSError) and error.errno in _CONNECTION_FAILURE_ERRNOS
 
 
 def _header(headers: Mapping[str, str], name: str) -> str:
