@@ -13,9 +13,9 @@
       "embedded_content_reviewed": true,
       "metadata_reviewed": true,
       "page_count": 2,
-      "sha256": "869ef4dc98dc3bb740115279d6151ab9de9e9c7ecc4e4aba1c9374aa63fbcc8e",
+      "sha256": "f922601d33a815b9a54cb0783695468a3200ef672907f5dc7f264f3b000db7b6",
       "visible_text_reviewed": true,
-      "visible_text_sha256": "90c5b4a8e3284d187454204ef072a6c03bf447b19e83ff6a55695748e2ef292b"
+      "visible_text_sha256": "0da1972efdd575772b95ce43151bfa1637609b87b814281fdb6815081573892f"
     },
     "hsbc_hk_credit_card_pdf/footer_boundary": {
       "contains_private_data": false,
@@ -31,9 +31,9 @@
       "embedded_content_reviewed": true,
       "metadata_reviewed": true,
       "page_count": 3,
-      "sha256": "c2baeb460f11585bf5fd692ed2856744cb69f6a91f7b3f325c11ecb7219c746e",
+      "sha256": "dfb4d9c480e0ec07ba8417ce3d8b374fb2412504fe7a5d564b2fb515a39d097b",
       "visible_text_reviewed": true,
-      "visible_text_sha256": "6ced38048023e6adf1967609b86f4a185bf422dd66c6b7fe36959aa70794e315"
+      "visible_text_sha256": "4bce1023c4f64b432d2f7684f808433a07af90ea6564d44bc411fbaa14c4b275"
     },
     "mox_bank_pdf/accepted_statement": {
       "contains_private_data": false,
@@ -49,9 +49,9 @@
       "embedded_content_reviewed": true,
       "metadata_reviewed": true,
       "page_count": 1,
-      "sha256": "7af90d8e388e2c6f9184443d0933f26b3c56ececa6d44e914ff7695f19d5bbc5",
+      "sha256": "cd72fae27cb22f240e0452b2785c883ded482c65d98f5281a53fb8f988f71b7a",
       "visible_text_reviewed": true,
-      "visible_text_sha256": "0b0a710f82421b48a36e20c6fa97252d3f775c3908457cfa823f39981d85314e"
+      "visible_text_sha256": "9913c677ea1751ad63026a895176676b8907df22145821625e10168dd7ccfdd6"
     }
   }
 }

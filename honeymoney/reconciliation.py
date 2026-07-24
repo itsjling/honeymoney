@@ -303,33 +303,74 @@ def _row_date(row: dict[str, str]) -> date | None:
 def _balance_reconciliation(
     rows: list[dict[str, str]],
 ) -> dict[str, dict[str, Any]]:
-    groups: dict[tuple[str, str], list[dict[str, str]]] = {}
+    groups: dict[tuple[str, str, str, str], list[dict[str, str]]] = {}
     for row in rows:
         account_id = row.get("account_id", "")
         if not account_id:
             continue
-        groups.setdefault((account_id, row.get("source_file", "")), []).append(row)
+        source_id = row.get("source_id", "").strip()
+        source_kind = "source_id" if source_id else "source_file"
+        source_value = source_id or row.get("source_file", "")
+        posted_currency = row.get("posted_currency", "").strip().upper()
+        groups.setdefault(
+            (account_id, source_kind, source_value, posted_currency), []
+        ).append(row)
 
     accounts: dict[str, dict[str, Any]] = {}
-    for (account_id, source_file), statement_rows in sorted(groups.items()):
-        opening = _first_decimal(statement_rows, "statement_opening_balance")
-        closing = _first_decimal(statement_rows, "statement_closing_balance")
+    for (
+        account_id,
+        _source_kind,
+        _source_value,
+        posted_currency,
+    ), statement_rows in sorted(groups.items()):
+        source_files = sorted(
+            {
+                row.get("source_file", "")
+                for row in statement_rows
+                if row.get("source_file", "")
+            }
+        )
         statement: dict[str, Any] = {
-            "source_file": source_file,
+            "source_file": source_files[0] if source_files else "",
+            "posted_currency": posted_currency,
             "status": "unavailable",
         }
-        if opening is not None and closing is not None:
+        opening, opening_problem = _statement_balance(
+            statement_rows, "statement_opening_balance", "Opening"
+        )
+        closing, closing_problem = _statement_balance(
+            statement_rows, "statement_closing_balance", "Closing"
+        )
+        if opening_problem or closing_problem:
+            problems = [
+                problem for problem in (opening_problem, closing_problem) if problem
+            ]
+            if problems == [
+                "Opening balance is unavailable.",
+                "Closing balance is unavailable.",
+            ]:
+                statement["reason"] = "Opening and closing balances are unavailable."
+            else:
+                statement["reason"] = " ".join(problems)
+        elif not posted_currency:
+            statement["reason"] = "Posted currency is unavailable."
+        else:
             amounts = [
                 _amount_from_field(row, "posted_amount") for row in statement_rows
             ]
-            if all(amount is not None for amount in amounts):
+            if any(amount is None for amount in amounts):
+                statement["reason"] = "One or more posted amounts are unavailable."
+            else:
+                assert opening is not None
+                assert closing is not None
                 calculated = opening + sum(
-                    (amount for amount in amounts if amount is not None), Decimal("0")
+                    (amount for amount in amounts if amount is not None),
+                    Decimal("0"),
                 )
                 difference = closing - calculated
                 statement.update(
                     {
-                        "status": "reconciled" if difference == 0 else "difference",
+                        "status": "matched" if difference == 0 else "mismatched",
                         "opening_balance": _decimal_text(opening),
                         "closing_balance": _decimal_text(closing),
                         "calculated_closing_balance": _decimal_text(calculated),
@@ -343,19 +384,33 @@ def _balance_reconciliation(
 
     for account in accounts.values():
         statuses = {statement["status"] for statement in account["statements"]}
-        if "difference" in statuses:
-            account["status"] = "difference"
-        elif statuses == {"reconciled"}:
-            account["status"] = "reconciled"
+        if "mismatched" in statuses:
+            account["status"] = "mismatched"
+        elif statuses == {"matched"}:
+            account["status"] = "matched"
     return accounts
 
 
-def _first_decimal(rows: list[dict[str, str]], field: str) -> Decimal | None:
-    for row in rows:
-        value = _amount_from_field(row, field)
-        if value is not None:
-            return value
-    return None
+def _statement_balance(
+    rows: list[dict[str, str]], field: str, label: str
+) -> tuple[Decimal | None, str]:
+    raw_values = [
+        row.get(field, "").strip() for row in rows if row.get(field, "").strip()
+    ]
+    if not raw_values:
+        return None, f"{label} balance is unavailable."
+    values: set[Decimal] = set()
+    for raw_value in raw_values:
+        try:
+            value = Decimal(raw_value)
+        except (InvalidOperation, ValueError):
+            return None, f"{label} balance is invalid."
+        if not value.is_finite():
+            return None, f"{label} balance is invalid."
+        values.add(value)
+    if len(values) > 1:
+        return None, f"{label} balances conflict."
+    return next(iter(values)), ""
 
 
 def _amount_from_field(row: dict[str, str], field: str) -> Decimal | None:

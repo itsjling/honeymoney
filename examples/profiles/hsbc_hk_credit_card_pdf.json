@@ -31,6 +31,14 @@
       "Amount (HKD)"
     ],
     "required_columns": ["Post date", "Trans date", "Description of transaction", "Amount (HKD)"],
+    "balance_mappings": [
+      {
+        "account_id": "hsbc_hk_credit_card",
+        "currency": "HKD",
+        "opening_regex": "^PREVIOUS BALANCE\\s+(?P<balance>[+-]?\\d[\\d,]*\\.\\d{2})$",
+        "closing_regex": "^CLOSING BALANCE\\s+(?P<balance>[+-]?\\d[\\d,]*\\.\\d{2})$"
+      }
+    ],
     "columns": {
       "transaction_date": "Trans date",
       "posting_date": "Post date",

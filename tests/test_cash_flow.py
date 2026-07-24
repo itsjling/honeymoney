@@ -9,6 +9,7 @@ import unittest
 from pathlib import Path
 
 from honeymoney.identity_state import LEGACY_CATEGORIZED_COLUMNS
+from honeymoney.reconciliation import reconcile_ledger
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -768,6 +769,7 @@ class CashFlowWorkflowTest(unittest.TestCase):
                         "account_id": "bank_balanced",
                         "account_type": "bank",
                         "posted_amount": "10.00",
+                        "posted_currency": "HKD",
                         "amount_hkd": "10.00",
                         "statement_opening_balance": "100.00",
                         "source_file": "synthetic.csv",
@@ -779,6 +781,7 @@ class CashFlowWorkflowTest(unittest.TestCase):
                         "account_id": "bank_balanced",
                         "account_type": "bank",
                         "posted_amount": "20.00",
+                        "posted_currency": "HKD",
                         "amount_hkd": "20.00",
                         "statement_closing_balance": "130.00",
                         "source_file": "synthetic.csv",
@@ -790,6 +793,7 @@ class CashFlowWorkflowTest(unittest.TestCase):
                         "account_id": "bank_unavailable",
                         "account_type": "bank",
                         "posted_amount": "5.00",
+                        "posted_currency": "HKD",
                         "amount_hkd": "5.00",
                         "source_file": "synthetic.csv",
                         "category": "Other",
@@ -800,6 +804,7 @@ class CashFlowWorkflowTest(unittest.TestCase):
                         "account_id": "bank_difference",
                         "account_type": "bank",
                         "posted_amount": "5.00",
+                        "posted_currency": "HKD",
                         "amount_hkd": "5.00",
                         "statement_opening_balance": "50.00",
                         "statement_closing_balance": "60.00",
@@ -813,15 +818,89 @@ class CashFlowWorkflowTest(unittest.TestCase):
 
             self.assertEqual(result.returncode, 0, result.stderr)
             balances = json.loads(result.stdout)["data"]["balance_reconciliation"]
-            self.assertEqual(balances["bank_balanced"]["status"], "reconciled")
+            self.assertEqual(balances["bank_balanced"]["status"], "matched")
             self.assertEqual(
                 balances["bank_balanced"]["statements"][0]["difference"], "0.00"
             )
             self.assertEqual(balances["bank_unavailable"]["status"], "unavailable")
-            self.assertEqual(balances["bank_difference"]["status"], "difference")
+            self.assertEqual(
+                balances["bank_unavailable"]["statements"][0]["reason"],
+                "Opening and closing balances are unavailable.",
+            )
+            self.assertEqual(balances["bank_difference"]["status"], "mismatched")
             self.assertEqual(
                 balances["bank_difference"]["statements"][0]["difference"], "5.00"
             )
+
+    def test_balance_reconciliation_separates_source_identity_and_currency(
+        self,
+    ) -> None:
+        rows = [
+            {
+                "account_id": "multi",
+                "source_id": "source_a",
+                "source_file": "same.pdf",
+                "posted_currency": "HKD",
+                "posted_amount": "10.00",
+                "statement_opening_balance": "100.00",
+                "statement_closing_balance": "110.00",
+            },
+            {
+                "account_id": "multi",
+                "source_id": "source_a",
+                "source_file": "same.pdf",
+                "posted_currency": "USD",
+                "posted_amount": "-5.00",
+                "statement_opening_balance": "50.00",
+                "statement_closing_balance": "45.00",
+            },
+            {
+                "account_id": "multi",
+                "source_id": "source_b",
+                "source_file": "same.pdf",
+                "posted_currency": "HKD",
+                "posted_amount": "1.00",
+            },
+        ]
+
+        result = reconcile_ledger(rows, {})["balance_reconciliation"]["multi"]
+
+        self.assertEqual(result["status"], "unavailable")
+        self.assertEqual(len(result["statements"]), 3)
+        self.assertEqual(
+            [statement["posted_currency"] for statement in result["statements"]],
+            ["HKD", "USD", "HKD"],
+        )
+        self.assertEqual(
+            [statement["status"] for statement in result["statements"]],
+            ["matched", "matched", "unavailable"],
+        )
+
+    def test_balance_reconciliation_reports_conflicting_values(self) -> None:
+        rows = [
+            {
+                "account_id": "conflict",
+                "source_file": "legacy.pdf",
+                "posted_currency": "HKD",
+                "posted_amount": "1.00",
+                "statement_opening_balance": "10.00",
+                "statement_closing_balance": "11.00",
+            },
+            {
+                "account_id": "conflict",
+                "source_file": "legacy.pdf",
+                "posted_currency": "HKD",
+                "posted_amount": "2.00",
+                "statement_opening_balance": "12.00",
+            },
+        ]
+
+        statement = reconcile_ledger(rows, {})["balance_reconciliation"]["conflict"][
+            "statements"
+        ][0]
+
+        self.assertEqual(statement["status"], "unavailable")
+        self.assertEqual(statement["reason"], "Opening balances conflict.")
 
 
 if __name__ == "__main__":

@@ -22,7 +22,10 @@
       {"text": "DCC", "top": 40, "x0": 137},
       {"text": "FEE-NON-HK", "top": 40, "x0": 156},
       {"text": "MERCHANT", "top": 40, "x0": 209},
-      {"text": "0.08", "top": 40, "x0": 537}
+      {"text": "0.08", "top": 40, "x0": 537},
+      {"text": "CLOSING", "top": 50, "x0": 137},
+      {"text": "BALANCE", "top": 50, "x0": 180},
+      {"text": "4,501.92", "top": 50, "x0": 518}
     ],
     [
       {"text": "Supplemental", "top": 10, "x0": 60},

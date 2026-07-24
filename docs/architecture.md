@@ -86,6 +86,15 @@ transfer links derived from their existing transaction IDs. Ambiguous candidates
 are never auto-paired. Reports derive old ledgers in memory, and `reconcile`
 provides an explicit inspect/rewrite seam.
 
+PDF profiles may map statement opening and closing balance lines. The importer
+scans raw word or table lines, then puts each balance on the first or last
+transaction for the mapped account and posted currency. It never turns a
+balance line into a transaction. Reconciliation groups rows by source identity,
+account, and posted currency. It uses `source_file` only for legacy rows that
+lack `source_id`. Each statement reports `matched`, `mismatched`, or
+`unavailable`; unavailable results include a reason. Conflicting balance values
+also make the result unavailable.
+
 ## Transaction identity
 
 Identity v2 gives each resolved ledger row four public fields, directly after

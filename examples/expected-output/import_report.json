@@ -38,6 +38,8 @@
       "starter_csv": {
         "statements": [
           {
+            "posted_currency": "HKD",
+            "reason": "Opening and closing balances are unavailable.",
             "source_file": "transactions.csv",
             "status": "unavailable"
           }

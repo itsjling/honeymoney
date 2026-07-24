@@ -21,11 +21,14 @@ from honeymoney.identity import (
     resolve_batch,
     source_namespace_id,
 )
-from honeymoney.importers import _import_pdf, _import_transactions
+from honeymoney.importers import _import_pdf, _import_transactions, _validate_profile
+from honeymoney.reconciliation import reconcile_ledger
 from tests.golden_helpers import (
     FIXTURE_DIR,
     assert_import_case,
     assert_pdf_byte_import_case,
+    base_config,
+    import_profile_case,
     load_json,
     load_profile,
     starter_profile,
@@ -126,6 +129,102 @@ class AccountSemanticsTest(unittest.TestCase):
             with self.subTest(profile=profile_name):
                 self.assertEqual(
                     load_profile(profile_name)["account_type"], account_type
+                )
+
+
+class PdfBalanceMappingValidationTest(unittest.TestCase):
+    def test_profiles_without_balance_mappings_remain_valid(self) -> None:
+        profile = load_profile("mox_bank_pdf.json")
+        profile["pdf"].pop("balance_mappings", None)
+
+        _validate_profile(profile, Path("profile.json"), base_config())
+
+    def test_balance_mapping_requires_paired_balance_regexes(self) -> None:
+        profile = load_profile("mox_bank_pdf.json")
+        profile["pdf"]["balance_mappings"] = [
+            {
+                "account_id": "mox_bank_main",
+                "currency": "HKD",
+                "opening_regex": r"OPENING (?P<balance>\d+\.\d{2})",
+            }
+        ]
+
+        with self.assertRaisesRegex(
+            ValueError,
+            r"pdf\.balance_mappings\[0\]\.closing_regex must be a non-empty string",
+        ):
+            _validate_profile(profile, Path("profile.json"), base_config())
+
+    def test_balance_mapping_rejects_duplicate_targets(self) -> None:
+        profile = load_profile("mox_bank_pdf.json")
+        mapping = {
+            "account_id": "mox_bank_main",
+            "currency": "HKD",
+            "opening_regex": r"OPENING (?P<balance>\d+\.\d{2})",
+            "closing_regex": r"CLOSING (?P<balance>\d+\.\d{2})",
+        }
+        profile["pdf"]["balance_mappings"] = [mapping, dict(mapping)]
+
+        with self.assertRaisesRegex(
+            ValueError,
+            r"pdf\.balance_mappings\[1\] conflicts with mapping 0",
+        ):
+            _validate_profile(profile, Path("profile.json"), base_config())
+
+    def test_dynamic_currency_mapping_requires_known_section_and_group(self) -> None:
+        profile = load_profile("hsbc_one_pdf.json")
+        profile["pdf"]["balance_mappings"] = [
+            {
+                "section": "Foreign Currency Savings",
+                "currency_group": "currency",
+                "opening_regex": (
+                    r"^(?P<currency>[A-Z]{3}) B/F "
+                    r"(?P<balance>\d+\.\d{2})$"
+                ),
+                "closing_regex": (
+                    r"^(?P<currency>[A-Z]{3}) C/F "
+                    r"(?P<balance>\d+\.\d{2})$"
+                ),
+            }
+        ]
+
+        _validate_profile(profile, Path("profile.json"), base_config())
+
+
+class PdfBalanceReconciliationTest(unittest.TestCase):
+    def test_supported_synthetic_statements_reconcile_by_account_and_currency(
+        self,
+    ) -> None:
+        for profile_id in (
+            "hsbc_one_pdf",
+            "hsbc_hk_credit_card_pdf",
+            "mox_bank_pdf",
+            "mox_credit_card_pdf",
+        ):
+            with self.subTest(profile=profile_id):
+                case_dir = (
+                    FIXTURE_DIR / "import_profiles" / profile_id / "accepted_statement"
+                )
+                rows, warnings = import_profile_case(
+                    load_profile(f"{profile_id}.json"), case_dir
+                )
+
+                self.assertEqual(warnings, [])
+                self.assertFalse(
+                    any(
+                        "balance" in row["original_description"].casefold()
+                        for row in rows
+                    )
+                )
+                report = reconcile_ledger(rows, {})["balance_reconciliation"]
+                self.assertTrue(report)
+                self.assertEqual(
+                    {
+                        statement["status"]
+                        for account in report.values()
+                        for statement in account["statements"]
+                    },
+                    {"matched"},
                 )
 
 
