@@ -43,7 +43,7 @@ def build_local_categorization_memory(
     ledger_by_id = {
         str(row.get("transaction_id", "")): row
         for row in ledger_rows
-        if has_stable_v2_identity(row)
+        if _has_stable_memory_identity(row)
         and IDENTITY_MIGRATION_AMBIGUITY_FLAG not in _flags(row)
     }
     threshold = _review_threshold(config)
@@ -91,7 +91,7 @@ def apply_local_categorization_memory(
     confidence = Decimal(LOCAL_MEMORY_CONFIDENCE)
     policies = category_policies(dict(config))
     for transaction in transactions:
-        if not has_stable_v2_identity(transaction) or transaction.get(
+        if not _has_stable_memory_identity(transaction) or transaction.get(
             "category", ""
         ) not in {"", "Unknown"}:
             continue
@@ -119,6 +119,15 @@ def local_categorization_memory_enabled(config: Mapping[str, object]) -> bool:
     """Return whether the explicit, opt-in setting is enabled."""
     settings = config.get("categorization_memory", {})
     return isinstance(settings, Mapping) and settings.get("enabled") is True
+
+
+def _has_stable_memory_identity(row: Mapping[str, str]) -> bool:
+    return has_stable_v2_identity(row) or (
+        str(row.get("transaction_id", "")).startswith("txn_")
+        and len(str(row.get("transaction_id", ""))) == 36
+        and bool(row.get("canonical_group_id"))
+        and bool(row.get("canonical_slot"))
+    )
 
 
 def local_memory_key(row: Mapping[str, str]) -> _MemoryKey | None:

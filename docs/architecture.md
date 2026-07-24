@@ -13,10 +13,13 @@ config + profiles + statement files
 profile detection and CSV/PDF parsing
                  |
                  v
-normalized rows + batch-wide identity resolution against the ledger and manifest
+normalized source occurrences + identity resolution against the source manifest
                  |
                  v
-deterministic rules -> opt-in local memory -> identity-backed duplicate checks -> structural classification -> optional local Ollama
+exact-overlap multiset canonicalization
+                 |
+                 v
+deterministic rules -> opt-in local memory -> structural classification -> optional local Ollama
                  |
                  v
 validated corrections
@@ -25,13 +28,17 @@ validated corrections
 deterministic flow treatment + cumulative-ledger transfer reconciliation
                  |
                  v
-categorized.csv + review_needed.csv + import_report.json + hidden identity manifest
+categorized.csv + review_needed.csv + import_report.json
++ hidden source occurrences + identity manifest + overlap manifest
                  |
                  v
 status summaries and self-contained HTML reports
 ```
 
-Imports merge into the cumulative ledger by `transaction_id`. The identity
+Imports merge source occurrences by source `transaction_id`. Exact same-account
+occurrences from distinct sources then form canonical multiset slots. The
+public ledger uses stable canonical transaction IDs and never invents pairings
+between repeated equal source rows. The identity
 resolver uses the hidden manifest, not `source_file`, to find sources for
 replacement and reset. `source_file` is display provenance only. Corrections
 are persistent overrides keyed by `transaction_id`; rules and Ollama
@@ -39,8 +46,15 @@ suggestions run before corrections, so reviewed choices win.
 
 ## Filesystem persistence
 
-`categorized.csv` is the authoritative cumulative ledger. `review_needed.csv`
-is regenerated from that ledger whenever the ledger changes, while
+`categorized.csv` is the authoritative canonical cumulative ledger.
+`.honeymoney-source-occurrences.csv` holds active source evidence and retained
+evidence for retired identity records. The identity manifest marks each record
+as active or retired. Only active rows enter canonicalization and statement
+balance checks.
+`.honeymoney-overlap-manifest.json` holds the hidden workspace namespace and
+canonical slot tombstones. `.honeymoney-identity-manifest.json` still owns
+source and record identity. `review_needed.csv` is regenerated from the public
+ledger whenever it changes, while
 `import_report.json` records the last import attempt and is replaced with its
 import generation. Corrections and remembered rules remain independent inputs,
 but operations that change them and the ledger publish them through the same
@@ -61,8 +75,10 @@ absent in the prior generation, preserves existing file permissions, and does
 not include transaction values in diagnostics. Retained state also prevents a
 new operation from silently proceeding when recovery cannot be completed.
 
-Reset derives correction removal from prior ledger rows belonging only to
-sources whose current file report is `processed`. The filtered correction
+Replacement removes obsolete source occurrences, then recomputes canonical
+membership. Reset removes a canonical correction only when every source that
+supports its overlap group belongs to the processed reset batch. A remaining
+source keeps the canonical decision. The filtered correction
 document is held in memory during categorization and is published in the same
 generation as the replacement ledger. Failed and skipped sources therefore
 retain their rows and corrections; a persistence failure restores both inputs
@@ -89,31 +105,37 @@ provides an explicit inspect/rewrite seam.
 PDF profiles may map statement opening and closing balance lines. The importer
 scans raw word or table lines, then puts each balance on the first or last
 transaction for the mapped account and posted currency. It never turns a
-balance line into a transaction. Reconciliation groups rows by source identity,
-account, and posted currency. It uses `source_file` only for legacy rows that
+balance line into a transaction. Statement-balance reconciliation groups hidden
+source occurrences by source identity, account, and posted currency. It uses
+`source_file` only for legacy rows that
 lack `source_id`. The existing `status` field stays `reconciled`, `difference`,
 or `unavailable`. The added `result` field reports `matched`, `mismatched`, or
 `unavailable`; unavailable results include a reason. Conflicting balance values
 add a safe row flag and make the result unavailable.
 
-Duplicate candidates are recomputed over the complete prospective ledger after
-replacement has removed retired source rows. The pure evaluator accepts only
-full identity-v2 rows with a non-empty account, the same identity-v2 record
-fingerprint, and at least two distinct source IDs. See
-[Duplicate candidates](duplicate-candidates.md) for the public match type and
-diagnostic contract.
+Canonical cash-flow and report totals use the public ledger. The maximum
+per-source multiplicity sets the canonical count for each exact overlap group.
+Equal counts consolidate. Different counts keep that maximum, stay pooled, and
+force review. JSON keeps the old duplicate count fields as derived compatibility
+data, while `overlap` is the full provenance contract.
 
 ## Transaction identity
 
-Identity v2 gives each resolved ledger row four public fields, directly after
-`transaction_id`: `source_id`, `source_namespace_id`, `source_revision`, and
-`source_record_id`. A v2 row has all four fields. An unresolved legacy row has
-all four empty. Partial metadata fails validation. New transaction IDs use a
+Identity v2 gives each hidden source-occurrence row four fields: `source_id`,
+`source_namespace_id`, `source_revision`, and `source_record_id`. A v2 source
+row has all four fields. Partial metadata fails validation. New source
+transaction IDs use a
 128-bit, domain-separated digest of the source and record IDs. Source IDs use
 the `src_`, `ns_`, `rev_`, and `rec_` prefixes plus full SHA-256 digests; new
 transaction IDs use `txn_` plus 32 lowercase hexadecimal characters.
-`source_file`, source page, and source row remain display fields and never form
-identity or replacement keys.
+`source_file`, source page, and source row remain source display fields and
+never form identity or replacement keys.
+
+Public canonical rows add `canonical_group_id`, `canonical_slot`,
+`provenance_status`, and `source_occurrence_count` after `transaction_id`.
+Their source identity, source display, and statement-balance fields stay empty.
+Canonical IDs come from a hidden random workspace namespace, the normalized
+record fingerprint, and the abstract slot number.
 
 The resolver runs for the whole input batch before categorization, correction
 application, reconciliation, or any transaction-ID dictionary. It resolves a
@@ -135,7 +157,7 @@ in [`ADR 0001`](adr/0001-stable-transaction-identity.md).
 
 ## Persistence authority and recovery
 
-`categorized.csv` is the authoritative ledger. `review_needed.csv` is a
+`categorized.csv` is the authoritative canonical ledger. `review_needed.csv` is a
 deterministic view of its rows whose `needs_review` value is `true`.
 `import_report.json` is a snapshot derived from the most recent successful
 import; review and correction commands do not rewrite that historical import
@@ -145,10 +167,14 @@ to future imports, but it is not a second ledger.
 The hidden `<categorized.csv parent>/.honeymoney-identity-manifest.json` is the
 authoritative source and record ownership store. It records IDs, hashes,
 allocation locators, and active or retired state, but never source paths,
-statement text, or display values. Ledger rows and the manifest must agree.
+statement text, or display values. Hidden source rows and the identity manifest
+must agree. Retired hidden rows stay out of the public ledger. Canonical rows
+and the overlap manifest must agree.
 The first import writes both, including for a zero-record source. A missing
-manifest can bootstrap only an exact pre-v2 ledger header. Missing v2 state or
-a manifest without its ledger fails closed.
+manifest can bootstrap only an exact pre-v2 ledger header. An exact issue #31
+ledger keeps its old IDs for read-only commands; its first write publishes both
+new hidden files and the canonical public schema in one generation. Any partial
+canonical state fails closed.
 
 The manifest joins every recoverable ledger generation, including import,
 replace, reset, correction, review, reconcile, and recovery. A change that
@@ -163,8 +189,8 @@ changing it.
   CSV/PDF parsing, parser locators, and private source identity inputs.
 - `honeymoney/normalization.py`: pure row/date/amount/text normalization and
   compatibility helpers.
-- `honeymoney/duplicates.py`: pure identity-backed duplicate evaluation,
-  idempotent candidate annotation, and privacy-safe diagnostics.
+- `honeymoney/overlap.py`: canonical multiset slots, hidden overlap-manifest
+  validation, correction projection, and privacy-safe provenance diagnostics.
 - `honeymoney/identity.py`: identity-v2 digests, validation, source and record
   resolution, manifest ownership, and safe identity diagnostics.
 - `honeymoney/identity_state.py`: ledger and manifest loading, bootstrap rules,

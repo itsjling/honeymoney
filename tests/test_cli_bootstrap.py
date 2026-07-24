@@ -7,6 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from honeymoney.identity_state import load_identity_state
 from honeymoney.schema import CATEGORIZED_COLUMNS
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -519,8 +520,10 @@ class CliBootstrapTest(unittest.TestCase):
             self.assertEqual(rows[0]["owner"], "Household")
             self.assertEqual(rows[0]["payment_method"], "Bank Account")
             self.assertEqual(rows[0]["needs_review"], "true")
-            self.assertEqual(rows[0]["source_file"], "transactions.csv")
-            self.assertEqual(rows[0]["source_row"], "2")
+            self.assertEqual(rows[0]["source_file"], "")
+            source_rows = load_identity_state(categorized_path).source_rows
+            self.assertEqual(source_rows[0]["source_file"], "transactions.csv")
+            self.assertEqual(source_rows[0]["source_row"], "2")
 
             self.assertEqual(rows[1]["original_amount"], "20000.00")
             self.assertEqual(rows[1]["amount_hkd"], "20000.00")
@@ -1146,7 +1149,11 @@ class CliBootstrapTest(unittest.TestCase):
             ) as fh:
                 [row] = list(csv.DictReader(fh))
 
-            self.assertEqual(row["source_file"], "single.csv")
+            self.assertEqual(row["source_file"], "")
+            [source_row] = load_identity_state(
+                output_dir / "categorized.csv"
+            ).source_rows
+            self.assertEqual(source_row["source_file"], "single.csv")
             self.assertEqual(row["original_amount"], "-1000.00")
             self.assertEqual(row["original_currency"], "JPY")
             self.assertEqual(row["amount_hkd"], "")
@@ -2595,17 +2602,16 @@ class CliBootstrapTest(unittest.TestCase):
                 check=False,
             )
             self.assertEqual(first_result.returncode, 0, first_result.stderr)
-            with (first_output_dir / "categorized.csv").open(
-                newline="", encoding="utf-8"
-            ) as fh:
-                [first_row] = list(csv.DictReader(fh))
+            first_source_id = load_identity_state(
+                first_output_dir / "categorized.csv"
+            ).source_rows[0]["transaction_id"]
 
             corrections_path = root / "corrections.csv"
             corrections_path.write_text(
                 "\n".join(
                     [
                         "transaction_id,category,owner,payment_method,notes",
-                        f"{first_row['transaction_id']},Shopping,Justin,Credit Card,One-off hardware purchase",
+                        f"{first_source_id},Shopping,Justin,Credit Card,One-off hardware purchase",
                     ]
                 ),
                 encoding="utf-8",
@@ -2718,17 +2724,16 @@ class CliBootstrapTest(unittest.TestCase):
                 check=False,
             )
             self.assertEqual(first_result.returncode, 0, first_result.stderr)
-            with (first_output_dir / "categorized.csv").open(
-                newline="", encoding="utf-8"
-            ) as fh:
-                [first_row] = list(csv.DictReader(fh))
+            first_source_id = load_identity_state(
+                first_output_dir / "categorized.csv"
+            ).source_rows[0]["transaction_id"]
 
             corrections_path = root / "corrections.csv"
             corrections_path.write_text(
                 "\n".join(
                     [
                         "transaction_id,category,needs_review,reason",
-                        f"{first_row['transaction_id']},Other,true,Still need receipt",
+                        f"{first_source_id},Other,true,Still need receipt",
                     ]
                 ),
                 encoding="utf-8",
@@ -3776,9 +3781,12 @@ def open(path):
             self.assertEqual(row["account_id"], "hsbc_hk_checking")
             self.assertEqual(row["merchant"], "PARKNSHOP")
             self.assertEqual(row["amount_hkd"], "-120.50")
-            self.assertEqual(row["source_file"], "statement.pdf")
-            self.assertEqual(row["source_page"], "1")
-            self.assertEqual(row["source_row"], "2")
+            [source_row] = load_identity_state(
+                output_dir / "categorized.csv"
+            ).source_rows
+            self.assertEqual(source_row["source_file"], "statement.pdf")
+            self.assertEqual(source_row["source_page"], "1")
+            self.assertEqual(source_row["source_row"], "2")
             self.assertEqual(row["notes"], "Imported from PDF")
             self.assertEqual(report["files"][0]["status"], "processed")
             self.assertEqual(report["files"][0]["parser"], "pdfplumber")
@@ -4193,8 +4201,11 @@ def open(path):
 
             self.assertEqual(rows[0]["merchant"], "Coffee Shop")
             self.assertEqual(rows[0]["original_amount"], "-88.00")
-            self.assertEqual(rows[0]["source_page"], "1")
-            self.assertEqual(rows[0]["source_row"], "1")
+            source_rows = load_identity_state(
+                output_dir / "categorized.csv"
+            ).source_rows
+            self.assertEqual(source_rows[0]["source_page"], "1")
+            self.assertEqual(source_rows[0]["source_row"], "1")
             self.assertEqual(rows[1]["merchant"], "Refund")
             self.assertEqual(rows[1]["original_amount"], "12.00")
 
@@ -4680,9 +4691,19 @@ def open(path):
                         rows = list(csv.DictReader(fh))
 
                     self.assertEqual(len(rows), len(expected_rows))
-                    for row, expected in zip(rows, expected_rows):
+                    source_rows = load_identity_state(
+                        output_dir / "categorized.csv"
+                    ).source_rows
+                    for row, source_row, expected in zip(
+                        rows, source_rows, expected_rows
+                    ):
                         for field, value in expected.items():
-                            self.assertEqual(row[field], value)
+                            actual = (
+                                source_row[field]
+                                if field in {"source_file", "source_page", "source_row"}
+                                else row[field]
+                            )
+                            self.assertEqual(actual, value)
                     self.assertTrue(
                         all(row["notes"] == "Imported from PDF" for row in rows)
                     )
@@ -4849,8 +4870,11 @@ def open(path):
                 rows = list(csv.DictReader(fh))
 
             self.assertEqual([row["merchant"] for row in rows], ["PARKNSHOP", "SALARY"])
-            self.assertEqual(rows[0]["source_row"], "2")
-            self.assertEqual(rows[1]["source_row"], "2")
+            source_rows = load_identity_state(
+                output_dir / "categorized.csv"
+            ).source_rows
+            self.assertEqual(source_rows[0]["source_row"], "2")
+            self.assertEqual(source_rows[1]["source_row"], "2")
 
     def test_pdf_import_skips_tables_missing_required_columns(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -5381,13 +5405,11 @@ def open(path):
                 check=False,
             )
             self.assertEqual(first_result.returncode, 0, first_result.stderr)
-            with (first_output_dir / "categorized.csv").open(
-                newline="", encoding="utf-8"
-            ) as fh:
-                first_rows = list(csv.DictReader(fh))
             manual_id = next(
                 row["transaction_id"]
-                for row in first_rows
+                for row in load_identity_state(
+                    first_output_dir / "categorized.csv"
+                ).source_rows
                 if row["merchant"] == "MANUAL SHOP"
             )
 
@@ -5437,28 +5459,36 @@ def open(path):
                 review_rows = list(csv.DictReader(fh))
             report = json.loads((final_output_dir / "import_report.json").read_text())
 
-            self.assertEqual(len(rows), 5)
+            self.assertEqual(len(rows), 4)
             self.assertTrue(review_rows)
-            self.assertEqual(report["transaction_count"], 5)
+            self.assertEqual(report["transaction_count"], 4)
+            self.assertEqual(report["source_occurrence_count"], 5)
+            self.assertEqual(report["overlap"]["consolidated_occurrence_count"], 1)
             self.assertEqual(report["ollama"]["status"], "success")
             self.assertEqual(
                 {file["source_file"] for file in report["files"]},
                 {"transactions.csv", "statement.pdf"},
             )
             parksnshop_rows = [row for row in rows if row["merchant"] == "PARKNSHOP"]
-            self.assertEqual(len(parksnshop_rows), 2)
+            self.assertEqual(len(parksnshop_rows), 1)
             for row in parksnshop_rows:
                 self.assertEqual(row["category"], "Groceries")
-                self.assertIn("duplicate_suspected", row["flags"])
+                self.assertEqual(row["provenance_status"], "exact_one_to_one")
             mystery = next(row for row in rows if row["merchant"] == "MYSTERY OLLAMA")
             self.assertEqual(mystery["category"], "Dining")
             self.assertIn("ollama_categorized", mystery["flags"])
             manual = next(row for row in rows if row["merchant"] == "MANUAL SHOP")
-            self.assertEqual(manual["transaction_id"], manual_id)
+            self.assertNotEqual(manual["transaction_id"], manual_id)
             self.assertEqual(manual["category"], "Shopping")
             self.assertEqual(manual["owner"], "Justin")
             self.assertEqual(manual["needs_review"], "true")
-            pdf_row = next(row for row in rows if row["source_file"] == "statement.pdf")
+            pdf_row = next(
+                row
+                for row in load_identity_state(
+                    final_output_dir / "categorized.csv"
+                ).source_rows
+                if row["source_file"] == "statement.pdf"
+            )
             self.assertEqual(pdf_row["notes"], "Imported from PDF")
 
     def _run_single_csv_and_get_transaction_id(

@@ -25,7 +25,10 @@ AMBIGUITY_REASON = "Ambiguous transfer candidates"
 
 
 def reconcile_ledger(
-    rows: list[dict[str, str]], config: dict[str, Any]
+    rows: list[dict[str, str]],
+    config: dict[str, Any],
+    *,
+    statement_rows: list[dict[str, str]] | None = None,
 ) -> dict[str, Any]:
     """Derive cash-flow treatment and pair unique owned-account transfers."""
     window = reconciliation_date_window(config)
@@ -129,7 +132,9 @@ def reconcile_ledger(
         "unresolved_transactions": sum(
             1 for row in rows if row.get("flow_type") == "unresolved"
         ),
-        "balance_reconciliation": _balance_reconciliation(rows),
+        "balance_reconciliation": _balance_reconciliation(
+            statement_rows if statement_rows is not None else rows
+        ),
     }
 
 

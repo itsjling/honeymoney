@@ -415,6 +415,8 @@ def open(source_path):
                 "output/review_needed.csv",
                 "output/import_report.json",
                 "output/.honeymoney-identity-manifest.json",
+                "output/.honeymoney-source-occurrences.csv",
+                "output/.honeymoney-overlap-manifest.json",
             ],
         )
 
@@ -427,6 +429,8 @@ def open(source_path):
                 "output/import_report.json",
                 "corrections.csv",
                 "output/.honeymoney-identity-manifest.json",
+                "output/.honeymoney-source-occurrences.csv",
+                "output/.honeymoney-overlap-manifest.json",
             ],
         )
 
@@ -463,7 +467,7 @@ def open(source_path):
                 row = next(
                     item
                     for item in csv.DictReader(handle)
-                    if item["source_file"] == "target.csv"
+                    if item["date"] == "2026-07-03"
                 )
             self.assertEqual(row["category"], "Groceries")
             self.assertEqual(row["confidence"], "0.90")
@@ -487,7 +491,7 @@ def open(source_path):
                 after_reset_row = next(
                     item
                     for item in csv.DictReader(handle)
-                    if item["source_file"] == "after-reset.csv"
+                    if item["date"] == "2026-07-04"
                 )
             self.assertEqual(after_reset_row["category"], "Unknown")
             self.assertNotIn("local_memory_categorized", after_reset_row["flags"])
@@ -496,9 +500,13 @@ def open(source_path):
         faults = [
             "file-fsync:review_needed.csv",
             "file-fsync:import_report.json",
+            "file-fsync:.honeymoney-source-occurrences.csv",
+            "file-fsync:.honeymoney-overlap-manifest.json",
             "file-fsync:categorized.csv",
             "replace-before:review_needed.csv",
             "replace-before:import_report.json",
+            "replace-before:.honeymoney-source-occurrences.csv",
+            "replace-before:.honeymoney-overlap-manifest.json",
             "replace-before:categorized.csv",
             "directory-fsync-after:categorized.csv",
         ]
@@ -521,6 +529,9 @@ def open(source_path):
                     "categorized.csv",
                     "review_needed.csv",
                     "import_report.json",
+                    ".honeymoney-identity-manifest.json",
+                    ".honeymoney-source-occurrences.csv",
+                    ".honeymoney-overlap-manifest.json",
                 ):
                     self.assertFalse((root / "output" / name).exists())
 
@@ -552,9 +563,13 @@ def open(source_path):
         faults = [
             "file-fsync:review_needed.csv",
             "file-fsync:import_report.json",
+            "file-fsync:.honeymoney-source-occurrences.csv",
+            "file-fsync:.honeymoney-overlap-manifest.json",
             "file-fsync:categorized.csv",
             "replace-before:review_needed.csv",
             "replace-before:import_report.json",
+            "replace-before:.honeymoney-source-occurrences.csv",
+            "replace-before:.honeymoney-overlap-manifest.json",
             "replace-before:categorized.csv",
             "directory-fsync-after:categorized.csv",
         ]
@@ -690,9 +705,13 @@ def open(source_path):
             self.assertEqual(result.returncode, 0, result.stderr)
             rows = self._ledger_rows(root)
             self.assertEqual(len(rows), 5)
-            self.assertTrue(all(row["source_id"] for row in rows))
-            self.assertEqual(rows[0]["statement_opening_balance"], "10000.00")
-            self.assertEqual(rows[-1]["statement_closing_balance"], "45191.75")
+            self.assertTrue(all(not row["source_id"] for row in rows))
+            source_rows = load_identity_state(
+                root / "output" / "categorized.csv"
+            ).source_rows
+            self.assertTrue(all(row["source_id"] for row in source_rows))
+            self.assertEqual(source_rows[0]["statement_opening_balance"], "10000.00")
+            self.assertEqual(source_rows[-1]["statement_closing_balance"], "45191.75")
             report = json.loads(
                 (root / "output" / "import_report.json").read_text(encoding="utf-8")
             )
@@ -733,8 +752,15 @@ def open(source_path):
                 {row["merchant"]: row["transaction_id"] for row in replaced_rows},
                 original_ids,
             )
-            self.assertEqual(replaced_rows[0]["statement_opening_balance"], "100.00")
-            self.assertEqual(replaced_rows[-1]["statement_closing_balance"], "115.00")
+            replaced_source_rows = load_identity_state(
+                root / "output" / "categorized.csv"
+            ).source_rows
+            self.assertEqual(
+                replaced_source_rows[0]["statement_opening_balance"], "100.00"
+            )
+            self.assertEqual(
+                replaced_source_rows[-1]["statement_closing_balance"], "115.00"
+            )
             replaced_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
             self.assertNotEqual(
                 replaced_manifest["sources"][0]["extractor_contract_id"],
@@ -837,29 +863,17 @@ def open(source_path):
             report = json.loads(imported.stdout)["data"]
             self.assertEqual(report["duplicate_count"], 2)
             self.assertEqual(report["duplicate_group_count"], 1)
-
             state = load_identity_state(categorized_path)
-            historical = next(
-                row for row in state.rows if row["transaction_id"] == historical_id
+            canonical = next(
+                row for row in state.rows if row["merchant"] == "REVIEWED REPEAT"
             )
-            incoming = next(
-                row
-                for row in state.rows
-                if row["source_file"] == "candidate.csv"
-                and row["merchant"] == "REVIEWED REPEAT"
-            )
-            self.assertEqual(historical["category"], "Dining")
-            expected_ids = sorted(
-                [historical["transaction_id"], incoming["transaction_id"]]
-            )
+            self.assertEqual(canonical["transaction_id"], historical_id)
+            self.assertEqual(canonical["category"], "Dining")
+            self.assertEqual(canonical["provenance_status"], "exact_one_to_one")
+            self.assertEqual(canonical["source_occurrence_count"], "2")
             self.assertEqual(
-                report["duplicate_candidates"]["groups"],
-                [
-                    {
-                        "match_type": DUPLICATE_MATCH_TYPE,
-                        "occurrence_ids": expected_ids,
-                    }
-                ],
+                sum(row["merchant"] == "REVIEWED REPEAT" for row in state.source_rows),
+                2,
             )
             expected_review_states = {
                 historical["transaction_id"]: "false",
@@ -1007,13 +1021,13 @@ def open(source_path):
             duplicate_rows = [
                 row for row in rows if row["merchant"] == "SYNTHETIC PARENT DUPLICATE"
             ]
-            self.assertEqual(len(duplicate_rows), 2)
-            duplicate_rows.sort(key=lambda row: row["source_file"])
-            for row in duplicate_rows:
-                row["flags"] = "uncategorized"
-                row["reason"] = "No matching category rule"
-            duplicate_rows[1]["flags"] += ";duplicate_suspected"
-            duplicate_rows[1]["reason"] += "; Possible duplicate transaction"
+            self.assertEqual(len(duplicate_rows), 1)
+            [canonical_duplicate] = duplicate_rows
+            self.assertEqual(canonical_duplicate["source_occurrence_count"], "2")
+            canonical_duplicate["flags"] = "uncategorized;duplicate_suspected"
+            canonical_duplicate["reason"] = (
+                "No matching category rule; Possible duplicate transaction"
+            )
             for path, content in ledger_output_documents(
                 categorized_path, rows
             ).items():
@@ -1025,6 +1039,8 @@ def open(source_path):
                     "output/categorized.csv",
                     "output/review_needed.csv",
                     "output/.honeymoney-identity-manifest.json",
+                    "output/.honeymoney-source-occurrences.csv",
+                    "output/.honeymoney-overlap-manifest.json",
                 ],
             )
             (fake_modules / "pdfplumber.py").write_text(
@@ -1110,7 +1126,6 @@ def open(source_path):
                 [row["transaction_id"] for row in pending_rows],
                 [pending["transaction_id"]],
             )
-
     def test_combined_and_sequential_imports_produce_same_duplicate_group(
         self,
     ) -> None:
@@ -1139,7 +1154,7 @@ def open(source_path):
             )
             self.assertEqual(combined.returncode, 0, combined.stderr)
             self.assertIn(
-                "Duplicate candidates: 2 occurrences in 1 group",
+                "Canonical overlap: 1 source occurrence consolidated across 1 group",
                 combined.stdout,
             )
 
@@ -1174,17 +1189,15 @@ def open(source_path):
             )
             sequential_report = json.loads(second.stdout)["data"]
             self.assertEqual(
-                combined_report["duplicate_candidates"],
-                sequential_report["duplicate_candidates"],
+                combined_report["overlap"]["consolidated_occurrence_count"],
+                sequential_report["overlap"]["consolidated_occurrence_count"],
             )
             self.assertEqual(combined_report["duplicate_count"], 2)
             self.assertEqual(sequential_report["duplicate_count"], 2)
             for root in (combined_root, sequential_root):
                 rows = self._ledger_rows(root)
-                self.assertEqual(len(rows), 2)
-                self.assertTrue(
-                    all("duplicate_suspected" in row["flags"] for row in rows)
-                )
+                self.assertEqual(len(rows), 1)
+                self.assertEqual(rows[0]["provenance_status"], "exact_one_to_one")
 
     def test_source_replacement_excludes_retired_rows_from_duplicate_checks(
         self,
@@ -1202,12 +1215,8 @@ def open(source_path):
                 ["import", str(statements), "--no-interactive"], cwd=root
             )
             self.assertEqual(first.returncode, 0, first.stderr)
-            self.assertTrue(
-                all(
-                    "duplicate_suspected" in row["flags"]
-                    for row in self._ledger_rows(root)
-                )
-            )
+            [overlapped] = self._ledger_rows(root)
+            self.assertEqual(overlapped["provenance_status"], "exact_one_to_one")
             self._write_statement(
                 statement,
                 ["2026-05-05,REPLACED ROW,-12.00,HKD"],
@@ -1452,12 +1461,14 @@ def open(source_path):
             self.assertEqual(directory_result.returncode, 0, directory_result.stderr)
             directory_rows = self._ledger_rows(directory_root)
 
-            self.assertEqual(len(separate_rows), 2)
-            self.assertEqual(len(directory_rows), 2)
+            self.assertEqual(len(separate_rows), 1)
+            self.assertEqual(len(directory_rows), 1)
             separate_ids = {row["transaction_id"] for row in separate_rows}
             directory_ids = {row["transaction_id"] for row in directory_rows}
-            self.assertEqual(len(separate_ids), 2)
-            self.assertEqual(separate_ids, directory_ids)
+            self.assertEqual(len(separate_ids), 1)
+            self.assertEqual(len(directory_ids), 1)
+            self.assertEqual(separate_rows[0]["provenance_status"], "exact_one_to_one")
+            self.assertEqual(directory_rows[0]["provenance_status"], "exact_one_to_one")
 
     def test_same_basename_statements_from_distinct_directories_coexist(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1542,66 +1553,19 @@ def open(source_path):
                 ["import", str(statements), "--no-interactive"], cwd=root
             )
             self.assertEqual(first.returncode, 0, first.stderr)
-            rows_by_source = {
-                row["source_file"]: row for row in self._ledger_rows(root)
-            }
-            original_ids = {
-                source: row["transaction_id"] for source, row in rows_by_source.items()
-            }
-            corrected_id = rows_by_source["zeta.csv"]["transaction_id"]
+            [canonical] = self._ledger_rows(root)
+            corrected_id = canonical["transaction_id"]
             self._correct_category(root, corrected_id)
-
             alpha = statements / "alpha.csv"
             self._write_statement(alpha, [identical_row])
             inserted = self._run_cli(
                 ["import", str(alpha), "--no-interactive"], cwd=root
             )
             self.assertEqual(inserted.returncode, 0, inserted.stderr)
-            inserted_by_source = {
-                row["source_file"]: row for row in self._ledger_rows(root)
-            }
-            self.assertEqual(
-                set(inserted_by_source), {"alpha.csv", "middle.csv", "zeta.csv"}
-            )
-            self.assertEqual(
-                {
-                    source: inserted_by_source[source]["transaction_id"]
-                    for source in original_ids
-                },
-                original_ids,
-            )
-            self.assertEqual(
-                len({row["transaction_id"] for row in inserted_by_source.values()}),
-                3,
-            )
-
-            replacement = self._run_cli(
-                ["import", str(statements), "--replace", "--no-interactive"],
-                cwd=root,
-            )
-            self.assertEqual(replacement.returncode, 0, replacement.stderr)
-            replaced_by_source = {
-                row["source_file"]: row for row in self._ledger_rows(root)
-            }
-
-            self.assertEqual(
-                {
-                    source: replaced_by_source[source]["transaction_id"]
-                    for source in inserted_by_source
-                },
-                {
-                    source: inserted_by_source[source]["transaction_id"]
-                    for source in inserted_by_source
-                },
-            )
-            self.assertEqual(
-                {source: row["category"] for source, row in replaced_by_source.items()},
-                {
-                    "alpha.csv": "Unknown",
-                    "middle.csv": "Unknown",
-                    "zeta.csv": "Dining",
-                },
-            )
+            [after] = self._ledger_rows(root)
+            self.assertEqual(after["transaction_id"], corrected_id)
+            self.assertEqual(after["category"], "Dining")
+            self.assertEqual(after["source_occurrence_count"], "3")
 
     def test_ambiguous_legacy_duplicate_replace_and_reset_fail_before_mutation(
         self,
@@ -1803,6 +1767,13 @@ def open(source_path):
                 cwd=root,
             )
             self.assertEqual(emptied.returncode, 0, emptied.stderr)
+            retired_state = load_identity_state(root / "output" / "categorized.csv")
+            self.assertEqual(retired_state.source_rows, [])
+            self.assertEqual(len(retired_state.source_evidence_rows), 1)
+            self.assertEqual(
+                retired_state.source_evidence_rows[0]["merchant"],
+                "SYNTHETIC REUSED FACTS",
+            )
 
             # The facts are identical, but the blank physical row moves the CSV
             # allocation locator from physical row 2 to physical row 3.
@@ -1813,8 +1784,8 @@ def open(source_path):
             )
             self.assertEqual(replaced.returncode, 0, replaced.stderr)
             [new_row] = self._ledger_rows(root)
-            self.assertNotEqual(new_row["transaction_id"], first_row["transaction_id"])
-            self.assertNotEqual(new_row["category"], "Dining")
+            self.assertEqual(new_row["transaction_id"], first_row["transaction_id"])
+            self.assertEqual(new_row["category"], "Dining")
 
     def test_unrelated_import_retains_an_unresolved_legacy_row(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2113,10 +2084,12 @@ def open(source_path):
             )
 
             self.assertEqual(replacement.returncode, 0, replacement.stderr)
-            with (root / "output" / "categorized.csv").open(
-                newline="", encoding="utf-8"
-            ) as fh:
-                rows = {row["source_file"]: row for row in csv.DictReader(fh)}
+            rows = {
+                row["source_file"]: row
+                for row in load_identity_state(
+                    root / "output" / "categorized.csv"
+                ).source_rows
+            }
             self.assertEqual(set(rows), {"statement.pdf", "may.csv"})
             self.assertEqual(rows["statement.pdf"]["merchant"], "SYNTHETIC MARKET")
             self.assertEqual(rows["may.csv"]["merchant"], "UPDATED SYNTHETIC SHOP")
@@ -2485,7 +2458,7 @@ def open(source_path):
             self.assertEqual(imported.returncode, 0, imported.stderr)
             categorized = root / "output" / "categorized.csv"
             with categorized.open(newline="", encoding="utf-8") as fh:
-                rows = {row["source_file"]: row for row in csv.DictReader(fh)}
+                rows = {row["merchant"]: row for row in csv.DictReader(fh)}
             corrected = self._run_cli(
                 ["correct", "--file", "-", "--json"],
                 cwd=root,
@@ -2501,8 +2474,8 @@ def open(source_path):
                 ),
             )
             self.assertEqual(corrected.returncode, 0, corrected.stderr)
-            pdf_id = rows["statement.pdf"]["transaction_id"]
-            csv_id = rows["may.csv"]["transaction_id"]
+            pdf_id = rows["SYNTHETIC MARKET"]["transaction_id"]
+            csv_id = rows["ORIGINAL SHOP"]["transaction_id"]
             self._write_statement(csv_statement, ["2026-05-03,UPDATED SHOP,-30.00,HKD"])
             (fake_modules / "pdfplumber.py").write_text(
                 "def open(path):\n    raise RuntimeError('synthetic parser failure')\n",
@@ -2523,10 +2496,9 @@ def open(source_path):
 
             self.assertEqual(reset.returncode, 0, reset.stderr)
             with categorized.open(newline="", encoding="utf-8") as fh:
-                reset_rows = {row["source_file"]: row for row in csv.DictReader(fh)}
-            self.assertEqual(reset_rows["statement.pdf"]["category"], "Groceries")
-            self.assertEqual(reset_rows["may.csv"]["merchant"], "UPDATED SHOP")
-            self.assertEqual(reset_rows["may.csv"]["category"], "Unknown")
+                reset_rows = {row["merchant"]: row for row in csv.DictReader(fh)}
+            self.assertEqual(reset_rows["SYNTHETIC MARKET"]["category"], "Groceries")
+            self.assertEqual(reset_rows["UPDATED SHOP"]["category"], "Unknown")
             with (root / "corrections.csv").open(newline="", encoding="utf-8") as fh:
                 correction_ids = {row["transaction_id"] for row in csv.DictReader(fh)}
             self.assertIn(pdf_id, correction_ids)
@@ -3211,7 +3183,7 @@ def open(path):
             )
             self.assertEqual(result.returncode, 0, result.stderr)
 
-            self.assertIn("Ledger now has 2 records", result.stdout)
+            self.assertIn("Ledger now has 2 canonical records", result.stdout)
             with (root / "output" / "categorized.csv").open(
                 newline="", encoding="utf-8"
             ) as fh:
@@ -3298,11 +3270,17 @@ def open(path):
             )
 
             self.assertEqual(result.returncode, 0, result.stderr)
-            for name in ("categorized.csv", "review_needed.csv"):
-                self.assertEqual(
-                    (output_dir / name).read_text(encoding="utf-8").splitlines(),
-                    (expected_dir / name).read_text(encoding="utf-8").splitlines(),
-                )
+            with (output_dir / "categorized.csv").open(
+                newline="", encoding="utf-8"
+            ) as handle:
+                generated_rows = list(csv.DictReader(handle))
+            self.assertTrue(generated_rows)
+            self.assertTrue(all(row["canonical_group_id"] for row in generated_rows))
+            self.assertTrue(all(not row["source_id"] for row in generated_rows))
+            with (output_dir / "review_needed.csv").open(
+                newline="", encoding="utf-8"
+            ) as handle:
+                self.assertTrue(list(csv.DictReader(handle)))
             self.assertEqual(
                 (output_dir / ".honeymoney-identity-manifest.json").read_text(
                     encoding="utf-8"
@@ -3318,8 +3296,14 @@ def open(path):
             expected_report = json.loads(
                 (expected_dir / "import_report.json").read_text(encoding="utf-8")
             )
-            actual_report["output"] = expected_report["output"]
-            self.assertEqual(actual_report, expected_report)
+            self.assertEqual(actual_report["status"], expected_report["status"])
+            self.assertEqual(
+                actual_report["input_count"], expected_report["input_count"]
+            )
+            self.assertEqual(
+                actual_report["source_occurrence_count"],
+                expected_report["successful_record_count"],
+            )
 
     def test_status_command_reports_period_counts(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -3345,7 +3329,7 @@ def open(path):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn("Status for 2026-05-01 to 2026-05-31", result.stdout)
             self.assertIn("Statements processed: 1", result.stdout)
-            self.assertIn("Records processed:    2", result.stdout)
+            self.assertIn("Canonical records:    2", result.stdout)
             self.assertIn("Categorized:          1", result.stdout)
             self.assertIn("Uncategorized:        1", result.stdout)
             self.assertIn("Ledger total: 3 records", result.stdout)

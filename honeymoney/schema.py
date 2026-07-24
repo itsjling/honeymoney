@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-CATEGORIZED_COLUMNS = [
+SOURCE_OCCURRENCE_COLUMNS = [
     "transaction_id",
     "source_id",
     "source_namespace_id",
@@ -42,9 +42,21 @@ CATEGORIZED_COLUMNS = [
     "source_row",
 ]
 
+CATEGORIZED_COLUMNS = [
+    "transaction_id",
+    "canonical_group_id",
+    "canonical_slot",
+    "provenance_status",
+    "source_occurrence_count",
+    *SOURCE_OCCURRENCE_COLUMNS[1:],
+]
 
 REVIEW_NEEDED_COLUMNS = [
     "transaction_id",
+    "canonical_group_id",
+    "canonical_slot",
+    "provenance_status",
+    "source_occurrence_count",
     "source_id",
     "source_namespace_id",
     "source_revision",

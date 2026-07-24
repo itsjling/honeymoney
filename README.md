@@ -95,10 +95,12 @@ Processes one pasted file or folder path. If `PATH` is omitted, the command prom
 
 After each import, any records that could not be auto-categorized are offered for interactive categorization: pick a category number, press Enter to skip one, or enter `q` to skip the rest. Your picks are saved to `corrections.csv` so they stick on future runs. Pass `--no-interactive` to skip the prompts.
 
-Import refuses to process a file whose `source_file` is already present in
-`categorized.csv`. Use `--replace` to re-import that source and replace its
-existing ledger rows. Use `--reset` to do the same replacement and remove old
-`corrections.csv` entries only for sources that were processed successfully.
+Import refuses to process a source already present in hidden source identity
+state. Use `--replace` to re-import that source, replace its source occurrences,
+and recompute canonical overlap membership. Use `--reset` to do the same
+replacement and remove old `corrections.csv` entries only for sources that were
+processed successfully. A canonical correction stays when another active
+source still supports its overlap group.
 Failed or skipped sources retain both their ledger rows and corrections.
 Correction removal and the replacement ledger use one recoverable generation;
 `--reset` supersedes `--replace` if both are present.
@@ -164,8 +166,9 @@ rules run before the optional local Ollama fallback.
 ## Accounting-safe Ollama categorization
 
 Ollama is an optional local merchant-category suggester, never an accounting
-authority. Import precedence is rules, duplicate annotation, conservative
-structural classification, Ollama, then saved corrections. The model sees only
+authority. Import precedence is rules, opt-in local memory, conservative
+structural classification, Ollama, then saved corrections. Protected overlap
+review state is reapplied last. The model sees only
 spending categories and cannot change an owner. `Income`, `Credit Card Payment`,
 `Internal Transfer`, `Savings`, and `Investments` are protected accounting
 categories: only rules, corrections, structural matching, or reconciliation can
@@ -205,6 +208,12 @@ and fully specified one-shot `review` accept `--json`. JSON mode prints exactly
 one versioned document to stdout, never prompts, and never opens a browser.
 Exit code `0` is success, `1` is strict partial success, and `2` is an input,
 configuration, or validation error.
+
+Import, status, pending, report, and reconcile data distinguish
+`source_occurrence_count` from `canonical_occurrence_count`. Their `overlap`
+object reports consolidation, provenance, and ambiguity. The old
+`duplicate_count`, `duplicate_group_count`, and `duplicate_candidates` fields
+remain as derived compatibility fields.
 
 ```bash
 honeymoney import ./statement.csv --config ./money/config.json --json
@@ -266,11 +275,30 @@ honeymoney run --input ./samples --output ./output/categorized.csv
 
 ## Outputs
 
-Each run writes three files next to the configured categorized CSV:
+Each run writes three public files next to the configured categorized CSV:
 
-- `categorized.csv`: normalized transactions with stable identity metadata, categories, accounting flow treatment, transfer links, owners, payment methods, confidence, flags, and source traceability. This file is a cumulative ledger: each import reconciles persisted occurrences and merges by `transaction_id`, so reconciliation, `status`, and `report` see everything imported so far. Older ledgers without the newer columns are hydrated and safely rewritten; transaction IDs do not depend on the new fields.
+- `categorized.csv`: canonical transactions with `canonical_group_id`,
+  `canonical_slot`, `provenance_status`, and `source_occurrence_count`, plus
+  categories, flow treatment, transfer links, owners, confidence, and flags.
+  Source identity, display, and statement-balance cells are empty here.
 - `review_needed.csv`: only ledger rows that need review, with editable correction columns.
-- `import_report.json`: processed files, selected profiles, warnings, duplicate counts, review counts, ledger totals, and Ollama status.
+- `import_report.json`: processed files, selected profiles, warnings, source and
+  canonical counts, overlap provenance, compatibility duplicate counts, review
+  counts, ledger totals, and Ollama status.
+
+Three hidden files join each recoverable ledger generation:
+
+- `.honeymoney-source-occurrences.csv`: active normalized source evidence and
+  retained evidence for retired identity records, including source identity,
+  display locators, and statement balances. Only active rows affect balances
+  and canonical output.
+- `.honeymoney-identity-manifest.json`: source and record ownership.
+- `.honeymoney-overlap-manifest.json`: the private canonical-ID namespace and
+  active or retired multiset slots.
+
+An exact issue #31 ledger keeps its old source IDs during read-only commands.
+Its first write publishes the canonical CSV and both new hidden files together.
+Partial canonical state fails closed.
 
 `category` describes merchant or budget purpose. `flow_type` separately controls accounting treatment and is one of `income`, `expense`, `refund`, `internal_transfer`, `credit_card_payment`, `investment_transfer`, or `unresolved`. Reports never infer income from a positive sign alone.
 
