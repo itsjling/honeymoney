@@ -24,6 +24,7 @@ from honeymoney.identity import (
     source_revision,
 )
 from honeymoney.normalization import (
+    _append_flag,
     _clean_text,
     _date_format_has_year,
     _default_profile,
@@ -370,7 +371,8 @@ def _validate_pdf_balance_mappings(profile_id: str, settings: dict[str, Any]) ->
         if isinstance(section_settings, dict)
         else {}
     )
-    targets: dict[tuple[str, str, str], int] = {}
+    fixed_targets: dict[tuple[str, str], int] = {}
+    dynamic_targets: dict[str, int] = {}
     allowed_fields = {
         "account_id",
         "section",
@@ -428,7 +430,9 @@ def _validate_pdf_balance_mappings(profile_id: str, settings: dict[str, Any]) ->
                     f"Profile {profile_id} field {mapping_field} must target "
                     "account_id and currency, or a known section and currency"
                 )
-            target = ("fixed", account_id, str(currency).upper())
+            target_account_id = account_id
+            target_currency = str(currency).upper()
+            dynamic_target = False
         else:
             if (
                 not isinstance(section, str)
@@ -456,7 +460,9 @@ def _validate_pdf_balance_mappings(profile_id: str, settings: dict[str, Any]) ->
                         f"Profile {profile_id} field {mapping_field}.currency_group "
                         "must name a group in both regexes for a dynamic-currency section"
                     )
-                target = ("dynamic", str(account.get("account_id", "")), currency_group)
+                target_account_id = str(account.get("account_id", ""))
+                target_currency = ""
+                dynamic_target = True
             else:
                 if (
                     not _valid_balance_currency(currency)
@@ -468,17 +474,34 @@ def _validate_pdf_balance_mappings(profile_id: str, settings: dict[str, Any]) ->
                         f"Profile {profile_id} field {mapping_field}.currency "
                         "must match the fixed currency for its section"
                     )
-                target = (
-                    "fixed",
-                    str(account.get("account_id", "")),
-                    str(currency).upper(),
-                )
-        if target in targets:
+                target_account_id = str(account.get("account_id", ""))
+                target_currency = str(currency).upper()
+                dynamic_target = False
+        conflicting_index = (
+            dynamic_targets.get(target_account_id)
+            if dynamic_target
+            else fixed_targets.get((target_account_id, target_currency))
+        )
+        if conflicting_index is None and dynamic_target:
+            conflicting_index = next(
+                (
+                    prior_index
+                    for (account, _currency), prior_index in fixed_targets.items()
+                    if account == target_account_id
+                ),
+                None,
+            )
+        if conflicting_index is None and not dynamic_target:
+            conflicting_index = dynamic_targets.get(target_account_id)
+        if conflicting_index is not None:
             raise ValueError(
                 f"Profile {profile_id} field {mapping_field} conflicts with "
-                f"mapping {targets[target]}"
+                f"mapping {conflicting_index}"
             )
-        targets[target] = index
+        if dynamic_target:
+            dynamic_targets[target_account_id] = index
+        else:
+            fixed_targets[(target_account_id, target_currency)] = index
 
 
 def _valid_balance_currency(value: Any) -> bool:
@@ -1171,7 +1194,7 @@ def _import_pdf(
                                 AllocationLocator(4, (page_number, row_number)),
                             )
                         )
-                _attach_pdf_balances(rows, balance_observations, pdf_path.name)
+                _attach_pdf_balances(rows, balance_observations)
                 if include_identity_records:
                     return rows, warnings, tuple(identity_records)
                 return rows, warnings
@@ -1295,7 +1318,7 @@ def _import_pdf(
                                         ),
                                     )
                                 )
-    _attach_pdf_balances(rows, balance_observations, pdf_path.name)
+    _attach_pdf_balances(rows, balance_observations)
     if pdf_settings.get("word_rows_only", False) and not rows:
         warnings.append(f"No word transaction table found in {pdf_path.name}")
     if include_identity_records:
@@ -1321,16 +1344,13 @@ def _pdf_balance_observations(
         lines = _pdf_balance_lines(page, pdf_settings)
         for text in lines:
             folded = " ".join(text.casefold().split())
-            matched_section = next(
-                (
-                    str(section)
-                    for section in accounts
-                    if str(section).casefold() in folded
-                ),
-                "",
-            )
+            matched_section = _pdf_matching_section(folded, accounts)
             if matched_section:
                 current_section = matched_section
+            elif _pdf_line_has_marker(
+                folded, section_settings.get("section_end_markers", [])
+            ):
+                current_section = ""
             for mapping in mappings:
                 if not isinstance(mapping, dict):
                     continue
@@ -1408,7 +1428,6 @@ def _strict_pdf_balance(value: str) -> Decimal:
 def _attach_pdf_balances(
     rows: list[dict[str, str]],
     observations: dict[tuple[str, str], dict[str, list[Decimal]]],
-    source_name: str,
 ) -> None:
     grouped_rows: dict[tuple[str, str], list[dict[str, str]]] = {}
     for row in rows:
@@ -1429,11 +1448,11 @@ def _attach_pdf_balances(
         ):
             values = set(balances[kind])
             if len(values) > 1:
-                account_id, currency = target
-                raise ValueError(
-                    f"Conflicting {kind} balances for {account_id}/{currency} "
-                    f"in {source_name}"
+                target_row["flags"] = _append_flag(
+                    target_row.get("flags", ""),
+                    f"statement_{kind}_balance_conflict",
                 )
+                continue
             if values:
                 target_row[f"statement_{kind}_balance"] = _format_decimal(
                     next(iter(values))
@@ -1491,14 +1510,8 @@ def _pdf_sectioned_word_source_rows(
             text = " ".join(str(word.get("text", "")) for word in line).strip()
             folded = " ".join(text.casefold().split())
 
-            matched_account = next(
-                (
-                    account
-                    for marker, account in accounts.items()
-                    if str(marker).casefold() in folded
-                ),
-                None,
-            )
+            matched_section = _pdf_matching_section(folded, accounts)
+            matched_account = accounts.get(matched_section)
             if isinstance(matched_account, dict):
                 current_account = {
                     "account_id": str(matched_account.get("account_id", "")),
@@ -1659,6 +1672,13 @@ def _pdf_sectioned_date(match: re.Match[str], statement_date: date) -> str:
 
 def _pdf_line_has_marker(text: str, markers: Any) -> bool:
     return any(str(marker).casefold() in text for marker in markers)
+
+
+def _pdf_matching_section(text: str, accounts: dict[str, Any]) -> str:
+    return next(
+        (str(section) for section in accounts if str(section).casefold() in text),
+        "",
+    )
 
 
 def _pdf_line_has_all_markers(text: str, markers: Any) -> bool:

@@ -36,10 +36,12 @@
     "ambiguous_transactions": 0,
     "balance_reconciliation": {
       "starter_csv": {
+        "result": "unavailable",
         "statements": [
           {
             "posted_currency": "HKD",
             "reason": "Opening and closing balances are unavailable.",
+            "result": "unavailable",
             "source_file": "transactions.csv",
             "status": "unavailable"
           }

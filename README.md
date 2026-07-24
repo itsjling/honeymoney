@@ -376,8 +376,9 @@ Current example profiles cover HSBC One, HSBC credit-card, and Mox bank/card sta
 
 The bundled HSBC and Mox PDF profiles also read statement opening and closing
 balances. Reconciliation checks each source, account, and posted currency and
-reports `matched`, `mismatched`, or `unavailable` with a reason. The balance
-lines do not become ledger transactions.
+keeps the existing `status` values while the added `result` field reports
+`matched`, `mismatched`, or `unavailable` with a reason. The balance lines do
+not become ledger transactions.
 
 Migration: remove `hsbc_hk_bank` and `hsbc_hk_bank_pdf` paths or mappings from
 existing configurations. Use `hsbc_one_pdf` for HSBC One PDF statements. For

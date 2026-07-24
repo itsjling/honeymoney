@@ -190,6 +190,86 @@ class PdfBalanceMappingValidationTest(unittest.TestCase):
 
         _validate_profile(profile, Path("profile.json"), base_config())
 
+    def test_dynamic_mappings_conflict_for_one_account_despite_group_names(
+        self,
+    ) -> None:
+        profile = load_profile("hsbc_one_pdf.json")
+        profile["pdf"]["balance_mappings"] = [
+            {
+                "section": "Foreign Currency Savings",
+                "currency_group": group,
+                "opening_regex": (
+                    rf"^(?P<{group}>[A-Z]{{3}}) B/F "
+                    r"(?P<balance>\d+\.\d{2})$"
+                ),
+                "closing_regex": (
+                    rf"^(?P<{group}>[A-Z]{{3}}) C/F "
+                    r"(?P<balance>\d+\.\d{2})$"
+                ),
+            }
+            for group in ("currency", "ccy")
+        ]
+
+        with self.assertRaisesRegex(
+            ValueError,
+            r"pdf\.balance_mappings\[1\] conflicts with mapping 0",
+        ):
+            _validate_profile(profile, Path("profile.json"), base_config())
+
+    def test_dynamic_mapping_conflicts_with_fixed_target_for_same_account(
+        self,
+    ) -> None:
+        profile = load_profile("hsbc_one_pdf.json")
+        profile["pdf"]["balance_mappings"] = [
+            {
+                "section": "Foreign Currency Savings",
+                "currency_group": "currency",
+                "opening_regex": (
+                    r"^(?P<currency>[A-Z]{3}) B/F "
+                    r"(?P<balance>\d+\.\d{2})$"
+                ),
+                "closing_regex": (
+                    r"^(?P<currency>[A-Z]{3}) C/F "
+                    r"(?P<balance>\d+\.\d{2})$"
+                ),
+            },
+            {
+                "account_id": "hsbc_one_fcy_savings",
+                "currency": "AUD",
+                "opening_regex": r"^AUD OPEN (?P<balance>\d+\.\d{2})$",
+                "closing_regex": r"^AUD CLOSE (?P<balance>\d+\.\d{2})$",
+            },
+        ]
+
+        with self.assertRaisesRegex(
+            ValueError,
+            r"pdf\.balance_mappings\[1\] conflicts with mapping 0",
+        ):
+            _validate_profile(profile, Path("profile.json"), base_config())
+
+    def test_static_and_section_targets_share_duplicate_namespace(self) -> None:
+        profile = load_profile("hsbc_one_pdf.json")
+        profile["pdf"]["balance_mappings"] = [
+            {
+                "section": "HKD Savings",
+                "currency": "HKD",
+                "opening_regex": r"^B/F (?P<balance>\d+\.\d{2})$",
+                "closing_regex": r"^C/F (?P<balance>\d+\.\d{2})$",
+            },
+            {
+                "account_id": "hsbc_one_hkd_savings",
+                "currency": "HKD",
+                "opening_regex": r"^OPEN (?P<balance>\d+\.\d{2})$",
+                "closing_regex": r"^CLOSE (?P<balance>\d+\.\d{2})$",
+            },
+        ]
+
+        with self.assertRaisesRegex(
+            ValueError,
+            r"pdf\.balance_mappings\[1\] conflicts with mapping 0",
+        ):
+            _validate_profile(profile, Path("profile.json"), base_config())
+
 
 class PdfBalanceReconciliationTest(unittest.TestCase):
     def test_supported_synthetic_statements_reconcile_by_account_and_currency(
@@ -220,12 +300,84 @@ class PdfBalanceReconciliationTest(unittest.TestCase):
                 self.assertTrue(report)
                 self.assertEqual(
                     {
-                        statement["status"]
+                        statement["result"]
                         for account in report.values()
                         for statement in account["statements"]
                     },
                     {"matched"},
                 )
+
+    def test_conflicting_extracted_balances_mark_rows_and_do_not_fail(self) -> None:
+        profile = load_profile("mox_bank_pdf.json")
+        tables = [
+            [
+                ["01 Apr 02 Apr SYNTHETIC CREDIT +10.00"],
+                ["01 Apr 01 Apr OPENING BALANCE +100.00"],
+                ["02 Apr 02 Apr OPENING BALANCE +101.00"],
+                ["30 Apr 30 Apr CLOSING BALANCE +110.00"],
+            ]
+        ]
+
+        rows, warnings, _ = _import_fake_pdf(profile, tables=tables)
+
+        self.assertEqual(warnings, [])
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["statement_opening_balance"], "")
+        self.assertIn("statement_opening_balance_conflict", rows[0]["flags"])
+        report = reconcile_ledger(rows, {})["balance_reconciliation"]["mox_bank_main"]
+        self.assertEqual(report["status"], "unavailable")
+        self.assertEqual(report["result"], "unavailable")
+        self.assertEqual(
+            report["statements"][0]["reason"], "Opening balances conflict."
+        )
+
+    def test_section_end_stops_balance_scanner_and_transaction_parser(self) -> None:
+        profile = load_profile("hsbc_one_pdf.json")
+        profile["pdf"]["sectioned_word_rows"]["section_end_markers"] = ["END SECTION"]
+        words = [
+            {"text": "Statement", "x0": 20, "top": 10},
+            {"text": "Date", "x0": 75, "top": 10},
+            {"text": "05", "x0": 105, "top": 10},
+            {"text": "January", "x0": 123, "top": 10},
+            {"text": "2026", "x0": 153, "top": 10},
+            {"text": "Foreign", "x0": 20, "top": 30},
+            {"text": "Currency", "x0": 65, "top": 30},
+            {"text": "Savings", "x0": 115, "top": 30},
+            {"text": "Date", "x0": 82, "top": 50},
+            {"text": "Transaction", "x0": 118, "top": 50},
+            {"text": "Details", "x0": 190, "top": 50},
+            {"text": "Deposit", "x0": 350, "top": 50},
+            {"text": "Withdrawal", "x0": 418, "top": 50},
+            {"text": "Balance", "x0": 500, "top": 50},
+            {"text": "AUD", "x0": 59, "top": 70},
+            {"text": "B/F", "x0": 120, "top": 70},
+            {"text": "BALANCE", "x0": 145, "top": 70},
+            {"text": "100.00", "x0": 500, "top": 70},
+            {"text": "AUD", "x0": 59, "top": 90},
+            {"text": "31", "x0": 79, "top": 90},
+            {"text": "Dec", "x0": 85, "top": 90},
+            {"text": "SYNTHETIC", "x0": 120, "top": 90},
+            {"text": "DEBIT", "x0": 185, "top": 90},
+            {"text": "5.00", "x0": 425, "top": 90},
+            {"text": "AUD", "x0": 59, "top": 110},
+            {"text": "C/F", "x0": 120, "top": 110},
+            {"text": "BALANCE", "x0": 145, "top": 110},
+            {"text": "95.00", "x0": 500, "top": 110},
+            {"text": "END", "x0": 20, "top": 130},
+            {"text": "SECTION", "x0": 50, "top": 130},
+            {"text": "AUD", "x0": 59, "top": 150},
+            {"text": "B/F", "x0": 120, "top": 150},
+            {"text": "BALANCE", "x0": 145, "top": 150},
+            {"text": "999.00", "x0": 500, "top": 150},
+        ]
+
+        rows, warnings, _ = _import_fake_pdf(profile, words=words)
+
+        self.assertEqual(warnings, [])
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["statement_opening_balance"], "100.00")
+        self.assertEqual(rows[0]["statement_closing_balance"], "95.00")
+        self.assertNotIn("balance_conflict", rows[0]["flags"])
 
 
 class PdfByteFixtureReviewTest(unittest.TestCase):

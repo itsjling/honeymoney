@@ -91,9 +91,10 @@ scans raw word or table lines, then puts each balance on the first or last
 transaction for the mapped account and posted currency. It never turns a
 balance line into a transaction. Reconciliation groups rows by source identity,
 account, and posted currency. It uses `source_file` only for legacy rows that
-lack `source_id`. Each statement reports `matched`, `mismatched`, or
+lack `source_id`. The existing `status` field stays `reconciled`, `difference`,
+or `unavailable`. The added `result` field reports `matched`, `mismatched`, or
 `unavailable`; unavailable results include a reason. Conflicting balance values
-also make the result unavailable.
+add a safe row flag and make the result unavailable.
 
 ## Transaction identity
 

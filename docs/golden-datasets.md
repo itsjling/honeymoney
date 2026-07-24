@@ -120,7 +120,18 @@ balance check stays unavailable.
 
 Keep the patterns narrow enough to match one kind of balance line. Validation
 rejects missing pairs, bad patterns, unknown sections, missing named groups,
-and mappings that target the same account or section twice.
+fixed mappings for the same account and currency, and any dynamic mapping that
+can overlap another mapping for the same account. If one statement yields
+different values for the same opening or closing target, import keeps the
+transactions, stores no disputed balance, and adds a privacy-safe conflict
+flag. Reconciliation then reports an unavailable result with a clear reason.
+
+`balance_mappings` forms part of the extractor contract. Adding or changing it
+changes `extractor_contract_id`, even when the PDF bytes stay the same. During
+`--replace`, unique transaction fingerprints keep their transaction IDs.
+Indistinguishable repeated rows cannot use position as a tie-break. Honeymoney
+returns `identity_record_match_ambiguous` and writes nothing in that case, as
+required by ADR 0001.
 
 ### Regenerating the accepted PDF bytes
 

@@ -334,6 +334,7 @@ def _balance_reconciliation(
             "source_file": source_files[0] if source_files else "",
             "posted_currency": posted_currency,
             "status": "unavailable",
+            "result": "unavailable",
         }
         opening, opening_problem = _statement_balance(
             statement_rows, "statement_opening_balance", "Opening"
@@ -341,6 +342,12 @@ def _balance_reconciliation(
         closing, closing_problem = _statement_balance(
             statement_rows, "statement_closing_balance", "Closing"
         )
+        if _has_statement_balance_conflict(statement_rows, "opening"):
+            opening = None
+            opening_problem = "Opening balances conflict."
+        if _has_statement_balance_conflict(statement_rows, "closing"):
+            closing = None
+            closing_problem = "Closing balances conflict."
         if opening_problem or closing_problem:
             problems = [
                 problem for problem in (opening_problem, closing_problem) if problem
@@ -370,7 +377,8 @@ def _balance_reconciliation(
                 difference = closing - calculated
                 statement.update(
                     {
-                        "status": "matched" if difference == 0 else "mismatched",
+                        "status": "reconciled" if difference == 0 else "difference",
+                        "result": "matched" if difference == 0 else "mismatched",
                         "opening_balance": _decimal_text(opening),
                         "closing_balance": _decimal_text(closing),
                         "calculated_closing_balance": _decimal_text(calculated),
@@ -378,17 +386,29 @@ def _balance_reconciliation(
                     }
                 )
         account = accounts.setdefault(
-            account_id, {"status": "unavailable", "statements": []}
+            account_id,
+            {
+                "status": "unavailable",
+                "result": "unavailable",
+                "statements": [],
+            },
         )
         account["statements"].append(statement)
 
     for account in accounts.values():
-        statuses = {statement["status"] for statement in account["statements"]}
-        if "mismatched" in statuses:
-            account["status"] = "mismatched"
-        elif statuses == {"matched"}:
-            account["status"] = "matched"
+        results = {statement["result"] for statement in account["statements"]}
+        if "mismatched" in results:
+            account["status"] = "difference"
+            account["result"] = "mismatched"
+        elif results == {"matched"}:
+            account["status"] = "reconciled"
+            account["result"] = "matched"
     return accounts
+
+
+def _has_statement_balance_conflict(rows: list[dict[str, str]], kind: str) -> bool:
+    marker = f"statement_{kind}_balance_conflict"
+    return any(marker in row.get("flags", "").split(";") for row in rows)
 
 
 def _statement_balance(

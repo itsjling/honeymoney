@@ -818,7 +818,8 @@ class CashFlowWorkflowTest(unittest.TestCase):
 
             self.assertEqual(result.returncode, 0, result.stderr)
             balances = json.loads(result.stdout)["data"]["balance_reconciliation"]
-            self.assertEqual(balances["bank_balanced"]["status"], "matched")
+            self.assertEqual(balances["bank_balanced"]["status"], "reconciled")
+            self.assertEqual(balances["bank_balanced"]["result"], "matched")
             self.assertEqual(
                 balances["bank_balanced"]["statements"][0]["difference"], "0.00"
             )
@@ -827,7 +828,8 @@ class CashFlowWorkflowTest(unittest.TestCase):
                 balances["bank_unavailable"]["statements"][0]["reason"],
                 "Opening and closing balances are unavailable.",
             )
-            self.assertEqual(balances["bank_difference"]["status"], "mismatched")
+            self.assertEqual(balances["bank_difference"]["status"], "difference")
+            self.assertEqual(balances["bank_difference"]["result"], "mismatched")
             self.assertEqual(
                 balances["bank_difference"]["statements"][0]["difference"], "5.00"
             )
@@ -866,6 +868,7 @@ class CashFlowWorkflowTest(unittest.TestCase):
         result = reconcile_ledger(rows, {})["balance_reconciliation"]["multi"]
 
         self.assertEqual(result["status"], "unavailable")
+        self.assertEqual(result["result"], "unavailable")
         self.assertEqual(len(result["statements"]), 3)
         self.assertEqual(
             [statement["posted_currency"] for statement in result["statements"]],
@@ -873,6 +876,10 @@ class CashFlowWorkflowTest(unittest.TestCase):
         )
         self.assertEqual(
             [statement["status"] for statement in result["statements"]],
+            ["reconciled", "reconciled", "unavailable"],
+        )
+        self.assertEqual(
+            [statement["result"] for statement in result["statements"]],
             ["matched", "matched", "unavailable"],
         )
 
@@ -900,6 +907,7 @@ class CashFlowWorkflowTest(unittest.TestCase):
         ][0]
 
         self.assertEqual(statement["status"], "unavailable")
+        self.assertEqual(statement["result"], "unavailable")
         self.assertEqual(statement["reason"], "Opening balances conflict.")
 
 
