@@ -208,6 +208,33 @@ class PdfBalanceMappingValidationTest(unittest.TestCase):
 
         _validate_profile(profile, Path("profile.json"), base_config())
 
+    def test_optional_balance_group_fails_with_a_controlled_diagnostic(self) -> None:
+        profile = load_profile("mox_bank_pdf.json")
+        profile["pdf"]["balance_mappings"] = [
+            {
+                "account_id": "mox_bank_main",
+                "currency": "HKD",
+                "opening_regex": r"^OPENING(?: (?P<balance>\d+\.\d{2}))?$",
+                "closing_regex": r"^CLOSING(?: (?P<balance>\d+\.\d{2}))?$",
+            }
+        ]
+        _validate_profile(profile, Path("profile.json"), base_config())
+
+        class Page:
+            def extract_words(self, **kwargs):
+                return [{"text": "OPENING", "x0": 20, "top": 10}]
+
+            def extract_tables(self):
+                return []
+
+        class Pdf:
+            pages = [Page()]
+
+        with self.assertRaisesRegex(
+            ValueError, "PDF balance mapping captured an invalid balance"
+        ):
+            _pdf_balance_observations(Pdf(), profile["pdf"])
+
     def test_dynamic_mappings_conflict_for_one_account_despite_group_names(
         self,
     ) -> None:
@@ -489,6 +516,53 @@ class PdfBalanceReconciliationTest(unittest.TestCase):
         self.assertEqual(rows[0]["statement_opening_balance"], "100.00")
         self.assertEqual(rows[0]["statement_closing_balance"], "95.00")
         self.assertNotIn("balance_conflict", rows[0]["flags"])
+
+    def test_section_label_in_description_does_not_change_balance_section(
+        self,
+    ) -> None:
+        profile = load_profile("hsbc_one_pdf.json")
+        words = [
+            {"text": "Statement", "x0": 20, "top": 10},
+            {"text": "Date", "x0": 75, "top": 10},
+            {"text": "05", "x0": 105, "top": 10},
+            {"text": "January", "x0": 123, "top": 10},
+            {"text": "2026", "x0": 153, "top": 10},
+            {"text": "Foreign", "x0": 20, "top": 30},
+            {"text": "Currency", "x0": 65, "top": 30},
+            {"text": "Savings", "x0": 115, "top": 30},
+            {"text": "Date", "x0": 82, "top": 50},
+            {"text": "Transaction", "x0": 118, "top": 50},
+            {"text": "Details", "x0": 190, "top": 50},
+            {"text": "Deposit", "x0": 350, "top": 50},
+            {"text": "Withdrawal", "x0": 418, "top": 50},
+            {"text": "Balance", "x0": 500, "top": 50},
+            {"text": "AUD", "x0": 59, "top": 70},
+            {"text": "B/F", "x0": 120, "top": 70},
+            {"text": "BALANCE", "x0": 145, "top": 70},
+            {"text": "100.00", "x0": 500, "top": 70},
+            {"text": "AUD", "x0": 59, "top": 90},
+            {"text": "31", "x0": 79, "top": 90},
+            {"text": "Dec", "x0": 85, "top": 90},
+            {"text": "SYNTHETIC", "x0": 120, "top": 90},
+            {"text": "TRANSFER", "x0": 185, "top": 90},
+            {"text": "TO", "x0": 245, "top": 90},
+            {"text": "HKD", "x0": 270, "top": 90},
+            {"text": "Savings", "x0": 300, "top": 90},
+            {"text": "5.00", "x0": 425, "top": 90},
+            {"text": "AUD", "x0": 59, "top": 110},
+            {"text": "C/F", "x0": 120, "top": 110},
+            {"text": "BALANCE", "x0": 145, "top": 110},
+            {"text": "95.00", "x0": 500, "top": 110},
+        ]
+
+        rows, warnings, _ = _import_fake_pdf(profile, words=words)
+
+        self.assertEqual(warnings, [])
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["account_id"], "hsbc_one_fcy_savings")
+        self.assertEqual(rows[0]["posted_currency"], "AUD")
+        self.assertEqual(rows[0]["statement_opening_balance"], "100.00")
+        self.assertEqual(rows[0]["statement_closing_balance"], "95.00")
 
 
 class PdfByteFixtureReviewTest(unittest.TestCase):

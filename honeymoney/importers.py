@@ -1426,7 +1426,9 @@ def _pdf_balance_target(
     return account_id.strip(), currency.strip().upper()
 
 
-def _strict_pdf_balance(value: str) -> Decimal:
+def _strict_pdf_balance(value: str | None) -> Decimal:
+    if value is None:
+        raise ValueError("PDF balance mapping captured an invalid balance")
     try:
         balance = Decimal(value.replace(",", "").strip())
     except (InvalidOperation, ValueError) as error:
@@ -1686,8 +1688,13 @@ def _pdf_line_has_marker(text: str, markers: Any) -> bool:
 
 
 def _pdf_matching_section(text: str, accounts: dict[str, Any]) -> str:
+    normalized_text = " ".join(text.casefold().split())
     return next(
-        (str(section) for section in accounts if str(section).casefold() in text),
+        (
+            str(section)
+            for section in accounts
+            if " ".join(str(section).casefold().split()) == normalized_text
+        ),
         "",
     )
 
