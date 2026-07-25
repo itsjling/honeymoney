@@ -1,13 +1,16 @@
 import copy
 import unittest
 
+from honeymoney.corrections import apply_corrections
 from honeymoney.overlap import (
     AMBIGUOUS_COUNT_STATUS,
     EQUAL_POOL_STATUS,
     EXACT_ONE_TO_ONE_STATUS,
     SINGLE_SOURCE_STATUS,
+    apply_history_ambiguity,
     canonicalize_overlaps,
     empty_overlap_manifest,
+    enforce_overlap_review,
     project_corrections,
     validate_overlap_agreement,
 )
@@ -62,6 +65,15 @@ class CanonicalOverlapTest(unittest.TestCase):
         self.assertEqual(result.source_occurrence_count, 2)
         self.assertEqual(result.canonical_occurrence_count, 1)
         self.assertEqual(result.consolidated_occurrence_count, 1)
+        self.assertEqual(
+            result.diagnostic["provenance_counts"],
+            {
+                AMBIGUOUS_COUNT_STATUS: 0,
+                EQUAL_POOL_STATUS: 0,
+                EXACT_ONE_TO_ONE_STATUS: 1,
+                SINGLE_SOURCE_STATUS: 0,
+            },
+        )
         self.assertEqual(
             result.manifest["groups"][0]["group_id"],
             "ovg_5f5f4ebc1ea6bfdbfd6850cd67789f01d75526dda3adadaa5be4f7a8ccdf7eb5",
@@ -300,6 +312,66 @@ class CanonicalOverlapTest(unittest.TestCase):
         self.assertNotIn("overlap_history_ambiguous", grown.rows[0]["flags"])
         self.assertIn("overlap_history_ambiguous", grown.rows[1]["flags"])
 
+    def test_fresh_raw_overlap_does_not_create_migration_history_ambiguity(
+        self,
+    ) -> None:
+        reviewed = _occurrence("1", "a")
+        reviewed.update(
+            {
+                "category": "Dining",
+                "flow_type": "expense",
+                "flow_source": "correction",
+                "confidence": "1.00",
+                "needs_review": "false",
+            }
+        )
+        raw = _occurrence("2", "b")
+        raw.update(
+            {
+                "category": "Unknown",
+                "flow_type": "unresolved",
+                "flow_source": "deterministic",
+                "confidence": "0.00",
+                "needs_review": "true",
+                "reason": "No categorization rules have been applied",
+            }
+        )
+
+        migrated = canonicalize_overlaps(
+            [reviewed, raw],
+            [reviewed],
+            empty_overlap_manifest(_NAMESPACE_KEY),
+        )
+
+        [canonical] = migrated.rows
+        self.assertEqual(canonical["category"], "Dining")
+        self.assertEqual(canonical["needs_review"], "false")
+        self.assertNotIn("overlap_history_ambiguous", canonical["flags"].split(";"))
+
+    def test_canonical_correction_clears_history_ambiguity(self) -> None:
+        result = canonicalize_overlaps(
+            [_occurrence("1", "a"), _occurrence("2", "b")],
+            [],
+            empty_overlap_manifest(_NAMESPACE_KEY),
+        )
+        [canonical] = result.rows
+        apply_history_ambiguity(result.rows, {canonical["transaction_id"]})
+
+        apply_corrections(
+            result.rows,
+            {
+                canonical["transaction_id"]: {
+                    "category": "Groceries",
+                    "needs_review": "false",
+                }
+            },
+        )
+        enforce_overlap_review(result.rows)
+
+        self.assertEqual(canonical["needs_review"], "false")
+        self.assertNotIn("overlap_history_ambiguous", canonical["flags"].split(";"))
+        self.assertNotIn("conflicting review history", canonical["reason"].casefold())
+
     def test_corrections_project_only_when_assignment_is_proven(self) -> None:
         one_to_one = canonicalize_overlaps(
             [_occurrence("1", "a"), _occurrence("2", "b")],
@@ -392,6 +464,32 @@ class CanonicalOverlapTest(unittest.TestCase):
         self.assertEqual(result.rows[0]["transaction_id"], "legacy-transaction")
         self.assertEqual(result.rows[0]["canonical_group_id"], "")
         validate_overlap_agreement(result.rows, [legacy], result.manifest)
+
+    def test_agreement_rejects_partial_canonical_metadata_on_legacy_row(self) -> None:
+        legacy = _occurrence("1", "a")
+        legacy.update(
+            {
+                "transaction_id": "legacy-transaction",
+                "source_id": "",
+                "source_namespace_id": "",
+                "source_revision": "",
+                "source_record_id": "",
+            }
+        )
+        result = canonicalize_overlaps(
+            [legacy], [], empty_overlap_manifest(_NAMESPACE_KEY)
+        )
+
+        for field, value in (
+            ("canonical_slot", "1"),
+            ("provenance_status", SINGLE_SOURCE_STATUS),
+            ("source_occurrence_count", "1"),
+        ):
+            with self.subTest(field=field):
+                corrupted = copy.deepcopy(result.rows)
+                corrupted[0][field] = value
+                with self.assertRaisesRegex(ValueError, "overlap_manifest_invalid"):
+                    validate_overlap_agreement(corrupted, [legacy], result.manifest)
 
     def test_agreement_rejects_public_source_display_and_balance_evidence(self) -> None:
         occurrences = [_occurrence("1", "a"), _occurrence("2", "b")]

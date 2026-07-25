@@ -22,6 +22,7 @@ from honeymoney.identity_state import (
 from honeymoney.overlap import (
     apply_history_ambiguity,
     canonicalize_overlaps,
+    clear_history_ambiguity,
     enforce_overlap_review,
     overlap_manifest_document,
     overlap_manifest_path,
@@ -187,6 +188,7 @@ def apply_corrections(
         if "needs_review" in correction:
             release_duplicate_review_ownership(transaction)
             transaction["needs_review"] = correction["needs_review"].casefold()
+        clear_history_ambiguity([transaction], {transaction["transaction_id"]})
         transaction["flags"] = _append_flag(
             transaction.get("flags", ""), "manual_correction"
         )

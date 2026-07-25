@@ -192,6 +192,8 @@ def validate_overlap_agreement(
         if set(actual) != set(CATEGORIZED_COLUMNS):
             raise ValueError("overlap_manifest_invalid")
         if not str(actual.get("canonical_group_id", "")):
+            if any(str(actual.get(field, "")) for field in fields):
+                raise ValueError("overlap_manifest_invalid")
             if any(
                 str(actual.get(field, "")) != expected_row[field]
                 for field in _IMMUTABLE_SOURCE_FIELDS
@@ -274,14 +276,27 @@ def apply_history_ambiguity(
         if row.get("transaction_id") not in selected:
             continue
         flags = [item for item in row.get("flags", "").split(";") if item]
-        reasons = [item for item in row.get("reason", "").split("; ") if item]
         if OVERLAP_HISTORY_FLAG not in flags:
             flags.append(OVERLAP_HISTORY_FLAG)
-        if OVERLAP_HISTORY_REASON not in reasons:
-            reasons.append(OVERLAP_HISTORY_REASON)
         row["flags"] = ";".join(flags)
-        row["reason"] = "; ".join(reasons)
+        row["reason"] = _append_reason(row.get("reason", ""), OVERLAP_HISTORY_REASON)
         row["needs_review"] = "true"
+
+
+def clear_history_ambiguity(
+    rows: list[dict[str, str]], transaction_ids: set[str] | tuple[str, ...]
+) -> None:
+    """Clear protected history review after an explicit canonical correction."""
+    selected = set(transaction_ids)
+    for row in rows:
+        if row.get("transaction_id") not in selected:
+            continue
+        row["flags"] = ";".join(
+            item
+            for item in row.get("flags", "").split(";")
+            if item and item != OVERLAP_HISTORY_FLAG
+        )
+        row["reason"] = _remove_reason(row.get("reason", ""), OVERLAP_HISTORY_REASON)
 
 
 def enforce_overlap_review(rows: list[dict[str, str]]) -> None:
@@ -459,6 +474,12 @@ def canonicalize_overlaps(
         "source_occurrence_count": len(occurrences),
         "canonical_occurrence_count": len(canonical_rows),
         "consolidated_occurrence_count": len(occurrences) - len(canonical_rows),
+        "provenance_counts": {
+            status: sum(
+                row.get("provenance_status") == status for row in canonical_rows
+            )
+            for status in sorted(PROVENANCE_STATUSES)
+        },
         "groups": diagnostics,
     }
     return CanonicalizationResult(
@@ -519,11 +540,13 @@ def _agreed_canonical_template(
     for field in _DISPLAY_FIELDS:
         row[field] = _agreed_value(bucket, field, "")
 
+    history_bucket = [item for item in bucket if _has_processed_history(item)]
+    mutable_bucket = history_bucket or bucket
     mutable_projections = {
         tuple((field, _source_mutable_value(item, field)) for field in _MUTABLE_FIELDS)
-        for item in bucket
+        for item in mutable_bucket
     }
-    history_ambiguous = len(mutable_projections) > 1
+    history_ambiguous = bool(history_bucket) and len(mutable_projections) > 1
     if len(mutable_projections) == 1:
         for field, value in next(iter(mutable_projections)):
             row[field] = value
@@ -542,6 +565,17 @@ def _agreed_canonical_template(
             }
         )
     return row, history_ambiguous
+
+
+def _has_processed_history(row: Mapping[str, Any]) -> bool:
+    flags = str(row.get("flags", "")).split(";")
+    return (
+        str(row.get("category", "")) not in {"", "Unknown"}
+        or str(row.get("flow_source", "")) == "correction"
+        or "manual_correction" in flags
+        or str(row.get("confidence", "")) not in {"", "0", "0.00"}
+        or str(row.get("needs_review", "")) == "false"
+    )
 
 
 def _source_mutable_value(row: Mapping[str, Any], field: str) -> str:
