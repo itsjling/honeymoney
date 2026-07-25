@@ -430,8 +430,10 @@ def _validate_pdf_balance_mappings(profile_id: str, settings: dict[str, Any]) ->
                     f"Profile {profile_id} field {mapping_field} must target "
                     "account_id and currency, or a known section and currency"
                 )
-            target_account_id = account_id
-            target_currency = str(currency).upper()
+            target_account_id = account_id.strip()
+            target_currency = str(currency).strip().upper()
+            mapping["account_id"] = target_account_id
+            mapping["currency"] = target_currency
             dynamic_target = False
         else:
             if (
@@ -1370,16 +1372,15 @@ def _pdf_balance_observations(
 
 
 def _pdf_balance_lines(page: Any, pdf_settings: dict[str, Any]) -> list[str]:
+    lines: list[str] = []
     if hasattr(page, "extract_words"):
         words = page.extract_words(x_tolerance=1, y_tolerance=3) or []
-        if words:
-            return [
-                " ".join(str(word.get("text", "")) for word in line).strip()
-                for line in _pdf_word_lines(
-                    words, float(pdf_settings.get("word_y_tolerance", 3))
-                )
-            ]
-    lines: list[str] = []
+        lines.extend(
+            " ".join(str(word.get("text", "")) for word in line).strip()
+            for line in _pdf_word_lines(
+                words, float(pdf_settings.get("word_y_tolerance", 3))
+            )
+        )
     for table in _pdf_tables(page):
         for row in table:
             cell_lines = [str(cell or "").splitlines() or [""] for cell in row]
@@ -1392,7 +1393,15 @@ def _pdf_balance_lines(page: Any, pdf_settings: dict[str, Any]) -> list[str]:
                         if line_index < len(value) and value[line_index].strip()
                     )
                 )
-    return lines
+    unique_lines: list[str] = []
+    seen: set[str] = set()
+    for line in lines:
+        stripped = line.strip()
+        deduplication_key = " ".join(stripped.split())
+        if stripped and deduplication_key not in seen:
+            seen.add(deduplication_key)
+            unique_lines.append(stripped)
+    return unique_lines
 
 
 def _pdf_balance_target(
@@ -1412,7 +1421,7 @@ def _pdf_balance_target(
         if isinstance(currency_group, str) and currency_group
         else str(mapping.get("currency", ""))
     )
-    return account_id, currency.upper()
+    return account_id.strip(), currency.strip().upper()
 
 
 def _strict_pdf_balance(value: str) -> Decimal:

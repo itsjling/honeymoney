@@ -21,7 +21,12 @@ from honeymoney.identity import (
     resolve_batch,
     source_namespace_id,
 )
-from honeymoney.importers import _import_pdf, _import_transactions, _validate_profile
+from honeymoney.importers import (
+    _import_pdf,
+    _import_transactions,
+    _pdf_balance_lines,
+    _validate_profile,
+)
 from honeymoney.reconciliation import reconcile_ledger
 from tests.golden_helpers import (
     FIXTURE_DIR,
@@ -170,6 +175,17 @@ class PdfBalanceMappingValidationTest(unittest.TestCase):
             r"pdf\.balance_mappings\[1\] conflicts with mapping 0",
         ):
             _validate_profile(profile, Path("profile.json"), base_config())
+
+    def test_static_balance_mapping_strips_account_and_currency(self) -> None:
+        profile = load_profile("mox_bank_pdf.json")
+        mapping = profile["pdf"]["balance_mappings"][0]
+        mapping["account_id"] = "  mox_bank_main  "
+        mapping["currency"] = "  hkd  "
+
+        _validate_profile(profile, Path("profile.json"), base_config())
+
+        self.assertEqual(mapping["account_id"], "mox_bank_main")
+        self.assertEqual(mapping["currency"], "HKD")
 
     def test_dynamic_currency_mapping_requires_known_section_and_group(self) -> None:
         profile = load_profile("hsbc_one_pdf.json")
@@ -330,6 +346,45 @@ class PdfBalanceReconciliationTest(unittest.TestCase):
         self.assertEqual(
             report["statements"][0]["reason"], "Opening balances conflict."
         )
+
+    def test_balance_scanner_reads_table_rows_alongside_words(self) -> None:
+        profile = load_profile("mox_bank_pdf.json")
+        words = [
+            {"text": "Page", "x0": 20, "top": 10},
+            {"text": "1", "x0": 55, "top": 10},
+            {"text": "of", "x0": 70, "top": 10},
+            {"text": "1", "x0": 90, "top": 10},
+            {"text": "OPENING", "x0": 20, "top": 30},
+            {"text": "BALANCE", "x0": 90, "top": 30},
+            {"text": "+100.00", "x0": 170, "top": 30},
+        ]
+        tables = [
+            [
+                ["01 Apr 02 Apr SYNTHETIC CREDIT +10.00"],
+                ["01 Apr 01 Apr OPENING BALANCE +100.00"],
+                ["30 Apr 30 Apr CLOSING BALANCE +110.00"],
+            ]
+        ]
+
+        rows, warnings, _ = _import_fake_pdf(profile, tables=tables, words=words)
+
+        self.assertEqual(warnings, [])
+        self.assertEqual(rows[0]["statement_opening_balance"], "100.00")
+        self.assertEqual(rows[0]["statement_closing_balance"], "110.00")
+
+    def test_balance_scanner_deduplicates_word_and_table_rows(self) -> None:
+        class Page:
+            def extract_words(self, **kwargs):
+                return [
+                    {"text": "OPENING", "x0": 20, "top": 10},
+                    {"text": "BALANCE", "x0": 90, "top": 10},
+                    {"text": "+100.00", "x0": 170, "top": 10},
+                ]
+
+            def extract_tables(self):
+                return [[["OPENING BALANCE +100.00"]]]
+
+        self.assertEqual(_pdf_balance_lines(Page(), {}), ["OPENING BALANCE +100.00"])
 
     def test_section_end_stops_balance_scanner_and_transaction_parser(self) -> None:
         profile = load_profile("hsbc_one_pdf.json")
