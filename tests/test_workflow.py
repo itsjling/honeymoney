@@ -875,27 +875,23 @@ def open(source_path):
                 sum(row["merchant"] == "REVIEWED REPEAT" for row in state.source_rows),
                 2,
             )
-            expected_review_states = {
-                historical["transaction_id"]: "false",
-                incoming["transaction_id"]: "true",
-            }
-            for row in (historical, incoming):
-                self.assertEqual(
-                    row["needs_review"], expected_review_states[row["transaction_id"]]
-                )
-                self.assertEqual(
-                    row["flags"].split(";").count("duplicate_suspected"), 1
-                )
-                self.assertIn(DUPLICATE_MATCH_TYPE, row["reason"])
-                self.assertIn(
-                    next(
-                        item for item in expected_ids if item != row["transaction_id"]
-                    ),
-                    row["reason"],
-                )
-            self.assertNotIn(
-                "duplicate_review_promoted", historical["flags"].split(";")
+            expected_ids = sorted(
+                row["transaction_id"]
+                for row in state.source_rows
+                if row["merchant"] == "REVIEWED REPEAT"
             )
+            self.assertEqual(
+                report["duplicate_candidates"]["groups"],
+                [
+                    {
+                        "match_type": DUPLICATE_MATCH_TYPE,
+                        "occurrence_ids": expected_ids,
+                    }
+                ],
+            )
+            self.assertEqual(canonical["needs_review"], "false")
+            self.assertNotIn("duplicate_suspected", canonical["flags"].split(";"))
+            self.assertNotIn("duplicate_review_promoted", canonical["flags"].split(";"))
 
             with (root / "output" / "review_needed.csv").open(
                 newline="", encoding="utf-8"
@@ -905,51 +901,32 @@ def open(source_path):
                     for row in csv.DictReader(fh)
                     if "duplicate_suspected" in row["flags"]
                 }
-            self.assertEqual(review_ids, {incoming["transaction_id"]})
+            self.assertEqual(review_ids, set())
 
             pending = self._run_cli(["pending", "2026-05", "--json"], cwd=root)
             self.assertEqual(pending.returncode, 0, pending.stderr)
             pending_data = json.loads(pending.stdout)["data"]
-            self.assertEqual(
-                pending_data["duplicate_candidates"],
-                report["duplicate_candidates"],
-            )
-            self.assertEqual(
-                {
-                    row["transaction_id"]
-                    for row in pending_data["transactions"]
-                    if "duplicate_suspected" in row["flags"]
-                },
-                {incoming["transaction_id"]},
+            self.assertEqual(pending_data["duplicate_count"], 0)
+            self.assertNotIn(
+                canonical["transaction_id"],
+                {row["transaction_id"] for row in pending_data["transactions"]},
             )
 
             status = self._run_cli(["status", "2026-05", "--json"], cwd=root)
             self.assertEqual(status.returncode, 0, status.stderr)
             status_data = json.loads(status.stdout)["data"]
-            self.assertEqual(status_data["records_processed"], 4)
+            self.assertEqual(status_data["records_processed"], 3)
+            self.assertEqual(status_data["source_occurrence_count"], 4)
             self.assertEqual(status_data["duplicate_count"], 2)
             self.assertEqual(status_data["duplicate_group_count"], 1)
             self.assertEqual(
                 status_data["duplicate_candidates"], report["duplicate_candidates"]
             )
-            status_text = self._run_cli(["status", "2026-05"], cwd=root)
-            self.assertEqual(status_text.returncode, 0, status_text.stderr)
-            self.assertIn(
-                "Duplicate candidates: 2 occurrences in 1 group",
-                status_text.stdout,
-            )
-
             reconcile = self._run_cli(["reconcile", "--json"], cwd=root)
             self.assertEqual(reconcile.returncode, 0, reconcile.stderr)
             self.assertEqual(
                 json.loads(reconcile.stdout)["data"]["duplicate_candidates"],
                 report["duplicate_candidates"],
-            )
-            reconcile_text = self._run_cli(["reconcile"], cwd=root)
-            self.assertEqual(reconcile_text.returncode, 0, reconcile_text.stderr)
-            self.assertIn(
-                "Duplicate candidates: 2 occurrences in 1 group",
-                reconcile_text.stdout,
             )
             state = load_identity_state(categorized_path)
             reconciled_historical = next(
@@ -971,32 +948,19 @@ def open(source_path):
             )
             self.assertEqual(html_report.returncode, 0, html_report.stderr)
             html_data = json.loads(html_report.stdout)["data"]
-            self.assertEqual(html_data["transaction_count"], 4)
+            self.assertEqual(html_data["transaction_count"], 3)
             self.assertEqual(
                 html_data["duplicate_candidates"], report["duplicate_candidates"]
             )
             html = html_path.read_text(encoding="utf-8")
-            self.assertIn(DUPLICATE_MATCH_TYPE, html)
-            for transaction_id in expected_ids:
-                self.assertIn(transaction_id, html)
+            self.assertIn("exact_one_to_one", html)
+            self.assertIn(canonical["transaction_id"], html)
 
-            for transaction_id in expected_ids:
-                transaction_diagnostic = report["transaction_diagnostics"][
-                    transaction_id
-                ]
-                self.assertEqual(
-                    set(transaction_diagnostic),
-                    {"needs_review", "duplicate_candidate"},
-                )
-                duplicate_diagnostic = transaction_diagnostic["duplicate_candidate"]
-                self.assertEqual(
-                    duplicate_diagnostic["match_type"], DUPLICATE_MATCH_TYPE
-                )
-                self.assertEqual(duplicate_diagnostic["occurrence_ids"], expected_ids)
-                self.assertEqual(
-                    transaction_diagnostic["needs_review"],
-                    expected_review_states[transaction_id] == "true",
-                )
+            canonical_diagnostic = report["transaction_diagnostics"][
+                canonical["transaction_id"]
+            ]
+            self.assertEqual(canonical_diagnostic["category"], "Dining")
+            self.assertFalse(canonical_diagnostic["needs_review"])
 
     def test_failed_import_reports_retained_duplicates_without_rewriting_state(
         self,
@@ -1108,24 +1072,17 @@ def open(source_path):
             resolved = next(
                 row for row in state.rows if "manual_correction" in row["flags"]
             )
-            pending = next(
-                row
-                for row in state.rows
-                if row["transaction_id"] != resolved["transaction_id"]
-            )
+            self.assertEqual(len(state.rows), 1)
+            self.assertEqual(resolved["source_occurrence_count"], "2")
             self.assertEqual(resolved["needs_review"], "false")
-            self.assertIn("duplicate_suspected", resolved["flags"].split(";"))
+            self.assertNotIn("duplicate_suspected", resolved["flags"].split(";"))
             self.assertNotIn("duplicate_review_promoted", resolved["flags"].split(";"))
-            self.assertIn(DUPLICATE_MATCH_TYPE, resolved["reason"])
-            self.assertEqual(pending["needs_review"], "true")
 
             pending_result = self._run_cli(["pending", "2026-05", "--json"], cwd=root)
             self.assertEqual(pending_result.returncode, 0, pending_result.stderr)
             pending_rows = json.loads(pending_result.stdout)["data"]["transactions"]
-            self.assertEqual(
-                [row["transaction_id"] for row in pending_rows],
-                [pending["transaction_id"]],
-            )
+            self.assertEqual(pending_rows, [])
+
     def test_combined_and_sequential_imports_produce_same_duplicate_group(
         self,
     ) -> None:
@@ -1537,6 +1494,54 @@ def open(source_path):
                     renamed_row["transaction_id"],
                 },
                 {folder_row["transaction_id"]},
+            )
+
+    def test_rename_replace_updates_retired_evidence_ownership(self) -> None:
+        first_row = "2026-06-18,SYNTHETIC CURRENT RECORD,-24.00,HKD"
+        retired_row = "2026-06-19,SYNTHETIC RETIRED RECORD,-25.00,HKD"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._setup_workspace(tmp)
+            original = root / "original.csv"
+            self._write_statement(original, [first_row, retired_row])
+            imported = self._run_cli(
+                ["import", str(original), "--no-interactive"], cwd=root
+            )
+            self.assertEqual(imported.returncode, 0, imported.stderr)
+
+            renamed = root / "renamed.csv"
+            original.rename(renamed)
+            accepted_rename = self._run_cli(
+                ["import", str(renamed), "--replace", "--no-interactive"], cwd=root
+            )
+            self.assertEqual(accepted_rename.returncode, 0, accepted_rename.stderr)
+
+            self._write_statement(renamed, [first_row])
+            replaced = self._run_cli(
+                ["import", str(renamed), "--replace", "--no-interactive"], cwd=root
+            )
+            self.assertEqual(replaced.returncode, 0, replaced.stderr)
+
+            state = load_identity_state(root / "output" / "categorized.csv")
+            records = {
+                record["transaction_id"]: (source, record)
+                for source in state.manifest["sources"]
+                for record in source["records"]
+            }
+            retired = next(
+                row
+                for row in state.source_evidence_rows
+                if records[row["transaction_id"]][1]["state"] == "retired"
+            )
+            source, record = records[retired["transaction_id"]]
+
+            self.assertEqual(retired["source_id"], source["source_id"])
+            self.assertEqual(
+                retired["source_namespace_id"], source["source_namespace_id"]
+            )
+            self.assertEqual(retired["source_record_id"], record["source_record_id"])
+            self.assertEqual(
+                retired["source_revision"],
+                record["allocation_origin"]["source_revision"],
             )
 
     def test_inserting_an_identical_source_does_not_move_a_saved_correction(

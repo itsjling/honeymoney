@@ -7,7 +7,10 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from honeymoney.csv_artifacts import csv_document, read_csv_artifact
-from honeymoney.duplicates import release_duplicate_review_ownership
+from honeymoney.duplicates import (
+    refresh_duplicate_candidates,
+    release_duplicate_review_ownership,
+)
 from honeymoney.identity import IdentityError, ambiguous_legacy_transaction_ids
 from honeymoney.identity_state import (
     IdentityState,
@@ -335,14 +338,19 @@ def ledger_output_documents(
         if identifier in manifest_ids and identifier not in active_ids
     )
     records_by_transaction_id = {
-        record["transaction_id"]: record
+        record["transaction_id"]: (source, record)
         for source in manifest["sources"]
         for record in source["records"]
     }
     for row in retained_evidence:
-        record = records_by_transaction_id[row["transaction_id"]]
+        source, record = records_by_transaction_id[row["transaction_id"]]
+        row["source_id"] = source["source_id"]
+        row["source_namespace_id"] = source["source_namespace_id"]
+        row["source_record_id"] = record["source_record_id"]
         if record["state"] == "retired":
             row["source_revision"] = record["allocation_origin"]["source_revision"]
+        else:
+            row["source_revision"] = source["source_revision"]
     validate_source_evidence_manifest_agreement(retained_evidence, manifest)
     if overlap_manifest_document_value is not None:
         from honeymoney.overlap import parse_overlap_manifest
@@ -573,7 +581,7 @@ def read_ledger(path: Path) -> list[dict[str, str]]:
 def _normalize_ledger_rows(state: IdentityState) -> list[dict[str, str]]:
     rows = state.rows
     for row in rows:
-        if not row["account_type"]:
+        if not row["account_type"] and not row.get("canonical_group_id"):
             row["account_type"] = {
                 "Bank Account": "bank",
                 "Credit Card": "credit_card",

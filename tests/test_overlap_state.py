@@ -1,11 +1,21 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
 
-from honeymoney.cli import _active_source_ids_by_fingerprint
-from honeymoney.corrections import apply_correction_operation, ledger_output_documents
+from honeymoney.cli import (
+    _active_source_ids_by_fingerprint,
+    _normalize_loaded_rows,
+    _reconcile_command,
+)
+from honeymoney.corrections import (
+    CORRECTION_COLUMNS,
+    apply_correction_operation,
+    ledger_output_documents,
+    read_ledger,
+)
 from honeymoney.csv_artifacts import csv_document
 from honeymoney.identity import (
     AllocationLocator,
@@ -154,6 +164,76 @@ class OverlapWorkspaceStateTest(unittest.TestCase):
                 list(loaded.rows[0]),
                 CATEGORIZED_COLUMNS,
             )
+
+    def test_reconcile_migrates_saved_source_correction_to_canonical_row(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            path = root / "categorized.csv"
+            self._write_issue_31_state(path)
+            source_transaction_id = load_identity_state(path).source_rows[0][
+                "transaction_id"
+            ]
+            corrections_path = root / "corrections.csv"
+            corrections_path.write_text(
+                csv_document(
+                    CORRECTION_COLUMNS,
+                    [
+                        {
+                            "transaction_id": source_transaction_id,
+                            "category": "Groceries",
+                            "needs_review": "false",
+                        }
+                    ],
+                ),
+                encoding="utf-8",
+            )
+            config_path = root / "config.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "paths": {"output": str(path)},
+                        "corrections": str(corrections_path),
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            self.assertEqual(_reconcile_command(["--config", str(config_path)]), 0)
+
+            [canonical] = load_identity_state(path).rows
+            self.assertEqual(canonical["category"], "Groceries")
+            self.assertEqual(canonical["needs_review"], "false")
+
+    def test_validated_canonical_account_type_conflict_stays_empty(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "categorized.csv"
+            first, first_source = _source_row("a.csv", "a.csv")
+            second, second_source = _source_row("b.csv", "b.csv")
+            first["account_type"] = "credit_card"
+            second["account_type"] = "bank"
+            manifest = {"schema_version": 1, "sources": [first_source, second_source]}
+            canonical = canonicalize_overlaps(
+                [first, second],
+                [],
+                {
+                    "schema_version": 1,
+                    "namespace_key": "ovns_" + "a" * 64,
+                    "groups": [],
+                },
+            )
+            files = ledger_output_documents(
+                path,
+                canonical.rows,
+                identity_manifest=manifest,
+                source_occurrences=[first, second],
+                overlap_manifest=canonical.manifest,
+            )
+            persist_generation(path, files)
+
+            [loaded] = read_ledger(path)
+
+            self.assertEqual(loaded["account_type"], "")
+            self.assertEqual(_normalize_loaded_rows([loaded])[0]["account_type"], "")
 
     def test_migrated_partial_source_correction_marks_pooled_history_for_review(
         self,

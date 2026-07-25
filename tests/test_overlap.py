@@ -246,6 +246,23 @@ class CanonicalOverlapTest(unittest.TestCase):
         self.assertEqual(remaining.rows[0]["category"], "Dining")
         self.assertEqual(remaining.rows[0]["provenance_status"], SINGLE_SOURCE_STATUS)
 
+    def test_current_source_template_replaces_stale_canonical_fields(self) -> None:
+        first_source = _occurrence("1", "a")
+        second_source = _occurrence("2", "b")
+        first_source.update({"account": "Card", "account_type": "credit_card"})
+        second_source.update({"account": "Bank", "account_type": "bank"})
+        first = canonicalize_overlaps(
+            [first_source, second_source], [], empty_overlap_manifest(_NAMESPACE_KEY)
+        )
+        first.rows[0]["category"] = "Groceries"
+
+        current = canonicalize_overlaps([first_source], first.rows, first.manifest)
+
+        [canonical] = current.rows
+        self.assertEqual(canonical["account"], "Card")
+        self.assertEqual(canonical["account_type"], "credit_card")
+        self.assertEqual(canonical["category"], "Groceries")
+
     def test_replacement_to_zero_retires_then_restores_the_same_slot(self) -> None:
         occurrence = _occurrence("1", "a")
         first = canonicalize_overlaps(

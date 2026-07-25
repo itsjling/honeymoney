@@ -1702,7 +1702,7 @@ def _overlap_diagnostic_for_rows(
 def _normalize_loaded_rows(rows: list[dict[str, str]]) -> list[dict[str, str]]:
     normalized = [dict(row) for row in rows]
     for row in normalized:
-        if not row.get("account_type"):
+        if not row.get("account_type") and not row.get("canonical_group_id"):
             row["account_type"] = {
                 "Bank Account": "bank",
                 "Credit Card": "credit_card",
@@ -2004,6 +2004,11 @@ def _reconcile_command(argv: list[str]) -> int:
             state.source_rows, [], state.overlap_manifest
         )
         rows = _normalize_loaded_rows(overlap_result.rows)
+        correction_projection = project_corrections(
+            overlap_result, load_corrections(config)
+        )
+        apply_corrections(rows, correction_projection.corrections)
+        apply_history_ambiguity(rows, correction_projection.ambiguous_transaction_ids)
     else:
         rows = _normalize_loaded_rows(state.rows)
         overlap_result = (

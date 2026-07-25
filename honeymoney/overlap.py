@@ -404,11 +404,10 @@ def canonicalize_overlaps(
             if identifier in source_transaction_ids:
                 raise ValueError("overlap_identity_hash_conflict")
             prior = prior_by_id.get(identifier)
-            row = (
-                copy.deepcopy(dict(prior))
-                if prior is not None
-                else copy.deepcopy(agreed_template)
-            )
+            row = copy.deepcopy(agreed_template)
+            if prior is not None:
+                for field in _MUTABLE_FIELDS:
+                    row[field] = str(prior.get(field, ""))
             row.update(
                 {
                     "transaction_id": identifier,
