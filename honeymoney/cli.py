@@ -335,10 +335,14 @@ def _run_pipeline(
             if supporting_source_ids and supporting_source_ids <= reset_source_ids:
                 removed_correction_ids.update(group["canonical_transaction_ids"])
         fingerprint_sources = _active_source_ids_by_fingerprint(identity_state.manifest)
+        historical_fingerprint_sources = _source_ids_by_fingerprint(
+            identity_state.manifest
+        )
         for group in identity_state.overlap_manifest["groups"]:
+            fingerprint = group["record_fingerprint"]
             supporting_source_ids = fingerprint_sources.get(
-                group["record_fingerprint"], set()
-            )
+                fingerprint
+            ) or historical_fingerprint_sources.get(fingerprint, set())
             if supporting_source_ids and supporting_source_ids <= reset_source_ids:
                 removed_correction_ids.update(
                     slot["transaction_id"] for slot in group["slots"]
@@ -2414,6 +2418,14 @@ def _active_source_ids_by_fingerprint(
     manifest: Mapping[str, Any],
 ) -> dict[str, set[str]]:
     """Return only active source support for reset ownership checks."""
+    return _source_ids_by_fingerprint(manifest, active_only=True)
+
+
+def _source_ids_by_fingerprint(
+    manifest: Mapping[str, Any],
+    *,
+    active_only: bool = False,
+) -> dict[str, set[str]]:
     support: dict[str, set[str]] = {}
     sources = manifest.get("sources", [])
     if not isinstance(sources, list):
@@ -2426,7 +2438,9 @@ def _active_source_ids_by_fingerprint(
         if not isinstance(source_id, str) or not isinstance(records, list):
             continue
         for record in records:
-            if not isinstance(record, Mapping) or record.get("state") != "active":
+            if not isinstance(record, Mapping):
+                continue
+            if active_only and record.get("state") != "active":
                 continue
             fingerprint = record.get("record_fingerprint")
             if isinstance(fingerprint, str):
