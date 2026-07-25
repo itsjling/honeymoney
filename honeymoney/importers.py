@@ -7,6 +7,7 @@ import json
 import logging
 import re
 from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from fnmatch import fnmatch
@@ -38,6 +39,12 @@ from honeymoney.schema import (
     allowed_owners,
     allowed_payment_methods,
 )
+
+
+@dataclass(frozen=True)
+class _PdfBalanceLine:
+    text: str
+    is_continuation: bool = False
 
 
 def _relative_source(path: Path, input_root: Path) -> str:
@@ -1341,6 +1348,7 @@ def _pdf_balance_observations(
         else {}
     )
     current_sections = {"words": "", "tables": ""}
+    transaction_tables = {"words": False, "tables": False}
     source_observations: dict[str, dict[tuple[str, str], dict[str, list[Decimal]]]] = {
         "words": {},
         "tables": {},
@@ -1349,19 +1357,30 @@ def _pdf_balance_observations(
         for source, lines in _pdf_balance_line_sources(page, pdf_settings).items():
             observations = source_observations[source]
             current_section = current_sections[source]
-            for text in lines:
+            in_transaction_table = transaction_tables[source]
+            for line in lines:
+                text = line.text
                 folded = " ".join(text.casefold().split())
                 matched_section = _pdf_balance_heading_section(
-                    text, accounts, section_settings
+                    line,
+                    accounts,
+                    section_settings,
+                    in_transaction_table=in_transaction_table,
                 )
                 if matched_section:
                     current_section = matched_section
-                elif not _pdf_balance_line_has_transaction_shape(
-                    text, section_settings
+                    in_transaction_table = False
+                elif _pdf_balance_line_can_change_section(
+                    line,
+                    section_settings,
+                    in_transaction_table=in_transaction_table,
                 ) and _pdf_line_has_marker(
                     folded, section_settings.get("section_end_markers", [])
                 ):
                     current_section = ""
+                    in_transaction_table = False
+                saw_opening = False
+                saw_closing = False
                 for mapping in mappings:
                     if not isinstance(mapping, dict):
                         continue
@@ -1377,40 +1396,57 @@ def _pdf_balance_observations(
                         observations.setdefault(target, {"opening": [], "closing": []})[
                             kind
                         ].append(balance)
+                        if kind == "opening":
+                            saw_opening = True
+                        else:
+                            saw_closing = True
+                if _pdf_line_has_all_markers(
+                    folded, section_settings.get("header_markers", [])
+                ):
+                    in_transaction_table = True
+                if saw_opening:
+                    in_transaction_table = True
+                if saw_closing or _pdf_line_has_marker(
+                    folded, section_settings.get("table_end_descriptions", [])
+                ):
+                    in_transaction_table = False
             current_sections[source] = current_section
+            transaction_tables[source] = in_transaction_table
     return _merge_pdf_balance_observations(source_observations.values())
 
 
 def _pdf_balance_lines(page: Any, pdf_settings: dict[str, Any]) -> list[str]:
     sources = _pdf_balance_line_sources(page, pdf_settings)
     word_lines = sources["words"]
-    lines = list(word_lines)
+    lines = [line.text for line in word_lines]
     word_line_counts: dict[str, int] = {}
     for line in word_lines:
-        key = " ".join(line.split())
+        key = " ".join(line.text.split())
         word_line_counts[key] = word_line_counts.get(key, 0) + 1
     for line in sources["tables"]:
-        key = " ".join(line.split())
+        key = " ".join(line.text.split())
         if word_line_counts.get(key, 0):
             word_line_counts[key] -= 1
             continue
-        lines.append(line)
+        lines.append(line.text)
     return lines
 
 
 def _pdf_balance_line_sources(
     page: Any, pdf_settings: dict[str, Any]
-) -> dict[str, list[str]]:
-    word_lines: list[str] = []
+) -> dict[str, list[_PdfBalanceLine]]:
+    word_lines: list[_PdfBalanceLine] = []
     if hasattr(page, "extract_words"):
         words = page.extract_words(x_tolerance=1, y_tolerance=3) or []
         word_lines.extend(
-            " ".join(str(word.get("text", "")) for word in line).strip()
+            _PdfBalanceLine(
+                " ".join(str(word.get("text", "")) for word in line).strip()
+            )
             for line in _pdf_word_lines(
                 words, float(pdf_settings.get("word_y_tolerance", 3))
             )
         )
-    table_lines: list[str] = []
+    table_lines: list[_PdfBalanceLine] = []
     for table in _pdf_tables(page):
         for row in table:
             cell_lines = [str(cell or "").splitlines() or [""] for cell in row]
@@ -1423,9 +1459,11 @@ def _pdf_balance_line_sources(
                 )
                 if not line:
                     continue
-                table_lines.append(line)
+                table_lines.append(
+                    _PdfBalanceLine(line, is_continuation=line_index > 0)
+                )
     return {
-        "words": [line for line in word_lines if line],
+        "words": [line for line in word_lines if line.text],
         "tables": table_lines,
     }
 
@@ -1454,11 +1492,30 @@ def _merge_pdf_balance_observations(
 
 
 def _pdf_balance_heading_section(
-    text: str, accounts: dict[str, Any], settings: dict[str, Any]
+    line: _PdfBalanceLine,
+    accounts: dict[str, Any],
+    settings: dict[str, Any],
+    *,
+    in_transaction_table: bool,
 ) -> str:
-    if _pdf_balance_line_has_transaction_shape(text, settings):
+    if not _pdf_balance_line_can_change_section(
+        line, settings, in_transaction_table=in_transaction_table
+    ):
         return ""
-    return _pdf_matching_section(text, accounts)
+    return _pdf_matching_section(line.text, accounts)
+
+
+def _pdf_balance_line_can_change_section(
+    line: _PdfBalanceLine,
+    settings: dict[str, Any],
+    *,
+    in_transaction_table: bool,
+) -> bool:
+    return (
+        not in_transaction_table
+        and not line.is_continuation
+        and not _pdf_balance_line_has_transaction_shape(line.text, settings)
+    )
 
 
 def _pdf_balance_line_has_transaction_shape(

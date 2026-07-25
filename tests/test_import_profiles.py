@@ -613,6 +613,56 @@ class PdfBalanceReconciliationTest(unittest.TestCase):
         self.assertEqual(rows[0]["statement_opening_balance"], "100.00")
         self.assertEqual(rows[0]["statement_closing_balance"], "95.00")
 
+    def test_section_label_in_wrapped_description_keeps_table_balance_section(
+        self,
+    ) -> None:
+        profile = load_profile("hsbc_one_pdf.json")
+        words = [
+            {"text": "Statement", "x0": 20, "top": 10},
+            {"text": "Date", "x0": 75, "top": 10},
+            {"text": "05", "x0": 105, "top": 10},
+            {"text": "January", "x0": 123, "top": 10},
+            {"text": "2026", "x0": 153, "top": 10},
+            {"text": "Account:", "x0": 5, "top": 30},
+            {"text": "Foreign", "x0": 20, "top": 30},
+            {"text": "Currency", "x0": 65, "top": 30},
+            {"text": "Savings", "x0": 115, "top": 30},
+            {"text": "Date", "x0": 82, "top": 50},
+            {"text": "Transaction", "x0": 118, "top": 50},
+            {"text": "Details", "x0": 190, "top": 50},
+            {"text": "Deposit", "x0": 350, "top": 50},
+            {"text": "Withdrawal", "x0": 418, "top": 50},
+            {"text": "Balance", "x0": 500, "top": 50},
+            {"text": "AUD", "x0": 59, "top": 70},
+            {"text": "31", "x0": 79, "top": 70},
+            {"text": "Dec", "x0": 85, "top": 70},
+            {"text": "SYNTHETIC", "x0": 120, "top": 70},
+            {"text": "TRANSFER", "x0": 120, "top": 90},
+            {"text": "TO", "x0": 185, "top": 90},
+            {"text": "HKD", "x0": 215, "top": 90},
+            {"text": "Savings", "x0": 250, "top": 90},
+            {"text": "5.00", "x0": 425, "top": 110},
+        ]
+        tables = [
+            [
+                ["Account: Foreign Currency Savings"],
+                ["AUD B/F BALANCE 100.00"],
+                ["31 Dec SYNTHETIC\nTRANSFER TO HKD Savings", "", "5.00"],
+                ["AUD C/F BALANCE 95.00"],
+            ]
+        ]
+
+        rows, warnings, _ = _import_fake_pdf(profile, tables=tables, words=words)
+
+        self.assertEqual(warnings, [])
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["account_id"], "hsbc_one_fcy_savings")
+        self.assertEqual(
+            rows[0]["original_description"], "SYNTHETIC TRANSFER TO HKD Savings"
+        )
+        self.assertEqual(rows[0]["statement_opening_balance"], "100.00")
+        self.assertEqual(rows[0]["statement_closing_balance"], "95.00")
+
 
 class PdfByteFixtureReviewTest(unittest.TestCase):
     def test_pdf_byte_goldens_are_reproducible_and_privacy_reviewed(self) -> None:
