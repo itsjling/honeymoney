@@ -65,6 +65,9 @@ def offline_getaddrinfo(
 
 def install() -> None:
     setattr(socket, "socket", forbid_socket)
+    setattr(socket, "SocketType", forbid_socket)
+    setattr(_socket, "socket", forbid_socket)
+    setattr(_socket, "SocketType", forbid_socket)
     setattr(socket, "create_connection", forbid_socket)
     setattr(socket, "getaddrinfo", offline_getaddrinfo)
     setattr(socket, "gethostbyname", forbid_dns)

@@ -17,8 +17,17 @@ class OfflineTestRunnerTest(unittest.TestCase):
 
         def guarded_discover(start_dir: str) -> unittest.TestSuite:
             discovery_calls.append(start_dir)
-            with self.assertRaisesRegex(AssertionError, "creating sockets"):
-                socket.socket()
+            constructors = {
+                "socket.socket": socket.socket,
+                "socket.SocketType": socket.SocketType,
+                "socket._socket.socket": socket._socket.socket,
+                "_socket.socket": _socket.socket,
+                "_socket.SocketType": _socket.SocketType,
+            }
+            for name, constructor in constructors.items():
+                with self.subTest(constructor=name):
+                    with self.assertRaisesRegex(AssertionError, "creating sockets"):
+                        constructor()
             with self.assertRaisesRegex(AssertionError, "creating sockets"):
                 socket.create_connection(("localhost", 80))
             with self.assertRaisesRegex(AssertionError, "DNS resolution"):
@@ -81,7 +90,10 @@ class OfflineTestRunnerTest(unittest.TestCase):
                     [
                         sys.executable,
                         "-c",
-                        "import ssl; import socket; socket.socket()",
+                        (
+                            "import ssl; import _socket; import socket; "
+                            "socket.SocketType()"
+                        ),
                     ],
                     capture_output=True,
                     text=True,
@@ -112,19 +124,57 @@ class OfflineTestRunnerTest(unittest.TestCase):
             child_result.stderr,
         )
 
-    def test_direct_dns_guard_is_inherited_by_default_and_composed_children(
+    def test_network_guard_is_inherited_by_default_and_composed_children(
         self,
     ) -> None:
-        resolver_calls = {
-            "gethostbyname": "socket.gethostbyname('127.0.0.1')",
-            "gethostbyname_ex": "socket.gethostbyname_ex('127.0.0.1')",
-            "gethostbyaddr": "socket.gethostbyaddr('127.0.0.1')",
-            "getnameinfo": (
-                "socket.getnameinfo(('127.0.0.1', 80), "
-                "socket.NI_NUMERICHOST | socket.NI_NUMERICSERV)"
+        guarded_calls = {
+            "socket_socket": (
+                "socket.socket()",
+                "default tests must inject network transports",
             ),
-            "getfqdn": "socket.getfqdn('127.0.0.1')",
-            "_socket_gethostbyname": "_socket.gethostbyname('127.0.0.1')",
+            "socket_socket_type": (
+                "socket.SocketType()",
+                "default tests must inject network transports",
+            ),
+            "socket_private_socket": (
+                "socket._socket.socket()",
+                "default tests must inject network transports",
+            ),
+            "_socket_socket": (
+                "_socket.socket()",
+                "default tests must inject network transports",
+            ),
+            "_socket_socket_type": (
+                "_socket.SocketType()",
+                "default tests must inject network transports",
+            ),
+            "gethostbyname": (
+                "socket.gethostbyname('127.0.0.1')",
+                "must not perform direct DNS resolution",
+            ),
+            "gethostbyname_ex": (
+                "socket.gethostbyname_ex('127.0.0.1')",
+                "must not perform direct DNS resolution",
+            ),
+            "gethostbyaddr": (
+                "socket.gethostbyaddr('127.0.0.1')",
+                "must not perform direct DNS resolution",
+            ),
+            "getnameinfo": (
+                (
+                    "socket.getnameinfo(('127.0.0.1', 80), "
+                    "socket.NI_NUMERICHOST | socket.NI_NUMERICSERV)"
+                ),
+                "must not perform direct DNS resolution",
+            ),
+            "getfqdn": (
+                "socket.getfqdn('127.0.0.1')",
+                "must not perform direct DNS resolution",
+            ),
+            "_socket_gethostbyname": (
+                "_socket.gethostbyname('127.0.0.1')",
+                "must not perform direct DNS resolution",
+            ),
         }
         hook_root = run_tests_offline.REPO_ROOT / "tests"
         scenarios = {
@@ -142,7 +192,7 @@ class OfflineTestRunnerTest(unittest.TestCase):
 
                 def guarded_discover(start_dir: str) -> unittest.TestSuite:
                     del start_dir
-                    for name, expression in resolver_calls.items():
+                    for name, (expression, _) in guarded_calls.items():
                         child_results[name] = subprocess.run(
                             [
                                 sys.executable,
@@ -175,12 +225,12 @@ class OfflineTestRunnerTest(unittest.TestCase):
                     result = run_tests_offline.main()
 
                 self.assertEqual(result, 0)
-                self.assertEqual(set(child_results), set(resolver_calls))
+                self.assertEqual(set(child_results), set(guarded_calls))
                 for name, child_result in child_results.items():
                     with self.subTest(scenario=scenario, resolver=name):
                         self.assertNotEqual(child_result.returncode, 0)
                         self.assertIn(
-                            "must not perform direct DNS resolution",
+                            guarded_calls[name][1],
                             child_result.stderr,
                         )
 

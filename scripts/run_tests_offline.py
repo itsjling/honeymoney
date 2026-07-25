@@ -73,6 +73,9 @@ def main() -> int:
 
     with (
         patch("socket.socket", side_effect=forbid_socket),
+        patch("socket.SocketType", side_effect=forbid_socket),
+        patch("_socket.socket", side_effect=forbid_socket),
+        patch("_socket.SocketType", side_effect=forbid_socket),
         patch("socket.create_connection", side_effect=forbid_socket),
         patch("socket.getaddrinfo", side_effect=offline_getaddrinfo),
         patch("socket.gethostbyname", side_effect=forbid_dns),
