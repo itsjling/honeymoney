@@ -811,6 +811,30 @@ class CashFlowWorkflowTest(unittest.TestCase):
                         "source_file": "synthetic.csv",
                         "category": "Other",
                     },
+                    {
+                        "transaction_id": "txn_partial_matched",
+                        "date": "2026-06-05",
+                        "account_id": "bank_partial",
+                        "account_type": "bank",
+                        "posted_amount": "5.00",
+                        "posted_currency": "HKD",
+                        "amount_hkd": "5.00",
+                        "statement_opening_balance": "50.00",
+                        "statement_closing_balance": "55.00",
+                        "source_file": "synthetic-a.csv",
+                        "category": "Other",
+                    },
+                    {
+                        "transaction_id": "txn_partial_unavailable",
+                        "date": "2026-06-06",
+                        "account_id": "bank_partial",
+                        "account_type": "bank",
+                        "posted_amount": "5.00",
+                        "posted_currency": "HKD",
+                        "amount_hkd": "5.00",
+                        "source_file": "synthetic-b.csv",
+                        "category": "Other",
+                    },
                 ],
             )
 
@@ -832,6 +856,11 @@ class CashFlowWorkflowTest(unittest.TestCase):
             self.assertEqual(balances["bank_difference"]["result"], "mismatched")
             self.assertEqual(
                 balances["bank_difference"]["statements"][0]["difference"], "5.00"
+            )
+            self.assertEqual(balances["bank_partial"]["status"], "unavailable")
+            self.assertEqual(
+                balances["bank_partial"]["reason"],
+                "One or more statement balance checks are unavailable.",
             )
 
     def test_balance_reconciliation_separates_source_identity_and_currency(
@@ -869,6 +898,10 @@ class CashFlowWorkflowTest(unittest.TestCase):
 
         self.assertEqual(result["status"], "unavailable")
         self.assertEqual(result["result"], "unavailable")
+        self.assertEqual(
+            result["reason"],
+            "One or more statement balance checks are unavailable.",
+        )
         self.assertEqual(len(result["statements"]), 3)
         self.assertEqual(
             [statement["posted_currency"] for statement in result["statements"]],

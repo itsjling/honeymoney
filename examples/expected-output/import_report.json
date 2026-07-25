@@ -36,6 +36,7 @@
     "ambiguous_transactions": 0,
     "balance_reconciliation": {
       "starter_csv": {
+        "reason": "One or more statement balance checks are unavailable.",
         "result": "unavailable",
         "statements": [
           {

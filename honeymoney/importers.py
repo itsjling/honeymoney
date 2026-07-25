@@ -1340,38 +1340,67 @@ def _pdf_balance_observations(
         if isinstance(section_settings, dict)
         else {}
     )
-    current_section = ""
-    observations: dict[tuple[str, str], dict[str, list[Decimal]]] = {}
+    current_sections = {"words": "", "tables": ""}
+    source_observations: dict[str, dict[tuple[str, str], dict[str, list[Decimal]]]] = {
+        "words": {},
+        "tables": {},
+    }
     for page in pdf.pages:
-        lines = _pdf_balance_lines(page, pdf_settings)
-        for text in lines:
-            folded = " ".join(text.casefold().split())
-            matched_section = _pdf_matching_section(folded, accounts)
-            if matched_section:
-                current_section = matched_section
-            elif _pdf_line_has_marker(
-                folded, section_settings.get("section_end_markers", [])
-            ):
-                current_section = ""
-            for mapping in mappings:
-                if not isinstance(mapping, dict):
-                    continue
-                section = str(mapping.get("section", ""))
-                if section and section != current_section:
-                    continue
-                for kind in ("opening", "closing"):
-                    match = re.search(str(mapping.get(f"{kind}_regex", "")), text)
-                    if match is None:
+        for source, lines in _pdf_balance_line_sources(page, pdf_settings).items():
+            observations = source_observations[source]
+            current_section = current_sections[source]
+            for text in lines:
+                folded = " ".join(text.casefold().split())
+                matched_section = _pdf_balance_heading_section(
+                    text, accounts, section_settings
+                )
+                if matched_section:
+                    current_section = matched_section
+                elif not _pdf_balance_line_has_transaction_shape(
+                    text, section_settings
+                ) and _pdf_line_has_marker(
+                    folded, section_settings.get("section_end_markers", [])
+                ):
+                    current_section = ""
+                for mapping in mappings:
+                    if not isinstance(mapping, dict):
                         continue
-                    target = _pdf_balance_target(mapping, accounts, match)
-                    balance = _strict_pdf_balance(match.group("balance"))
-                    observations.setdefault(target, {"opening": [], "closing": []})[
-                        kind
-                    ].append(balance)
-    return observations
+                    section = str(mapping.get("section", ""))
+                    if section and section != current_section:
+                        continue
+                    for kind in ("opening", "closing"):
+                        match = re.search(str(mapping.get(f"{kind}_regex", "")), text)
+                        if match is None:
+                            continue
+                        target = _pdf_balance_target(mapping, accounts, match)
+                        balance = _strict_pdf_balance(match.group("balance"))
+                        observations.setdefault(target, {"opening": [], "closing": []})[
+                            kind
+                        ].append(balance)
+            current_sections[source] = current_section
+    return _merge_pdf_balance_observations(source_observations.values())
 
 
 def _pdf_balance_lines(page: Any, pdf_settings: dict[str, Any]) -> list[str]:
+    sources = _pdf_balance_line_sources(page, pdf_settings)
+    word_lines = sources["words"]
+    lines = list(word_lines)
+    word_line_counts: dict[str, int] = {}
+    for line in word_lines:
+        key = " ".join(line.split())
+        word_line_counts[key] = word_line_counts.get(key, 0) + 1
+    for line in sources["tables"]:
+        key = " ".join(line.split())
+        if word_line_counts.get(key, 0):
+            word_line_counts[key] -= 1
+            continue
+        lines.append(line)
+    return lines
+
+
+def _pdf_balance_line_sources(
+    page: Any, pdf_settings: dict[str, Any]
+) -> dict[str, list[str]]:
     word_lines: list[str] = []
     if hasattr(page, "extract_words"):
         words = page.extract_words(x_tolerance=1, y_tolerance=3) or []
@@ -1381,11 +1410,7 @@ def _pdf_balance_lines(page: Any, pdf_settings: dict[str, Any]) -> list[str]:
                 words, float(pdf_settings.get("word_y_tolerance", 3))
             )
         )
-    lines = [line for line in word_lines if line]
-    word_line_counts: dict[str, int] = {}
-    for line in lines:
-        key = " ".join(line.split())
-        word_line_counts[key] = word_line_counts.get(key, 0) + 1
+    table_lines: list[str] = []
     for table in _pdf_tables(page):
         for row in table:
             cell_lines = [str(cell or "").splitlines() or [""] for cell in row]
@@ -1398,12 +1423,54 @@ def _pdf_balance_lines(page: Any, pdf_settings: dict[str, Any]) -> list[str]:
                 )
                 if not line:
                     continue
-                key = " ".join(line.split())
-                if word_line_counts.get(key, 0):
-                    word_line_counts[key] -= 1
-                    continue
-                lines.append(line)
-    return lines
+                table_lines.append(line)
+    return {
+        "words": [line for line in word_lines if line],
+        "tables": table_lines,
+    }
+
+
+def _merge_pdf_balance_observations(
+    sources: Any,
+) -> dict[tuple[str, str], dict[str, list[Decimal]]]:
+    merged: dict[tuple[str, str], dict[str, list[Decimal]]] = {}
+    for observations in sources:
+        for target, balances in observations.items():
+            target_balances = merged.setdefault(target, {"opening": [], "closing": []})
+            for kind in ("opening", "closing"):
+                existing_counts = {
+                    value: target_balances[kind].count(value)
+                    for value in target_balances[kind]
+                }
+                source_counts = {
+                    value: balances[kind].count(value) for value in balances[kind]
+                }
+                for value in balances[kind]:
+                    missing = source_counts[value] - existing_counts.get(value, 0)
+                    if missing > 0:
+                        target_balances[kind].extend([value] * missing)
+                        existing_counts[value] = source_counts[value]
+    return merged
+
+
+def _pdf_balance_heading_section(
+    text: str, accounts: dict[str, Any], settings: dict[str, Any]
+) -> str:
+    if _pdf_balance_line_has_transaction_shape(text, settings):
+        return ""
+    return _pdf_matching_section(text, accounts)
+
+
+def _pdf_balance_line_has_transaction_shape(
+    text: str, settings: dict[str, Any]
+) -> bool:
+    date_pattern = str(settings.get("date_regex", ""))
+    if date_pattern and re.search(date_pattern, text):
+        return True
+    amount_pattern = re.compile(
+        str(settings.get("amount_regex", r"^[+-]?\d[\d,]*\.\d{2}$"))
+    )
+    return any(amount_pattern.fullmatch(token) for token in text.split())
 
 
 def _pdf_balance_target(
@@ -1523,7 +1590,21 @@ def _pdf_sectioned_word_source_rows(
             text = " ".join(str(word.get("text", "")) for word in line).strip()
             folded = " ".join(text.casefold().split())
 
-            matched_section = _pdf_matching_section(folded, accounts)
+            date_match = date_pattern.match(text)
+            deposits = _pdf_amounts_in_bounds(
+                line, columns.get("deposit"), amount_pattern
+            )
+            withdrawals = _pdf_amounts_in_bounds(
+                line, columns.get("withdrawal"), amount_pattern
+            )
+            description = _pdf_words_in_bounds(line, columns.get("description"))
+            has_transaction_shape = bool(
+                in_table
+                and (date_match is not None or deposits or withdrawals or description)
+            )
+            matched_section = (
+                "" if has_transaction_shape else _pdf_matching_section(folded, accounts)
+            )
             matched_account = accounts.get(matched_section)
             if isinstance(matched_account, dict):
                 current_account = {
@@ -1567,12 +1648,10 @@ def _pdf_sectioned_word_source_rows(
                 current_currency = currencies[0]
                 account_currencies[current_account["account_id"]] = current_currency
 
-            date_match = date_pattern.match(text)
             if date_match is not None:
                 current_date = _pdf_sectioned_date(date_match, statement_date)
                 account_dates[current_account["account_id"]] = current_date
 
-            description = _pdf_words_in_bounds(line, columns.get("description"))
             if description:
                 description_parts.append(description)
             joined_description = " ".join(description_parts).strip()
@@ -1585,12 +1664,6 @@ def _pdf_sectioned_word_source_rows(
                     in_table = False
                 continue
 
-            deposits = _pdf_amounts_in_bounds(
-                line, columns.get("deposit"), amount_pattern
-            )
-            withdrawals = _pdf_amounts_in_bounds(
-                line, columns.get("withdrawal"), amount_pattern
-            )
             if not deposits and not withdrawals:
                 continue
             if deposits and withdrawals:
@@ -1693,7 +1766,7 @@ def _pdf_matching_section(text: str, accounts: dict[str, Any]) -> str:
         (
             str(section)
             for section in accounts
-            if " ".join(str(section).casefold().split()) == normalized_text
+            if " ".join(str(section).casefold().split()) in normalized_text
         ),
         "",
     )

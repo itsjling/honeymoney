@@ -469,6 +469,54 @@ class PdfBalanceReconciliationTest(unittest.TestCase):
             },
         )
 
+    def test_balance_scanner_keeps_table_section_context_and_repeated_rows(
+        self,
+    ) -> None:
+        class Page:
+            def extract_words(self, **kwargs):
+                return [
+                    {"text": "Account:", "x0": 20, "top": 10},
+                    {"text": "HKD", "x0": 80, "top": 10},
+                    {"text": "Savings", "x0": 110, "top": 10},
+                    {"text": "Account:", "x0": 20, "top": 70},
+                    {"text": "HKD", "x0": 80, "top": 70},
+                    {"text": "Current", "x0": 110, "top": 70},
+                ]
+
+            def extract_tables(self):
+                return [
+                    [
+                        ["Account: HKD Savings"],
+                        ["B/F BALANCE +100.00"],
+                        ["B/F BALANCE +100.00"],
+                        ["C/F BALANCE +110.00"],
+                        ["Account: HKD Current"],
+                        ["B/F BALANCE +200.00"],
+                        ["C/F BALANCE +210.00"],
+                    ]
+                ]
+
+        class Pdf:
+            pages = [Page()]
+
+        observations = _pdf_balance_observations(
+            Pdf(), load_profile("hsbc_one_pdf.json")["pdf"]
+        )
+
+        self.assertEqual(
+            observations,
+            {
+                ("hsbc_one_hkd_savings", "HKD"): {
+                    "opening": [Decimal("100.00"), Decimal("100.00")],
+                    "closing": [Decimal("110.00")],
+                },
+                ("hsbc_one_hkd_current", "HKD"): {
+                    "opening": [Decimal("200.00")],
+                    "closing": [Decimal("210.00")],
+                },
+            },
+        )
+
     def test_section_end_stops_balance_scanner_and_transaction_parser(self) -> None:
         profile = load_profile("hsbc_one_pdf.json")
         profile["pdf"]["sectioned_word_rows"]["section_end_markers"] = ["END SECTION"]
@@ -527,6 +575,7 @@ class PdfBalanceReconciliationTest(unittest.TestCase):
             {"text": "05", "x0": 105, "top": 10},
             {"text": "January", "x0": 123, "top": 10},
             {"text": "2026", "x0": 153, "top": 10},
+            {"text": "Account:", "x0": 5, "top": 30},
             {"text": "Foreign", "x0": 20, "top": 30},
             {"text": "Currency", "x0": 65, "top": 30},
             {"text": "Savings", "x0": 115, "top": 30},

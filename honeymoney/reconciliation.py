@@ -403,6 +403,8 @@ def _balance_reconciliation(
         elif results == {"matched"}:
             account["status"] = "reconciled"
             account["result"] = "matched"
+        elif "unavailable" in results:
+            account["reason"] = "One or more statement balance checks are unavailable."
     return accounts
 
 
