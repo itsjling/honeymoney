@@ -994,8 +994,8 @@ def _remove_reason(reasons: str, reason: str) -> str:
 
 
 def _validate_canonical_amount_hkd(
-    canonical_row: Mapping[str, Any],
-    source_occurrences: list[Mapping[str, Any]] | tuple[Mapping[str, Any], ...],
+    canonical_row: Mapping[str, object],
+    source_occurrences: Sequence[Mapping[str, object]],
     group_fingerprint: str,
 ) -> None:
     """Require each canonical total to match its active source evidence."""
