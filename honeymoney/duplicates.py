@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from types import MappingProxyType
 from typing import Any, Mapping
 
 from honeymoney.identity import has_stable_v2_identity, record_fingerprint
@@ -33,6 +34,20 @@ class DuplicateEvaluation:
     """The complete duplicate-candidate result for one prospective ledger."""
 
     groups: tuple[DuplicateCandidateGroup, ...]
+    _diagnostic_groups_by_occurrence_id: Mapping[str, DuplicateCandidateGroup] = field(
+        init=False, repr=False, compare=False
+    )
+
+    def __post_init__(self) -> None:
+        diagnostic_groups: dict[str, DuplicateCandidateGroup] = {}
+        for group in self.groups:
+            for occurrence_id in group.occurrence_ids:
+                diagnostic_groups[occurrence_id] = group
+        object.__setattr__(
+            self,
+            "_diagnostic_groups_by_occurrence_id",
+            MappingProxyType(diagnostic_groups),
+        )
 
     @property
     def occurrence_ids(self) -> tuple[str, ...]:
@@ -49,19 +64,18 @@ class DuplicateEvaluation:
         return sum(len(group.occurrence_ids) for group in self.groups)
 
     def diagnostic_for(self, occurrence_id: str) -> dict[str, object] | None:
-        for group in self.groups:
-            if occurrence_id not in group.occurrence_ids:
-                continue
-            return {
-                "match_type": group.match_type,
-                "occurrence_ids": list(group.occurrence_ids),
-                "counterpart_occurrence_ids": [
-                    candidate
-                    for candidate in group.occurrence_ids
-                    if candidate != occurrence_id
-                ],
-            }
-        return None
+        group = self._diagnostic_groups_by_occurrence_id.get(occurrence_id)
+        if group is None:
+            return None
+        return {
+            "match_type": group.match_type,
+            "occurrence_ids": list(group.occurrence_ids),
+            "counterpart_occurrence_ids": [
+                candidate
+                for candidate in group.occurrence_ids
+                if candidate != occurrence_id
+            ],
+        }
 
     def as_diagnostic(self) -> dict[str, object]:
         return {

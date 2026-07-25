@@ -1081,6 +1081,67 @@ def open(source_path):
                 self.assertNotIn("duplicate_suspected", row["flags"])
                 self.assertNotIn(DUPLICATE_MATCH_TYPE, row["reason"])
 
+    def test_pending_json_clears_stale_duplicate_state_in_memory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._setup_workspace(tmp)
+            statement = root / "same-source.csv"
+            self._write_statement(
+                statement,
+                [
+                    "2026-05-04,SYNTHETIC SAME SOURCE,-12.00,HKD",
+                    "2026-05-04,SYNTHETIC SAME SOURCE,-12.00,HKD",
+                ],
+            )
+            imported = self._run_cli(
+                ["import", str(statement), "--no-interactive"], cwd=root
+            )
+            self.assertEqual(imported.returncode, 0, imported.stderr)
+
+            categorized_path = root / "output" / "categorized.csv"
+            with categorized_path.open(newline="", encoding="utf-8") as handle:
+                rows = list(csv.DictReader(handle))
+            self.assertEqual(len(rows), 2)
+            for row in rows:
+                row["needs_review"] = "true"
+                row["flags"] = "duplicate_suspected;duplicate_review_promoted"
+                row["reason"] = (
+                    "Duplicate candidate [match_type=legacy, occurrence_ids=stale]"
+                )
+            with categorized_path.open("w", newline="", encoding="utf-8") as handle:
+                writer = csv.DictWriter(handle, fieldnames=rows[0].keys())
+                writer.writeheader()
+                writer.writerows(rows)
+
+            before = self._artifact_bytes(
+                root,
+                [
+                    "output/categorized.csv",
+                    "output/review_needed.csv",
+                    "output/.honeymoney-identity-manifest.json",
+                ],
+            )
+            pending = self._run_cli(["pending", "2026-05", "--json"], cwd=root)
+
+            self.assertEqual(pending.returncode, 0, pending.stderr)
+            data = json.loads(pending.stdout)["data"]
+            self.assertEqual(data["count"], 0)
+            self.assertEqual(data["transactions"], [])
+            self.assertEqual(
+                data["duplicate_candidates"],
+                {"group_count": 0, "groups": [], "occurrence_count": 0},
+            )
+            self.assertEqual(
+                before,
+                self._artifact_bytes(
+                    root,
+                    [
+                        "output/categorized.csv",
+                        "output/review_needed.csv",
+                        "output/.honeymoney-identity-manifest.json",
+                    ],
+                ),
+            )
+
     def _legacy_ledger_row(
         self,
         *,

@@ -1784,8 +1784,8 @@ def _pending_command(argv: list[str]) -> int:
     start, end = _resolve_period(args.month or args.period, args.start, args.end)
     config = _load_config(args.config_path)
     categorized_path = Path(config["paths"]["output"])
-    ledger_rows = read_ledger(categorized_path)
-    duplicate_evaluation = evaluate_duplicate_candidates(ledger_rows)
+    ledger_rows = [dict(row) for row in read_ledger(categorized_path)]
+    duplicate_evaluation = refresh_duplicate_candidates(ledger_rows)
     pending_rows = [
         to_review_row(row)
         for row in _rows_in_period(ledger_rows, start, end)
