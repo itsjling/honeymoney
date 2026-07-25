@@ -506,6 +506,97 @@ class IdentityParserInputsTest(unittest.TestCase):
         self.assertNotIn("profile=", str(raised.exception))
         self.assertNotIn("Post date", str(raised.exception))
 
+    def test_pdf_word_rows_allow_one_blank_mapped_date(self) -> None:
+        profile = {
+            "id": "word",
+            "account_id": "word",
+            "account_currency": "HKD",
+            "date_formats": ["%Y-%m-%d"],
+            "pdf": {
+                "word_rows": True,
+                "word_header_markers": [
+                    "Post date",
+                    "Trans date",
+                    "Description",
+                    "Amount",
+                ],
+                "word_columns": {
+                    "Post date": [0, 90],
+                    "Trans date": [90, 180],
+                    "Description": [180, 290],
+                    "Amount": [290, 380],
+                },
+                "columns": {
+                    "transaction_date": "Trans date",
+                    "posting_date": "Post date",
+                    "description": "Description",
+                    "amount": "Amount",
+                },
+            },
+        }
+        words = [
+            {"text": "Post date", "x0": 0, "top": 10},
+            {"text": "Trans date", "x0": 100, "top": 10},
+            {"text": "Description", "x0": 190, "top": 10},
+            {"text": "Amount", "x0": 300, "top": 10},
+            {"text": "2026-01-01", "x0": 100, "top": 20},
+            {"text": "Coffee", "x0": 190, "top": 20},
+            {"text": "-1.00", "x0": 300, "top": 20},
+        ]
+
+        rows, _, _ = _import_fake_pdf(profile, words=words)
+
+        self.assertEqual(rows[0]["transaction_date"], "2026-01-01")
+        self.assertEqual(rows[0]["posting_date"], "")
+
+    def test_pdf_word_rows_reject_nonempty_malformed_date_when_other_is_valid(
+        self,
+    ) -> None:
+        profile = {
+            "id": "word",
+            "account_id": "word",
+            "account_currency": "HKD",
+            "date_formats": ["%Y-%m-%d"],
+            "pdf": {
+                "word_rows": True,
+                "word_header_markers": [
+                    "Post date",
+                    "Trans date",
+                    "Description",
+                    "Amount",
+                ],
+                "word_columns": {
+                    "Post date": [0, 90],
+                    "Trans date": [90, 180],
+                    "Description": [180, 290],
+                    "Amount": [290, 380],
+                },
+                "columns": {
+                    "transaction_date": "Trans date",
+                    "posting_date": "Post date",
+                    "description": "Description",
+                    "amount": "Amount",
+                },
+            },
+        }
+        words = [
+            {"text": "Post date", "x0": 0, "top": 10},
+            {"text": "Trans date", "x0": 100, "top": 10},
+            {"text": "Description", "x0": 190, "top": 10},
+            {"text": "Amount", "x0": 300, "top": 10},
+            {"text": "2026-01-02", "x0": 0, "top": 20},
+            {"text": "not-a-date", "x0": 100, "top": 20},
+            {"text": "Coffee", "x0": 190, "top": 20},
+            {"text": "-1.00", "x0": 300, "top": 20},
+        ]
+
+        with self.assertRaisesRegex(
+            ValueError,
+            r"pdf_word_row_invalid_date: source=statement\.pdf; "
+            r"page=1; row=2; field=transaction_date",
+        ):
+            _import_fake_pdf(profile, words=words)
+
     def test_malformed_pdf_word_date_surfaces_parser_code_before_identity_persistence(
         self,
     ) -> None:

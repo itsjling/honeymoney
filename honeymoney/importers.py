@@ -1470,23 +1470,38 @@ def _validate_pdf_word_row_dates(
     date_formats = profile.get("date_formats", ["%Y-%m-%d"])
     statement_year = profile.get("statement_year")
     seen_columns: set[str] = set()
+    first_field: str | None = None
+    has_valid_date = False
 
     for field in ("transaction_date", "posting_date"):
         column = columns.get(field)
         if column in (None, ""):
             continue
+        if first_field is None:
+            first_field = field
         column_name = str(column)
         if column_name in seen_columns:
             continue
         seen_columns.add(column_name)
         value = _clean_text(source_row.get(column_name, ""))
-        if value and _date_matches_profile(value, date_formats, statement_year):
+        if not value:
+            continue
+        if _date_matches_profile(value, date_formats, statement_year):
+            has_valid_date = True
             continue
         raise ValueError(
             "pdf_word_row_invalid_date: "
             f"source={source_display}; page={page_number}; row={physical_line}; "
             f"field={field}"
         )
+
+    if has_valid_date:
+        return
+    raise ValueError(
+        "pdf_word_row_invalid_date: "
+        f"source={source_display}; page={page_number}; row={physical_line}; "
+        f"field={first_field or 'transaction_date'}"
+    )
 
 
 def _date_matches_profile(value: str, date_formats: Any, statement_year: Any) -> bool:
