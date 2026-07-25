@@ -4,7 +4,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from honeymoney.corrections import ledger_output_documents
+from honeymoney.cli import _active_source_ids_by_fingerprint
+from honeymoney.corrections import apply_correction_operation, ledger_output_documents
 from honeymoney.csv_artifacts import csv_document
 from honeymoney.identity import (
     AllocationLocator,
@@ -28,7 +29,9 @@ from honeymoney.persistence import persist_generation
 from honeymoney.schema import CATEGORIZED_COLUMNS, SOURCE_OCCURRENCE_COLUMNS
 
 
-def _source_row(name: str, locator: str) -> tuple[dict[str, str], dict[str, object]]:
+def _source_row(
+    name: str, locator: str, row_number: int = 2
+) -> tuple[dict[str, str], dict[str, object]]:
     row = {column: "" for column in SOURCE_OCCURRENCE_COLUMNS}
     row.update(
         {
@@ -50,7 +53,7 @@ def _source_row(name: str, locator: str) -> tuple[dict[str, str], dict[str, obje
             "confidence": "1.00",
             "needs_review": "false",
             "source_file": name,
-            "source_row": "2",
+            "source_row": str(row_number),
         }
     )
     namespace = source_namespace_id("workspace", locator)
@@ -63,7 +66,9 @@ def _source_row(name: str, locator: str) -> tuple[dict[str, str], dict[str, obje
     owner = ownership_record(
         source_id_value=source,
         fingerprint=fingerprint,
-        origin=AllocationOrigin(revision, contract, AllocationLocator(1, (2,)), 1),
+        origin=AllocationOrigin(
+            revision, contract, AllocationLocator(1, (row_number,)), 1
+        ),
     )
     row.update(
         {
@@ -149,6 +154,68 @@ class OverlapWorkspaceStateTest(unittest.TestCase):
                 list(loaded.rows[0]),
                 CATEGORIZED_COLUMNS,
             )
+
+    def test_migrated_partial_source_correction_marks_pooled_history_for_review(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "categorized.csv"
+            first_a, source_a = _source_row("a.csv", "a.csv", 2)
+            second_a, duplicate_source_a = _source_row("a.csv", "a.csv", 3)
+            first_b, source_b = _source_row("b.csv", "b.csv", 2)
+            second_b, duplicate_source_b = _source_row("b.csv", "b.csv", 3)
+            source_a["records"].extend(duplicate_source_a["records"])
+            source_b["records"].extend(duplicate_source_b["records"])
+            path.write_text(
+                csv_document(
+                    SOURCE_OCCURRENCE_COLUMNS,
+                    [first_a, second_a, first_b, second_b],
+                ),
+                encoding="utf-8",
+            )
+            identity_manifest_path(path).write_text(
+                manifest_document(
+                    {
+                        "schema_version": 1,
+                        "sources": [source_a, source_b],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            source_id = first_a["transaction_id"]
+            corrections_path = Path(temporary) / "corrections.csv"
+
+            result = apply_correction_operation(
+                {"corrections": str(corrections_path)},
+                path,
+                {source_id: {"category": "Dining", "needs_review": "false"}},
+            )
+
+            self.assertEqual(result.applied_count, 1)
+            self.assertTrue(
+                all(row["needs_review"] == "true" for row in result.ledger_rows)
+            )
+            self.assertTrue(
+                all(
+                    "overlap_history_ambiguous" in row["flags"].split(";")
+                    for row in result.ledger_rows
+                )
+            )
+
+    def test_reset_support_map_ignores_retired_source_records(self) -> None:
+        first, first_source = _source_row("a.csv", "a.csv")
+        _, retired_source = _source_row("b.csv", "b.csv")
+        retired_source["records"][0]["state"] = "retired"
+        manifest = {
+            "schema_version": 1,
+            "sources": [first_source, retired_source],
+        }
+
+        support = _active_source_ids_by_fingerprint(manifest)
+
+        self.assertEqual(
+            support[record_fingerprint(first)], {first_source["source_id"]}
+        )
 
 
 if __name__ == "__main__":

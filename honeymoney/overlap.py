@@ -215,6 +215,7 @@ def validate_overlap_agreement(
         )
         if record_fingerprint(actual) != group_fingerprint:
             raise ValueError("overlap_manifest_invalid")
+        _validate_canonical_amount_hkd(actual, source_occurrences, group_fingerprint)
 
 
 def project_corrections(
@@ -588,15 +589,53 @@ def _clear_duplicate_state(row: dict[str, str]) -> None:
 
 def _apply_overlap_review(row: dict[str, str], status: str) -> None:
     flags = [item for item in row.get("flags", "").split(";") if item]
-    reasons = [item for item in row.get("reason", "").split("; ") if item]
+    reason = _remove_reason(row.get("reason", ""), OVERLAP_AMBIGUITY_REASON)
+    had_ambiguity = OVERLAP_AMBIGUITY_FLAG in flags
     flags = [item for item in flags if item != OVERLAP_AMBIGUITY_FLAG]
-    reasons = [item for item in reasons if item != OVERLAP_AMBIGUITY_REASON]
     if status == AMBIGUOUS_COUNT_STATUS:
         flags.append(OVERLAP_AMBIGUITY_FLAG)
-        reasons.append(OVERLAP_AMBIGUITY_REASON)
+        reason = _append_reason(reason, OVERLAP_AMBIGUITY_REASON)
         row["needs_review"] = "true"
+    elif had_ambiguity and not flags and not reason:
+        row["needs_review"] = "false"
     row["flags"] = ";".join(dict.fromkeys(flags))
-    row["reason"] = "; ".join(dict.fromkeys(reasons))
+    row["reason"] = reason
+
+
+def _append_reason(reasons: str, reason: str) -> str:
+    if reason in reasons:
+        return reasons
+    return f"{reasons}; {reason}" if reasons else reason
+
+
+def _remove_reason(reasons: str, reason: str) -> str:
+    if reasons == reason:
+        return ""
+    if reasons.startswith(reason + "; "):
+        return reasons[len(reason) + 2 :]
+    if reasons.endswith("; " + reason):
+        return reasons[: -len(reason) - 2]
+    return reasons.replace("; " + reason + "; ", "; ")
+
+
+def _validate_canonical_amount_hkd(
+    canonical_row: Mapping[str, Any],
+    source_occurrences: list[Mapping[str, Any]] | tuple[Mapping[str, Any], ...],
+    group_fingerprint: str,
+) -> None:
+    """Require each canonical total to match its active source evidence."""
+    try:
+        source_amounts = {
+            normalized_decimal(row.get("amount_hkd", ""))
+            for row in source_occurrences
+            if has_stable_v2_identity(row)
+            and record_fingerprint(row) == group_fingerprint
+        }
+        canonical_amount = normalized_decimal(canonical_row.get("amount_hkd", ""))
+    except IdentityError as error:
+        raise ValueError("overlap_manifest_invalid") from error
+    if len(source_amounts) != 1 or canonical_amount not in source_amounts:
+        raise ValueError("overlap_manifest_invalid")
 
 
 def _group_id(namespace_key: str, fingerprint: str) -> str:

@@ -17,6 +17,7 @@ from honeymoney.identity_state import (
     validated_manifest_document,
 )
 from honeymoney.overlap import (
+    apply_history_ambiguity,
     canonicalize_overlaps,
     enforce_overlap_review,
     overlap_manifest_document,
@@ -428,11 +429,14 @@ def apply_correction_operation(
         merged_corrections[transaction_id] = merged_correction
 
     operation_overlap_manifest = state.overlap_manifest
+    migration_ambiguous_ids: tuple[str, ...] = ()
     if state.canonical_migration_required and not state.bootstrap_required:
         canonical = canonicalize_overlaps(state.source_rows, [], state.overlap_manifest)
         ledger_rows = canonical.rows
         operation_overlap_manifest = canonical.manifest
-        effective_batch = project_corrections(canonical, effective_batch).corrections
+        projection = project_corrections(canonical, effective_batch)
+        effective_batch = projection.corrections
+        migration_ambiguous_ids = projection.ambiguous_transaction_ids
 
     baseline_ledger = [dict(row) for row in ledger_rows]
     reconcile_ledger(baseline_ledger, config, statement_rows=state.source_rows)
@@ -443,6 +447,7 @@ def apply_correction_operation(
         corrected_ledger,
         final_review_ids=_final_review_ids(merged_corrections),
     )
+    apply_history_ambiguity(corrected_ledger, migration_ambiguous_ids)
     enforce_overlap_review(corrected_ledger)
     corrected_ids = set(effective_batch)
     for index, (original, baseline, corrected) in enumerate(

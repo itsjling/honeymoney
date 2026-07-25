@@ -390,6 +390,47 @@ class CanonicalOverlapTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "overlap_manifest_invalid"):
             validate_overlap_agreement(corrupted, occurrences, result.manifest)
 
+    def test_agreement_rejects_canonical_total_without_active_source_support(
+        self,
+    ) -> None:
+        occurrences = [_occurrence("1", "a"), _occurrence("2", "b")]
+        result = canonicalize_overlaps(
+            occurrences, [], empty_overlap_manifest(_NAMESPACE_KEY)
+        )
+        corrupted = copy.deepcopy(result.rows)
+        corrupted[0]["amount_hkd"] = "-99.00"
+
+        with self.assertRaisesRegex(ValueError, "overlap_manifest_invalid"):
+            validate_overlap_agreement(corrupted, occurrences, result.manifest)
+
+    def test_equal_counts_clear_review_owned_only_by_overlap_ambiguity(self) -> None:
+        ambiguous_occurrences = [
+            _occurrence("1", "a"),
+            _occurrence("2", "a"),
+            _occurrence("3", "b"),
+        ]
+        first = canonicalize_overlaps(
+            ambiguous_occurrences, [], empty_overlap_manifest(_NAMESPACE_KEY)
+        )
+        self.assertTrue(all(row["needs_review"] == "true" for row in first.rows))
+
+        equal = canonicalize_overlaps(
+            [*ambiguous_occurrences, _occurrence("4", "b")],
+            first.rows,
+            first.manifest,
+        )
+
+        self.assertTrue(all(row["needs_review"] == "false" for row in equal.rows))
+        self.assertTrue(
+            all(
+                AMBIGUOUS_COUNT_STATUS not in row["provenance_status"]
+                for row in equal.rows
+            )
+        )
+        self.assertTrue(
+            all("overlap_count_ambiguous" not in row["flags"] for row in equal.rows)
+        )
+
     def test_canonical_transaction_id_may_not_collide_with_source_identity(
         self,
     ) -> None:

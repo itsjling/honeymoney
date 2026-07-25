@@ -17,7 +17,7 @@ from datetime import date
 from decimal import Decimal
 from importlib import resources
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 from honeymoney import importers, normalization
 from honeymoney.categorization_memory import (
@@ -334,12 +334,7 @@ def _run_pipeline(
             }
             if supporting_source_ids and supporting_source_ids <= reset_source_ids:
                 removed_correction_ids.update(group["canonical_transaction_ids"])
-        fingerprint_sources: dict[str, set[str]] = {}
-        for source in identity_state.manifest["sources"]:
-            for record in source["records"]:
-                fingerprint_sources.setdefault(record["record_fingerprint"], set()).add(
-                    source["source_id"]
-                )
+        fingerprint_sources = _active_source_ids_by_fingerprint(identity_state.manifest)
         for group in identity_state.overlap_manifest["groups"]:
             supporting_source_ids = fingerprint_sources.get(
                 group["record_fingerprint"], set()
@@ -2413,6 +2408,30 @@ def _write_ledger_outputs(
             identity_manifest_document=identity_manifest_document,
         ),
     )
+
+
+def _active_source_ids_by_fingerprint(
+    manifest: Mapping[str, Any],
+) -> dict[str, set[str]]:
+    """Return only active source support for reset ownership checks."""
+    support: dict[str, set[str]] = {}
+    sources = manifest.get("sources", [])
+    if not isinstance(sources, list):
+        return support
+    for source in sources:
+        if not isinstance(source, Mapping):
+            continue
+        source_id = source.get("source_id")
+        records = source.get("records", [])
+        if not isinstance(source_id, str) or not isinstance(records, list):
+            continue
+        for record in records:
+            if not isinstance(record, Mapping) or record.get("state") != "active":
+                continue
+            fingerprint = record.get("record_fingerprint")
+            if isinstance(fingerprint, str):
+                support.setdefault(fingerprint, set()).add(source_id)
+    return support
 
 
 def _prompt_uncategorized(
