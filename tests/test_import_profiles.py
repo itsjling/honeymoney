@@ -506,6 +506,86 @@ class IdentityParserInputsTest(unittest.TestCase):
         self.assertNotIn("profile=", str(raised.exception))
         self.assertNotIn("Post date", str(raised.exception))
 
+    def test_pdf_word_rows_skip_footer_and_balance_before_date_validation(
+        self,
+    ) -> None:
+        profile = {
+            "id": "word",
+            "account_id": "word",
+            "account_currency": "HKD",
+            "date_formats": ["%Y-%m-%d"],
+            "skip_descriptions": ["Synthetic footer"],
+            "pdf": {
+                "word_rows": True,
+                "word_header_markers": ["Post date", "Description", "Amount"],
+                "word_columns": {
+                    "Post date": [0, 90],
+                    "Description": [90, 200],
+                    "Amount": [200, 300],
+                },
+                "columns": {
+                    "transaction_date": "Post date",
+                    "description": "Description",
+                    "amount": "Amount",
+                },
+            },
+        }
+        words = [
+            {"text": "Post date", "x0": 0, "top": 10},
+            {"text": "Description", "x0": 100, "top": 10},
+            {"text": "Amount", "x0": 210, "top": 10},
+            {"text": "2026-01-01", "x0": 0, "top": 20},
+            {"text": "Coffee", "x0": 100, "top": 20},
+            {"text": "-1.00", "x0": 210, "top": 20},
+            {"text": "not-a-date", "x0": 0, "top": 30},
+            {"text": "Synthetic footer", "x0": 100, "top": 30},
+            {"text": "1.00", "x0": 210, "top": 30},
+            {"text": "not-a-date", "x0": 0, "top": 40},
+            {"text": "Closing balance", "x0": 100, "top": 40},
+            {"text": "1.00", "x0": 210, "top": 40},
+        ]
+
+        rows, _, _ = _import_fake_pdf(profile, words=words)
+
+        self.assertEqual([row["merchant"] for row in rows], ["Coffee"])
+
+    def test_pdf_word_end_marker_does_not_match_transaction_description(self) -> None:
+        legal_name = "The Hongkong and Shanghai Banking Corporation Limited"
+        profile = {
+            "id": "word",
+            "account_id": "word",
+            "account_currency": "HKD",
+            "date_formats": ["%Y-%m-%d"],
+            "pdf": {
+                "word_rows": True,
+                "word_header_markers": ["Post date", "Description", "Amount"],
+                "word_table_end_markers": [legal_name, "Note:"],
+                "word_columns": {
+                    "Post date": [0, 90],
+                    "Description": [90, 500],
+                    "Amount": [500, 600],
+                },
+                "columns": {
+                    "transaction_date": "Post date",
+                    "description": "Description",
+                    "amount": "Amount",
+                },
+            },
+        }
+        words = [
+            {"text": "Post date", "x0": 0, "top": 10},
+            {"text": "Description", "x0": 100, "top": 10},
+            {"text": "Amount", "x0": 510, "top": 10},
+            {"text": "2026-01-01", "x0": 0, "top": 20},
+            {"text": legal_name, "x0": 100, "top": 20},
+            {"text": "-1.00", "x0": 510, "top": 20},
+        ]
+
+        rows, _, _ = _import_fake_pdf(profile, words=words)
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["merchant"], legal_name)
+
     def test_pdf_word_rows_allow_one_blank_mapped_date(self) -> None:
         profile = {
             "id": "word",

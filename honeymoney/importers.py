@@ -1047,6 +1047,8 @@ def _import_pdf(
                     for row_number, (source_row, physical_line) in enumerate(
                         word_rows, start=1
                     ):
+                        if _word_row_is_skipped(source_row, columns, skip_patterns):
+                            continue
                         _validate_pdf_word_row_dates(
                             source_row,
                             profile,
@@ -1549,8 +1551,29 @@ def _pdf_word_header_seen(text: str, pdf_settings: dict[str, Any]) -> bool:
 
 def _pdf_word_table_end_seen(text: str, pdf_settings: dict[str, Any]) -> bool:
     markers = pdf_settings.get("word_table_end_markers", [])
-    folded = text.casefold()
-    return any(str(marker).casefold() in folded for marker in markers)
+    folded = " ".join(text.casefold().split())
+    for marker in markers:
+        folded_marker = " ".join(str(marker).casefold().split())
+        if not folded_marker:
+            continue
+        if folded == folded_marker:
+            return True
+        if folded_marker.endswith(":") and folded.startswith(folded_marker):
+            return True
+    return False
+
+
+def _word_row_is_skipped(
+    source_row: dict[str, str], columns: dict[str, Any], skip_patterns: list[str]
+) -> bool:
+    """Apply descriptive skip rules before date validation of a word row."""
+    description_column = str(columns.get("description", ""))
+    merchant_column = str(columns.get("merchant", ""))
+    description = _clean_text(source_row.get(description_column, ""))
+    merchant = _clean_text(source_row.get(merchant_column, "")) or description
+    return _row_is_skipped(
+        {"original_description": description, "merchant": merchant}, skip_patterns
+    )
 
 
 def _pdf_word_row(
