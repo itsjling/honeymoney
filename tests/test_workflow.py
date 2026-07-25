@@ -860,8 +860,14 @@ def open(source_path):
                     }
                 ],
             )
+            expected_review_states = {
+                historical["transaction_id"]: "false",
+                incoming["transaction_id"]: "true",
+            }
             for row in (historical, incoming):
-                self.assertEqual(row["needs_review"], "true")
+                self.assertEqual(
+                    row["needs_review"], expected_review_states[row["transaction_id"]]
+                )
                 self.assertEqual(
                     row["flags"].split(";").count("duplicate_suspected"), 1
                 )
@@ -872,6 +878,9 @@ def open(source_path):
                     ),
                     row["reason"],
                 )
+            self.assertNotIn(
+                "duplicate_review_promoted", historical["flags"].split(";")
+            )
 
             with (root / "output" / "review_needed.csv").open(
                 newline="", encoding="utf-8"
@@ -881,7 +890,7 @@ def open(source_path):
                     for row in csv.DictReader(fh)
                     if "duplicate_suspected" in row["flags"]
                 }
-            self.assertEqual(review_ids, set(expected_ids))
+            self.assertEqual(review_ids, {incoming["transaction_id"]})
 
             pending = self._run_cli(["pending", "2026-05", "--json"], cwd=root)
             self.assertEqual(pending.returncode, 0, pending.stderr)
@@ -896,7 +905,7 @@ def open(source_path):
                     for row in pending_data["transactions"]
                     if "duplicate_suspected" in row["flags"]
                 },
-                set(expected_ids),
+                {incoming["transaction_id"]},
             )
 
             status = self._run_cli(["status", "2026-05", "--json"], cwd=root)
@@ -927,6 +936,11 @@ def open(source_path):
                 "Duplicate candidates: 2 occurrences in 1 group",
                 reconcile_text.stdout,
             )
+            state = load_identity_state(categorized_path)
+            reconciled_historical = next(
+                row for row in state.rows if row["transaction_id"] == historical_id
+            )
+            self.assertEqual(reconciled_historical["needs_review"], "false")
 
             html_path = root / "output" / "duplicates.html"
             html_report = self._run_cli(
@@ -964,6 +978,56 @@ def open(source_path):
                     duplicate_diagnostic["match_type"], DUPLICATE_MATCH_TYPE
                 )
                 self.assertEqual(duplicate_diagnostic["occurrence_ids"], expected_ids)
+                self.assertEqual(
+                    transaction_diagnostic["needs_review"],
+                    expected_review_states[transaction_id] == "true",
+                )
+
+    def test_interactive_review_keeps_duplicate_diagnostic_without_repromotion(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._setup_workspace(tmp)
+            for filename in ("first.csv", "second.csv"):
+                statement = root / filename
+                self._write_statement(
+                    statement,
+                    ["2026-05-04,SYNTHETIC REVIEWED DUPLICATE,-12.00,HKD"],
+                )
+                imported = self._run_cli(
+                    ["import", str(statement), "--no-interactive"], cwd=root
+                )
+                self.assertEqual(imported.returncode, 0, imported.stderr)
+
+            reviewed = self._run_cli(
+                ["review"],
+                cwd=root,
+                input_text=f"{_category_number('Dining')}\nq\n",
+            )
+            self.assertEqual(reviewed.returncode, 0, reviewed.stderr)
+
+            state = load_identity_state(root / "output" / "categorized.csv")
+            resolved = next(
+                row for row in state.rows if "manual_correction" in row["flags"]
+            )
+            pending = next(
+                row
+                for row in state.rows
+                if row["transaction_id"] != resolved["transaction_id"]
+            )
+            self.assertEqual(resolved["needs_review"], "false")
+            self.assertIn("duplicate_suspected", resolved["flags"].split(";"))
+            self.assertNotIn("duplicate_review_promoted", resolved["flags"].split(";"))
+            self.assertIn(DUPLICATE_MATCH_TYPE, resolved["reason"])
+            self.assertEqual(pending["needs_review"], "true")
+
+            pending_result = self._run_cli(["pending", "2026-05", "--json"], cwd=root)
+            self.assertEqual(pending_result.returncode, 0, pending_result.stderr)
+            pending_rows = json.loads(pending_result.stdout)["data"]["transactions"]
+            self.assertEqual(
+                [row["transaction_id"] for row in pending_rows],
+                [pending["transaction_id"]],
+            )
 
     def test_combined_and_sequential_imports_produce_same_duplicate_group(
         self,

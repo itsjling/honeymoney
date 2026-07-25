@@ -328,7 +328,13 @@ def _run_pipeline(
         categorized_interactively = []
     _status.update("Writing output files...")
     reconciliation = reconcile_ledger(ledger_rows, config)
-    duplicate_evaluation = refresh_duplicate_candidates(ledger_rows)
+    final_review_ids = _final_review_ids(corrections)
+    final_review_ids.update(
+        transaction["transaction_id"] for transaction in categorized_interactively
+    )
+    duplicate_evaluation = refresh_duplicate_candidates(
+        ledger_rows, final_review_ids=final_review_ids
+    )
     _enforce_identity_review(ledger_rows)
     review_rows = [row for row in transactions if row["needs_review"] == "true"]
     report = {
@@ -1730,10 +1736,14 @@ def _reconcile_command(argv: list[str]) -> int:
     config = _load_config(args.config_path)
     categorized_path = Path(args.output_path or config["paths"]["output"])
     rows = read_ledger(categorized_path)
-    duplicate_evaluation = refresh_duplicate_candidates(rows)
+    corrections = load_corrections(config)
+    final_review_ids = _final_review_ids(corrections)
+    duplicate_evaluation = refresh_duplicate_candidates(
+        rows, final_review_ids=final_review_ids
+    )
     summary = reconcile_ledger(rows, config)
     if not args.dry_run:
-        _write_ledger_outputs(categorized_path, rows)
+        _write_ledger_outputs(categorized_path, rows, final_review_ids=final_review_ids)
 
     artifacts = {"categorized_csv": str(categorized_path.resolve())}
     if args.json:
@@ -1785,7 +1795,10 @@ def _pending_command(argv: list[str]) -> int:
     config = _load_config(args.config_path)
     categorized_path = Path(config["paths"]["output"])
     ledger_rows = [dict(row) for row in read_ledger(categorized_path)]
-    duplicate_evaluation = refresh_duplicate_candidates(ledger_rows)
+    duplicate_evaluation = refresh_duplicate_candidates(
+        ledger_rows,
+        final_review_ids=_final_review_ids(load_corrections(config)),
+    )
     pending_rows = [
         to_review_row(row)
         for row in _rows_in_period(ledger_rows, start, end)
@@ -2058,9 +2071,12 @@ def _reject_ambiguous_legacy_transaction_ids(
 
 
 def _write_ledger_outputs(
-    categorized_path: Path, ledger_rows: list[dict[str, str]]
+    categorized_path: Path,
+    ledger_rows: list[dict[str, str]],
+    *,
+    final_review_ids: set[str] | None = None,
 ) -> None:
-    refresh_duplicate_candidates(ledger_rows)
+    refresh_duplicate_candidates(ledger_rows, final_review_ids=final_review_ids)
     persist_generation(
         categorized_path, ledger_output_documents(categorized_path, ledger_rows)
     )
@@ -2453,6 +2469,14 @@ def _enforce_identity_review(transactions: list[dict[str, str]]) -> None:
         transaction["reason"] = (
             "Identity migration is ambiguous; explicit resolution is required"
         )
+
+
+def _final_review_ids(corrections: dict[str, dict[str, str]]) -> set[str]:
+    return {
+        transaction_id
+        for transaction_id, correction in corrections.items()
+        if correction.get("needs_review", "").casefold() == "false"
+    }
 
 
 def _write_report(path: Path, report: dict[str, Any]) -> None:

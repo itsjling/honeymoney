@@ -131,9 +131,13 @@ def evaluate_duplicate_candidates(
 
 
 def apply_duplicate_candidates(
-    rows: list[dict[str, str]], evaluation: DuplicateEvaluation
+    rows: list[dict[str, str]],
+    evaluation: DuplicateEvaluation,
+    *,
+    final_review_ids: set[str] | None = None,
 ) -> None:
     """Replace all legacy/current duplicate annotations with ``evaluation``."""
+    final_review_ids = final_review_ids or set()
     for row in rows:
         _clear_duplicate_state(row)
 
@@ -145,11 +149,15 @@ def apply_duplicate_candidates(
     for group in evaluation.groups:
         for occurrence_id in group.occurrence_ids:
             row = rows_by_id[occurrence_id]
-            if row.get("needs_review") != "true":
+            if (
+                occurrence_id not in final_review_ids
+                and row.get("needs_review") != "true"
+            ):
                 row["flags"] = _append_flag(
                     row.get("flags", ""), DUPLICATE_REVIEW_PROMOTED_FLAG
                 )
-            row["needs_review"] = "true"
+            if occurrence_id not in final_review_ids:
+                row["needs_review"] = "true"
             row["flags"] = _append_flag(row.get("flags", ""), DUPLICATE_FLAG)
             diagnostic = evaluation.diagnostic_for(occurrence_id)
             if diagnostic is None:
@@ -160,11 +168,11 @@ def apply_duplicate_candidates(
 
 
 def refresh_duplicate_candidates(
-    rows: list[dict[str, str]],
+    rows: list[dict[str, str]], *, final_review_ids: set[str] | None = None
 ) -> DuplicateEvaluation:
     """Evaluate and apply duplicate state for a complete prospective ledger."""
     evaluation = evaluate_duplicate_candidates(rows)
-    apply_duplicate_candidates(rows, evaluation)
+    apply_duplicate_candidates(rows, evaluation, final_review_ids=final_review_ids)
     return evaluation
 
 

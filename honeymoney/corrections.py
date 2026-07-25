@@ -297,7 +297,10 @@ def apply_correction_operation(
     corrected_ledger = [dict(row) for row in ledger_rows]
     apply_corrections(corrected_ledger, effective_batch)
     reconcile_ledger(corrected_ledger, config)
-    refresh_duplicate_candidates(corrected_ledger)
+    refresh_duplicate_candidates(
+        corrected_ledger,
+        final_review_ids=_final_review_ids(merged_corrections),
+    )
     corrected_ids = set(normalized_patches)
     for index, (original, baseline, corrected) in enumerate(
         zip(ledger_rows, baseline_ledger, corrected_ledger)
@@ -385,6 +388,14 @@ def _validate_resolved_state(
             f"Correction {transaction_id}: Unknown category cannot be marked resolved "
             "without an explicit accounting flow decision"
         )
+
+
+def _final_review_ids(corrections: Mapping[str, Mapping[str, str]]) -> set[str]:
+    return {
+        transaction_id
+        for transaction_id, correction in corrections.items()
+        if correction.get("needs_review", "").casefold() == "false"
+    }
 
 
 def _correction_row(transaction_id: str, correction: dict[str, str]) -> dict[str, str]:
