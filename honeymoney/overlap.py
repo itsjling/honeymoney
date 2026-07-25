@@ -79,6 +79,13 @@ _FINANCIAL_FIELDS = (
     "merchant",
     "original_description",
 )
+_IMMUTABLE_SOURCE_FIELDS = (
+    "transaction_id",
+    *_FINANCIAL_FIELDS,
+    *_SOURCE_ID_FIELDS,
+    *_SOURCE_DISPLAY_FIELDS,
+    *_STATEMENT_BALANCE_FIELDS,
+)
 _DISPLAY_FIELDS = ("account", "account_type", "institution", "country")
 _MUTABLE_FIELDS = (
     "category",
@@ -187,17 +194,16 @@ def validate_overlap_agreement(
         if not str(actual.get("canonical_group_id", "")):
             if any(
                 str(actual.get(field, "")) != expected_row[field]
-                for field in (
-                    "transaction_id",
-                    *_FINANCIAL_FIELDS,
-                    *_SOURCE_ID_FIELDS,
-                    *_SOURCE_DISPLAY_FIELDS,
-                    *_STATEMENT_BALANCE_FIELDS,
-                )
+                for field in _IMMUTABLE_SOURCE_FIELDS
             ):
                 raise ValueError("overlap_manifest_invalid")
             continue
         if any(str(actual.get(field, "")) != expected_row[field] for field in fields):
+            raise ValueError("overlap_manifest_invalid")
+        if any(
+            str(actual.get(field, "")) != expected_row[field]
+            for field in _IMMUTABLE_SOURCE_FIELDS
+        ):
             raise ValueError("overlap_manifest_invalid")
         if any(
             str(actual.get(field, ""))

@@ -20,6 +20,7 @@ from honeymoney.csv_artifacts import csv_document
 from honeymoney.identity import (
     AllocationLocator,
     AllocationOrigin,
+    IdentityError,
     extractor_contract_id,
     manifest_document,
     ownership_record,
@@ -234,6 +235,65 @@ class OverlapWorkspaceStateTest(unittest.TestCase):
 
             self.assertEqual(loaded["account_type"], "")
             self.assertEqual(_normalize_loaded_rows([loaded])[0]["account_type"], "")
+
+    def test_load_state_rejects_edited_conflicted_canonical_display_field(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "categorized.csv"
+            first, first_source = _source_row("a.csv", "a.csv")
+            second, second_source = _source_row("b.csv", "b.csv")
+            first["account_type"] = "credit_card"
+            second["account_type"] = "bank"
+            manifest = {"schema_version": 1, "sources": [first_source, second_source]}
+            canonical = canonicalize_overlaps(
+                [first, second],
+                [],
+                {
+                    "schema_version": 1,
+                    "namespace_key": "ovns_" + "a" * 64,
+                    "groups": [],
+                },
+            )
+            files = ledger_output_documents(
+                path,
+                canonical.rows,
+                identity_manifest=manifest,
+                source_occurrences=[first, second],
+                overlap_manifest=canonical.manifest,
+            )
+            persist_generation(path, files)
+            canonical.rows[0]["account_type"] = "arbitrary"
+            path.write_text(
+                csv_document(CATEGORIZED_COLUMNS, canonical.rows), encoding="utf-8"
+            )
+
+            with self.assertRaisesRegex(IdentityError, "identity_manifest_invalid"):
+                load_identity_state(path)
+
+    def test_load_state_allows_reviewed_canonical_mutable_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "categorized.csv"
+            self._write_issue_31_state(path)
+            migrated = load_identity_state(path)
+            canonical = canonicalize_overlaps(
+                migrated.source_rows, [], migrated.overlap_manifest
+            )
+            canonical.rows[0]["category"] = "Shopping"
+            canonical.rows[0]["needs_review"] = "false"
+            files = ledger_output_documents(
+                path,
+                canonical.rows,
+                identity_manifest=migrated.manifest,
+                source_occurrences=migrated.source_rows,
+                overlap_manifest=canonical.manifest,
+            )
+            persist_generation(path, files)
+
+            [loaded] = load_identity_state(path).rows
+
+            self.assertEqual(loaded["category"], "Shopping")
+            self.assertEqual(loaded["needs_review"], "false")
 
     def test_migrated_partial_source_correction_marks_pooled_history_for_review(
         self,
