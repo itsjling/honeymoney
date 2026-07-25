@@ -1,5 +1,6 @@
 import errno
 import socket
+import threading
 import unittest
 import urllib.error
 from unittest.mock import patch
@@ -148,6 +149,180 @@ class OllamaTransportTest(unittest.TestCase):
                     Connection.failure = failure
                     with self.assertRaises(type(failure)):
                         _default_sender(request)
+
+    def test_default_sender_rejects_response_headers_after_deadline(self) -> None:
+        elapsed = 0.0
+
+        def monotonic() -> float:
+            return 100.0 + elapsed
+
+        class Socket:
+            def settimeout(self, timeout: float) -> None:
+                del timeout
+
+            def shutdown(self, how: int) -> None:
+                del how
+
+            def close(self) -> None:
+                return None
+
+        class Connection:
+            def __init__(self, host: str, port: int, timeout: float) -> None:
+                del host, port, timeout
+                self.sock = Socket()
+
+            def connect(self) -> None:
+                return None
+
+            def request(self, *args: object, **kwargs: object) -> None:
+                del args, kwargs
+
+            def getresponse(self) -> object:
+                nonlocal elapsed
+                elapsed = 1.1
+
+                class Response:
+                    status = 200
+                    reason = "OK"
+
+                    def getheaders(self) -> list[tuple[str, str]]:
+                        return []
+
+                    def read(self) -> bytes:
+                        return b'{"synthetic": "headers"}'
+
+                return Response()
+
+            def close(self) -> None:
+                return None
+
+        request = OllamaHttpRequest(
+            "GET",
+            "http://127.0.0.1:11434/api/tags",
+            {"Host": "localhost:11434"},
+            None,
+            1.0,
+        )
+        with (
+            patch("honeymoney.ollama.http.client.HTTPConnection", Connection),
+            patch("honeymoney.ollama.time.monotonic", monotonic),
+        ):
+            with self.assertRaisesRegex(TimeoutError, "timed out"):
+                _default_sender(request)
+
+    def test_default_sender_rejects_trickled_body_after_deadline(self) -> None:
+        elapsed = 0.0
+
+        def monotonic() -> float:
+            return 100.0 + elapsed
+
+        class Socket:
+            def settimeout(self, timeout: float) -> None:
+                del timeout
+
+            def shutdown(self, how: int) -> None:
+                del how
+
+            def close(self) -> None:
+                return None
+
+        class Response:
+            status = 200
+            reason = "OK"
+
+            def getheaders(self) -> list[tuple[str, str]]:
+                return []
+
+            def read(self) -> bytes:
+                nonlocal elapsed
+                elapsed = 1.1
+                return b'{"synthetic": "trickled"}'
+
+        class Connection:
+            def __init__(self, host: str, port: int, timeout: float) -> None:
+                del host, port, timeout
+                self.sock = Socket()
+
+            def connect(self) -> None:
+                return None
+
+            def request(self, *args: object, **kwargs: object) -> None:
+                del args, kwargs
+
+            def getresponse(self) -> Response:
+                nonlocal elapsed
+                elapsed = 0.4
+                return Response()
+
+            def close(self) -> None:
+                return None
+
+        request = OllamaHttpRequest(
+            "GET",
+            "http://127.0.0.1:11434/api/tags",
+            {"Host": "localhost:11434"},
+            None,
+            1.0,
+        )
+        with (
+            patch("honeymoney.ollama.http.client.HTTPConnection", Connection),
+            patch("honeymoney.ollama.time.monotonic", monotonic),
+        ):
+            with self.assertRaisesRegex(TimeoutError, "timed out"):
+                _default_sender(request)
+
+    def test_default_sender_interrupts_a_stalled_body_at_deadline(self) -> None:
+        closed = threading.Event()
+        test_case = self
+
+        class Socket:
+            def settimeout(self, timeout: float) -> None:
+                del timeout
+
+            def shutdown(self, how: int) -> None:
+                del how
+
+            def close(self) -> None:
+                closed.set()
+
+        class Response:
+            status = 200
+            reason = "OK"
+
+            def getheaders(self) -> list[tuple[str, str]]:
+                return []
+
+            def read(self) -> bytes:
+                test_case.assertTrue(closed.wait(0.5))
+                return b'{"synthetic": "stalled"}'
+
+        class Connection:
+            def __init__(self, host: str, port: int, timeout: float) -> None:
+                del host, port, timeout
+                self.sock = Socket()
+
+            def connect(self) -> None:
+                return None
+
+            def request(self, *args: object, **kwargs: object) -> None:
+                del args, kwargs
+
+            def getresponse(self) -> Response:
+                return Response()
+
+            def close(self) -> None:
+                return None
+
+        request = OllamaHttpRequest(
+            "GET",
+            "http://127.0.0.1:11434/api/tags",
+            {"Host": "localhost:11434"},
+            None,
+            0.05,
+        )
+        with patch("honeymoney.ollama.http.client.HTTPConnection", Connection):
+            with self.assertRaisesRegex(TimeoutError, "timed out"):
+                _default_sender(request)
 
     def test_loopback_hosts_are_pinned_before_sending(self) -> None:
         cases = [

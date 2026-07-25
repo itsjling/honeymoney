@@ -53,6 +53,50 @@ class _OllamaConnectFailure(OSError):
         super().__init__(str(cause))
 
 
+class _RequestDeadline:
+    """Keep a request's wall-clock timeout active across all HTTP reads."""
+
+    def __init__(self, connection: http.client.HTTPConnection, timeout: float) -> None:
+        self._connection = connection
+        self._deadline = time.monotonic() + timeout
+        self._expired = threading.Event()
+        self._timer = threading.Timer(timeout, self._abort)
+        self._timer.daemon = True
+
+    def __enter__(self) -> "_RequestDeadline":
+        self._timer.start()
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        self._timer.cancel()
+
+    def enforce(self) -> None:
+        if self._expired.is_set():
+            self._abort()
+            raise TimeoutError("Ollama request timed out")
+        remaining = self._deadline - time.monotonic()
+        if remaining <= 0:
+            self._abort()
+            raise TimeoutError("Ollama request timed out")
+        sock = getattr(self._connection, "sock", None)
+        if sock is not None:
+            sock.settimeout(remaining)
+
+    def _abort(self) -> None:
+        self._expired.set()
+        sock = getattr(self._connection, "sock", None)
+        if sock is not None:
+            try:
+                sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            try:
+                sock.close()
+            except OSError:
+                pass
+        self._connection.close()
+
+
 def _default_sender(request: OllamaHttpRequest) -> OllamaHttpResponse:
     parsed = urlsplit(request.url)
     hostname = parsed.hostname
@@ -64,25 +108,39 @@ def _default_sender(request: OllamaHttpRequest) -> OllamaHttpResponse:
         timeout=request.timeout,
     )
     try:
-        try:
-            connection.connect()
-        except OSError as error:
-            raise _OllamaConnectFailure(error) from error
+        with _RequestDeadline(connection, request.timeout) as deadline:
+            try:
+                connection.connect()
+            except OSError as error:
+                raise _OllamaConnectFailure(error) from error
+            deadline.enforce()
 
-        target = urlunsplit(("", "", parsed.path or "/", parsed.query, ""))
-        connection.request(
-            request.method,
-            target,
-            body=request.body,
-            headers=request.headers,
-        )
-        response = connection.getresponse()
-        return OllamaHttpResponse(
-            int(response.status),
-            str(response.reason),
-            dict(response.getheaders()),
-            response.read(),
-        )
+            target = urlunsplit(("", "", parsed.path or "/", parsed.query, ""))
+            connection.request(
+                request.method,
+                target,
+                body=request.body,
+                headers=request.headers,
+            )
+            deadline.enforce()
+            try:
+                response = connection.getresponse()
+            except (OSError, ValueError):
+                deadline.enforce()
+                raise
+            deadline.enforce()
+            try:
+                body = response.read()
+            except (OSError, ValueError):
+                deadline.enforce()
+                raise
+            deadline.enforce()
+            return OllamaHttpResponse(
+                int(response.status),
+                str(response.reason),
+                dict(response.getheaders()),
+                body,
+            )
     finally:
         connection.close()
 
