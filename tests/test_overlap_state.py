@@ -35,6 +35,7 @@ from honeymoney.identity import (
 )
 from honeymoney.identity_state import identity_manifest_path, load_identity_state
 from honeymoney.overlap import (
+    DuplicateResolutionError,
     canonicalize_overlaps,
     overlap_manifest_document,
     overlap_manifest_path,
@@ -136,6 +137,49 @@ class OverlapWorkspaceStateTest(unittest.TestCase):
             )
             self.assertRegex(
                 state.overlap_manifest["namespace_key"], r"^ovns_[0-9a-f]{64}$"
+            )
+            self.assertFalse(source_occurrences_path(path).exists())
+            self.assertFalse(overlap_manifest_path(path).exists())
+
+    def test_duplicate_commands_reject_unpersisted_canonical_migration(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "categorized.csv"
+            self._write_issue_31_state(path)
+            config_path = Path(temporary) / "config.json"
+            config_path.write_text(
+                json.dumps({"paths": {"output": str(path)}}), encoding="utf-8"
+            )
+            before = {
+                path: path.read_bytes(),
+                identity_manifest_path(path): identity_manifest_path(path).read_bytes(),
+            }
+
+            for argv in (
+                ["duplicates", "--config", str(config_path), "--json"],
+                [
+                    "duplicates",
+                    "resolve",
+                    "ovr_" + "a" * 64,
+                    "--as",
+                    "same-event",
+                    "--config",
+                    str(config_path),
+                    "--json",
+                ],
+            ):
+                with (
+                    self.subTest(argv=argv),
+                    self.assertRaises(DuplicateResolutionError) as error,
+                ):
+                    main(argv)
+                self.assertEqual(
+                    error.exception.code, "duplicate_canonical_migration_required"
+                )
+
+            self.assertEqual(path.read_bytes(), before[path])
+            self.assertEqual(
+                identity_manifest_path(path).read_bytes(),
+                before[identity_manifest_path(path)],
             )
             self.assertFalse(source_occurrences_path(path).exists())
             self.assertFalse(overlap_manifest_path(path).exists())

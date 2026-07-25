@@ -584,9 +584,11 @@ def _duplicates_command(argv: list[str]) -> int:
     config = _load_config(args.config_path)
     categorized_path = Path(args.output_path or config["paths"]["output"])
     state = load_identity_state(categorized_path)
+    if state.canonical_migration_required:
+        raise DuplicateResolutionError("duplicate_canonical_migration_required")
     current = canonicalize_overlaps(
         state.source_rows,
-        [] if state.canonical_migration_required else state.rows,
+        state.rows,
         state.overlap_manifest,
     )
     groups = list_duplicate_groups(current, state.source_rows)
@@ -644,10 +646,12 @@ def _duplicates_resolve_command(argv: list[str]) -> int:
     config = _load_config(args.config_path)
     categorized_path = Path(args.output_path or config["paths"]["output"])
     state = load_identity_state(categorized_path)
+    if state.canonical_migration_required:
+        raise DuplicateResolutionError("duplicate_canonical_migration_required")
     corrections = load_corrections(config)
     resolution = resolve_duplicate_group(
         state.source_rows,
-        [] if state.canonical_migration_required else state.rows,
+        state.rows,
         state.overlap_manifest,
         args.group_id,
         args.resolution,

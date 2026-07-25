@@ -528,6 +528,64 @@ class CanonicalOverlapTest(unittest.TestCase):
         self.assertEqual(resolved.correction_updates, {first_id: patch})
         self.assertEqual(len(resolved.result.rows), 1)
 
+    def test_same_event_rejects_multiple_tail_corrections_at_floor_one(self) -> None:
+        occurrences = [
+            *[_occurrence(str(index), "a") for index in range(1, 4)],
+            _occurrence("4", "b"),
+        ]
+        unresolved = canonicalize_overlaps(
+            occurrences, [], empty_overlap_manifest(_NAMESPACE_KEY)
+        )
+        [group] = list_duplicate_groups(unresolved, occurrences)
+        tail_ids = [row["transaction_id"] for row in unresolved.rows[1:]]
+        patch = {"category": "Dining", "needs_review": "false"}
+
+        with self.assertRaises(DuplicateResolutionError) as conflict:
+            resolve_duplicate_group(
+                occurrences,
+                unresolved.rows,
+                unresolved.manifest,
+                group["group_id"],
+                "same-event",
+                {identifier: patch for identifier in tail_ids},
+            )
+
+        self.assertEqual(conflict.exception.code, "duplicate_history_conflict")
+
+    def test_keep_all_preserves_current_manual_review_state(self) -> None:
+        occurrences = [
+            _occurrence("1", "a"),
+            _occurrence("2", "a"),
+            _occurrence("3", "b"),
+        ]
+        for occurrence in occurrences:
+            occurrence["needs_review"] = "true"
+        unresolved = canonicalize_overlaps(
+            occurrences, [], empty_overlap_manifest(_NAMESPACE_KEY)
+        )
+        [group] = list_duplicate_groups(unresolved, occurrences)
+        corrected_id = unresolved.rows[0]["transaction_id"]
+        apply_corrections(
+            unresolved.rows,
+            {corrected_id: {"needs_review": "false"}},
+        )
+
+        resolved = resolve_duplicate_group(
+            occurrences,
+            unresolved.rows,
+            unresolved.manifest,
+            group["group_id"],
+            "keep-all",
+            {corrected_id: {"needs_review": "false"}},
+        )
+
+        corrected = next(
+            row for row in resolved.result.rows if row["transaction_id"] == corrected_id
+        )
+        self.assertEqual(corrected["needs_review"], "false")
+        self.assertNotIn("overlap_count_ambiguous", corrected["flags"].split(";"))
+        self.assertNotIn("overlap_count_prior_review", corrected["flags"].split(";"))
+
     def test_same_event_protects_non_overlap_review_history(self) -> None:
         occurrences = [
             _occurrence("1", "a"),

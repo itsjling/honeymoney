@@ -489,6 +489,10 @@ def resolve_duplicate_group(
     )
     membership["resolution"] = choice
     resolved = canonicalize_overlaps(source_occurrences, current.rows, manifest)
+    for row in resolved.rows:
+        correction = corrections.get(row["transaction_id"])
+        if correction is not None and "needs_review" in correction:
+            row["needs_review"] = str(correction["needs_review"]).casefold()
     return DuplicateResolution(
         resolved,
         removed_correction_ids,
@@ -897,7 +901,7 @@ def _apply_overlap_review(
         flags.append(OVERLAP_AMBIGUITY_FLAG)
         reason = _append_reason(reason, OVERLAP_AMBIGUITY_REASON)
         row["needs_review"] = "true"
-    elif had_ambiguity:
+    elif had_ambiguity and "manual_correction" not in flags:
         row["needs_review"] = (
             "true"
             if prior_review or reason or OVERLAP_HISTORY_FLAG in flags
@@ -1230,6 +1234,8 @@ def _safe_tail_corrections(
     removed = tuple(identifier for identifier in tail_ids if identifier in patches)
     updates: dict[str, dict[str, str]] = {}
     if keep_count == 1 and patches:
+        if len(removed) > 1:
+            raise DuplicateResolutionError("duplicate_history_conflict")
         if len(unique_patches) != 1:
             raise DuplicateResolutionError("duplicate_history_conflict")
         patch = dict(next(iter(unique_patches.values())))
