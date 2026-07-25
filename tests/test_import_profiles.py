@@ -565,6 +565,61 @@ class PdfBalanceReconciliationTest(unittest.TestCase):
         self.assertEqual(rows[0]["statement_closing_balance"], "95.00")
         self.assertNotIn("balance_conflict", rows[0]["flags"])
 
+    def test_section_end_marker_in_description_keeps_account_context(self) -> None:
+        profile = load_profile("hsbc_one_pdf.json")
+        profile["pdf"]["sectioned_word_rows"]["section_end_markers"] = ["END SECTION"]
+        words = [
+            {"text": "Statement", "x0": 20, "top": 10},
+            {"text": "Date", "x0": 75, "top": 10},
+            {"text": "05", "x0": 105, "top": 10},
+            {"text": "January", "x0": 123, "top": 10},
+            {"text": "2026", "x0": 153, "top": 10},
+            {"text": "Foreign", "x0": 20, "top": 30},
+            {"text": "Currency", "x0": 65, "top": 30},
+            {"text": "Savings", "x0": 115, "top": 30},
+            {"text": "Date", "x0": 82, "top": 50},
+            {"text": "Transaction", "x0": 118, "top": 50},
+            {"text": "Details", "x0": 190, "top": 50},
+            {"text": "Deposit", "x0": 350, "top": 50},
+            {"text": "Withdrawal", "x0": 418, "top": 50},
+            {"text": "Balance", "x0": 500, "top": 50},
+            {"text": "AUD", "x0": 59, "top": 70},
+            {"text": "B/F", "x0": 120, "top": 70},
+            {"text": "BALANCE", "x0": 145, "top": 70},
+            {"text": "100.00", "x0": 500, "top": 70},
+            {"text": "AUD", "x0": 59, "top": 90},
+            {"text": "30", "x0": 79, "top": 90},
+            {"text": "Dec", "x0": 85, "top": 90},
+            {"text": "SYNTHETIC", "x0": 120, "top": 90},
+            {"text": "END", "x0": 185, "top": 90},
+            {"text": "SECTION", "x0": 220, "top": 90},
+            {"text": "DEBIT", "x0": 275, "top": 90},
+            {"text": "5.00", "x0": 425, "top": 90},
+            {"text": "AUD", "x0": 59, "top": 110},
+            {"text": "31", "x0": 79, "top": 110},
+            {"text": "Dec", "x0": 85, "top": 110},
+            {"text": "SYNTHETIC", "x0": 120, "top": 110},
+            {"text": "LATER", "x0": 185, "top": 110},
+            {"text": "DEBIT", "x0": 230, "top": 110},
+            {"text": "2.00", "x0": 425, "top": 110},
+            {"text": "AUD", "x0": 59, "top": 130},
+            {"text": "C/F", "x0": 120, "top": 130},
+            {"text": "BALANCE", "x0": 145, "top": 130},
+            {"text": "93.00", "x0": 500, "top": 130},
+        ]
+
+        rows, warnings, _ = _import_fake_pdf(profile, words=words)
+
+        self.assertEqual(warnings, [])
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(
+            [row["original_description"] for row in rows],
+            ["SYNTHETIC END SECTION DEBIT", "SYNTHETIC LATER DEBIT"],
+        )
+        self.assertEqual({row["account_id"] for row in rows}, {"hsbc_one_fcy_savings"})
+        self.assertEqual(rows[0]["statement_opening_balance"], "100.00")
+        self.assertEqual(rows[-1]["statement_closing_balance"], "93.00")
+
     def test_section_label_in_description_does_not_change_balance_section(
         self,
     ) -> None:

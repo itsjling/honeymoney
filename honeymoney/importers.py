@@ -1680,7 +1680,9 @@ def _pdf_sectioned_word_source_rows(
                 description_parts = []
                 continue
 
-            if _pdf_line_has_marker(folded, settings.get("section_end_markers", [])):
+            if not has_transaction_shape and _pdf_line_has_marker(
+                folded, settings.get("section_end_markers", [])
+            ):
                 current_account = None
                 current_currency = ""
                 in_table = False
