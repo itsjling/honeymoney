@@ -1041,7 +1041,9 @@ def _import_pdf(
 
             for page_number, page in enumerate(pdf.pages, start=1):
                 word_rows = _pdf_word_source_rows(
-                    page, pdf_settings, include_physical_lines=True
+                    page,
+                    pdf_settings,
+                    include_physical_lines=True,
                 )
                 if word_rows is not None:
                     for row_number, (source_row, physical_line) in enumerate(
@@ -1441,16 +1443,16 @@ def _pdf_word_source_rows(
         if not in_table:
             in_table = _pdf_word_header_seen(text, pdf_settings)
             continue
-        if _pdf_word_table_end_seen(text, pdf_settings):
-            break
-
         source_row = _pdf_word_row(line, word_columns)
+        has_date_value = _pdf_word_row_has_date_value(source_row, pdf_settings)
+        marker_end_seen = _pdf_word_table_end_seen(text, pdf_settings)
+        if marker_end_seen and not _pdf_word_row_has_marker_transaction_shape(
+            source_row, pdf_settings
+        ):
+            break
         if not any(source_row.values()):
             continue
-        if not (
-            source_row.get("Post date", "").strip()
-            or source_row.get("Trans date", "").strip()
-        ):
+        if not has_date_value:
             continue
         if include_physical_lines:
             rows.append((source_row, physical_line))
@@ -1552,15 +1554,43 @@ def _pdf_word_header_seen(text: str, pdf_settings: dict[str, Any]) -> bool:
 def _pdf_word_table_end_seen(text: str, pdf_settings: dict[str, Any]) -> bool:
     markers = pdf_settings.get("word_table_end_markers", [])
     folded = " ".join(text.casefold().split())
-    for marker in markers:
-        folded_marker = " ".join(str(marker).casefold().split())
-        if not folded_marker:
-            continue
-        if folded == folded_marker:
-            return True
-        if folded_marker.endswith(":") and folded.startswith(folded_marker):
-            return True
-    return False
+    folded_markers = (" ".join(str(marker).casefold().split()) for marker in markers)
+    return any(marker and marker in folded for marker in folded_markers)
+
+
+def _pdf_word_row_has_date_value(
+    source_row: dict[str, str], pdf_settings: dict[str, Any]
+) -> bool:
+    """Return whether a word row occupies a mapped transaction date column."""
+    columns = pdf_settings.get("columns", {})
+    if not isinstance(columns, dict):
+        return False
+    date_columns = {
+        str(columns[field])
+        for field in ("transaction_date", "posting_date")
+        if columns.get(field) not in (None, "")
+    }
+    return any(_clean_text(source_row.get(column, "")) for column in date_columns)
+
+
+def _pdf_word_row_has_marker_transaction_shape(
+    source_row: dict[str, str], pdf_settings: dict[str, Any]
+) -> bool:
+    """Keep marker text in a date-bearing transaction description."""
+    if not _pdf_word_row_has_date_value(source_row, pdf_settings):
+        return False
+    columns = pdf_settings.get("columns", {})
+    if not isinstance(columns, dict):
+        return False
+    description_columns = {
+        str(columns[field])
+        for field in ("description", "merchant")
+        if columns.get(field) not in (None, "")
+    }
+    return any(
+        _pdf_word_table_end_seen(source_row.get(column, ""), pdf_settings)
+        for column in description_columns
+    )
 
 
 def _word_row_is_skipped(

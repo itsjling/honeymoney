@@ -549,7 +549,7 @@ class IdentityParserInputsTest(unittest.TestCase):
 
         self.assertEqual([row["merchant"] for row in rows], ["Coffee"])
 
-    def test_pdf_word_end_marker_does_not_match_transaction_description(self) -> None:
+    def test_pdf_word_end_marker_does_not_end_dated_transaction_row(self) -> None:
         legal_name = "The Hongkong and Shanghai Banking Corporation Limited"
         profile = {
             "id": "word",
@@ -585,6 +585,86 @@ class IdentityParserInputsTest(unittest.TestCase):
 
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["merchant"], legal_name)
+
+    def test_pdf_word_end_marker_matches_within_longer_footer_line(self) -> None:
+        profile = {
+            "id": "word",
+            "account_id": "word",
+            "account_currency": "HKD",
+            "date_formats": ["%Y-%m-%d"],
+            "pdf": {
+                "word_rows": True,
+                "word_header_markers": ["Post date", "Description", "Amount"],
+                "word_table_end_markers": ["REWARDCASH"],
+                "word_columns": {
+                    "Post date": [0, 90],
+                    "Description": [90, 200],
+                    "Amount": [200, 300],
+                },
+                "columns": {
+                    "transaction_date": "Post date",
+                    "description": "Description",
+                    "amount": "Amount",
+                },
+            },
+        }
+        words = [
+            {"text": "Post date", "x0": 0, "top": 10},
+            {"text": "Description", "x0": 100, "top": 10},
+            {"text": "Amount", "x0": 210, "top": 10},
+            {"text": "2026-01-01", "x0": 0, "top": 20},
+            {"text": "Coffee", "x0": 100, "top": 20},
+            {"text": "-1.00", "x0": 210, "top": 20},
+            {"text": "REWARDCASH", "x0": 0, "top": 30},
+            {"text": "SUMMARY", "x0": 100, "top": 30},
+            {"text": "not-a-date", "x0": 0, "top": 40},
+            {"text": "After footer", "x0": 100, "top": 40},
+            {"text": "-2.00", "x0": 210, "top": 40},
+        ]
+
+        rows, _, _ = _import_fake_pdf(profile, words=words)
+
+        self.assertEqual([row["merchant"] for row in rows], ["Coffee"])
+
+    def test_pdf_word_marker_description_with_malformed_date_is_rejected(
+        self,
+    ) -> None:
+        profile = {
+            "id": "word",
+            "account_id": "word",
+            "account_currency": "HKD",
+            "date_formats": ["%Y-%m-%d"],
+            "pdf": {
+                "word_rows": True,
+                "word_header_markers": ["Post date", "Description", "Amount"],
+                "word_table_end_markers": ["REWARDCASH"],
+                "word_columns": {
+                    "Post date": [0, 90],
+                    "Description": [90, 200],
+                    "Amount": [200, 300],
+                },
+                "columns": {
+                    "transaction_date": "Post date",
+                    "description": "Description",
+                    "amount": "Amount",
+                },
+            },
+        }
+        words = [
+            {"text": "Post date", "x0": 0, "top": 10},
+            {"text": "Description", "x0": 100, "top": 10},
+            {"text": "Amount", "x0": 210, "top": 10},
+            {"text": "not-a-date", "x0": 0, "top": 20},
+            {"text": "REWARDCASH PURCHASE", "x0": 100, "top": 20},
+            {"text": "-1.00", "x0": 210, "top": 20},
+        ]
+
+        with self.assertRaisesRegex(
+            ValueError,
+            r"pdf_word_row_invalid_date: source=statement\.pdf; "
+            r"page=1; row=2; field=transaction_date",
+        ):
+            _import_fake_pdf(profile, words=words)
 
     def test_pdf_word_rows_allow_one_blank_mapped_date(self) -> None:
         profile = {
