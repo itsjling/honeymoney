@@ -1372,36 +1372,38 @@ def _pdf_balance_observations(
 
 
 def _pdf_balance_lines(page: Any, pdf_settings: dict[str, Any]) -> list[str]:
-    lines: list[str] = []
+    word_lines: list[str] = []
     if hasattr(page, "extract_words"):
         words = page.extract_words(x_tolerance=1, y_tolerance=3) or []
-        lines.extend(
+        word_lines.extend(
             " ".join(str(word.get("text", "")) for word in line).strip()
             for line in _pdf_word_lines(
                 words, float(pdf_settings.get("word_y_tolerance", 3))
             )
         )
+    lines = [line for line in word_lines if line]
+    word_line_counts: dict[str, int] = {}
+    for line in lines:
+        key = " ".join(line.split())
+        word_line_counts[key] = word_line_counts.get(key, 0) + 1
     for table in _pdf_tables(page):
         for row in table:
             cell_lines = [str(cell or "").splitlines() or [""] for cell in row]
             line_count = max((len(value) for value in cell_lines), default=0)
             for line_index in range(line_count):
-                lines.append(
-                    " ".join(
-                        value[line_index].strip()
-                        for value in cell_lines
-                        if line_index < len(value) and value[line_index].strip()
-                    )
+                line = " ".join(
+                    value[line_index].strip()
+                    for value in cell_lines
+                    if line_index < len(value) and value[line_index].strip()
                 )
-    unique_lines: list[str] = []
-    seen: set[str] = set()
-    for line in lines:
-        stripped = line.strip()
-        deduplication_key = " ".join(stripped.split())
-        if stripped and deduplication_key not in seen:
-            seen.add(deduplication_key)
-            unique_lines.append(stripped)
-    return unique_lines
+                if not line:
+                    continue
+                key = " ".join(line.split())
+                if word_line_counts.get(key, 0):
+                    word_line_counts[key] -= 1
+                    continue
+                lines.append(line)
+    return lines
 
 
 def _pdf_balance_target(

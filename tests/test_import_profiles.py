@@ -8,6 +8,7 @@ import tempfile
 import types
 import unittest
 from dataclasses import replace
+from decimal import Decimal
 from pathlib import Path
 from unittest.mock import patch
 
@@ -25,6 +26,7 @@ from honeymoney.importers import (
     _import_pdf,
     _import_transactions,
     _pdf_balance_lines,
+    _pdf_balance_observations,
     _validate_profile,
 )
 from honeymoney.reconciliation import reconcile_ledger
@@ -385,6 +387,60 @@ class PdfBalanceReconciliationTest(unittest.TestCase):
                 return [[["OPENING BALANCE +100.00"]]]
 
         self.assertEqual(_pdf_balance_lines(Page(), {}), ["OPENING BALANCE +100.00"])
+
+    def test_balance_scanner_keeps_identical_lines_in_separate_sections(self) -> None:
+        class Page:
+            def extract_words(self, **kwargs):
+                return [
+                    {"text": "HKD", "x0": 20, "top": 10},
+                    {"text": "Savings", "x0": 50, "top": 10},
+                    {"text": "B/F", "x0": 20, "top": 30},
+                    {"text": "BALANCE", "x0": 50, "top": 30},
+                    {"text": "+100.00", "x0": 120, "top": 30},
+                    {"text": "C/F", "x0": 20, "top": 50},
+                    {"text": "BALANCE", "x0": 50, "top": 50},
+                    {"text": "+110.00", "x0": 120, "top": 50},
+                    {"text": "HKD", "x0": 20, "top": 70},
+                    {"text": "Current", "x0": 50, "top": 70},
+                    {"text": "B/F", "x0": 20, "top": 90},
+                    {"text": "BALANCE", "x0": 50, "top": 90},
+                    {"text": "+100.00", "x0": 120, "top": 90},
+                    {"text": "C/F", "x0": 20, "top": 110},
+                    {"text": "BALANCE", "x0": 50, "top": 110},
+                    {"text": "+110.00", "x0": 120, "top": 110},
+                ]
+
+            def extract_tables(self):
+                return [
+                    [
+                        ["HKD Savings"],
+                        ["B/F BALANCE +100.00"],
+                        ["C/F BALANCE +110.00"],
+                        ["HKD Current"],
+                        ["B/F BALANCE +100.00"],
+                        ["C/F BALANCE +110.00"],
+                    ]
+                ]
+
+        class Pdf:
+            pages = [Page()]
+
+        profile = load_profile("hsbc_one_pdf.json")
+        observations = _pdf_balance_observations(Pdf(), profile["pdf"])
+
+        self.assertEqual(
+            observations,
+            {
+                ("hsbc_one_hkd_savings", "HKD"): {
+                    "opening": [Decimal("100.00")],
+                    "closing": [Decimal("110.00")],
+                },
+                ("hsbc_one_hkd_current", "HKD"): {
+                    "opening": [Decimal("100.00")],
+                    "closing": [Decimal("110.00")],
+                },
+            },
+        )
 
     def test_section_end_stops_balance_scanner_and_transaction_parser(self) -> None:
         profile = load_profile("hsbc_one_pdf.json")
