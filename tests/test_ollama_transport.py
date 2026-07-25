@@ -181,7 +181,8 @@ class OllamaTransportTest(unittest.TestCase):
                     f"http://{pinned_host}:11434/api/generate",
                 )
                 self.assertEqual(sent[0].headers["Host"], f"{host}:11434")
-                self.assertEqual(sent[0].timeout, 3.5)
+                self.assertGreater(sent[0].timeout, 0)
+                self.assertLessEqual(sent[0].timeout, 3.5)
 
     def test_retries_the_next_validated_address_after_connection_refused(self) -> None:
         sent = []
@@ -253,6 +254,44 @@ class OllamaTransportTest(unittest.TestCase):
                         "http://127.0.0.1:11434/api/tags",
                     ],
                 )
+
+    def test_connection_retries_share_one_timeout_budget(self) -> None:
+        elapsed = 0.0
+        sent = []
+
+        def monotonic() -> float:
+            return 100.0 + elapsed
+
+        def sender(request: OllamaHttpRequest) -> OllamaHttpResponse:
+            nonlocal elapsed
+            sent.append(request)
+            elapsed += 2.0 if len(sent) == 1 else 3.0
+            raise _OllamaConnectFailure(TimeoutError("synthetic connect timeout"))
+
+        transport = LoopbackOllamaTransport(
+            resolver=resolved("::1", "127.0.0.1", "127.0.0.2"), sender=sender
+        )
+        with patch("honeymoney.ollama.time.monotonic", monotonic):
+            with self.assertRaisesRegex(TimeoutError, "timed out"):
+                transport.request(
+                    OllamaHttpRequest(
+                        "GET",
+                        "http://localhost:11434/api/tags",
+                        {},
+                        None,
+                        5.0,
+                    )
+                )
+
+        self.assertEqual(elapsed, 5.0)
+        self.assertEqual([request.timeout for request in sent], [5.0, 3.0])
+        self.assertEqual(
+            [request.url for request in sent],
+            [
+                "http://[::1]:11434/api/tags",
+                "http://127.0.0.1:11434/api/tags",
+            ],
+        )
 
     def test_model_listing_retries_the_next_validated_address(self) -> None:
         sent = []

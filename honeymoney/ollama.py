@@ -103,11 +103,14 @@ class LoopbackOllamaTransport:
 
     def request(self, request: OllamaHttpRequest) -> bytes:
         current = request
+        deadline = time.monotonic() + request.timeout
         for redirect_count in range(self._max_redirects + 1):
             endpoint = validate_ollama_endpoint(current.url, resolver=self._resolver)
             headers = dict(current.headers)
             headers["Host"] = endpoint.host_header
-            response = self._send_to_validated_address(current, endpoint, headers)
+            response = self._send_to_validated_address(
+                current, endpoint, headers, deadline
+            )
             if response.status not in _REDIRECT_STATUSES:
                 if response.status >= 400:
                     raise urllib.error.HTTPError(
@@ -142,9 +145,17 @@ class LoopbackOllamaTransport:
         request: OllamaHttpRequest,
         endpoint: _ValidatedEndpoint,
         headers: dict[str, str],
+        deadline: float,
     ) -> OllamaHttpResponse:
         for index, pinned_url in enumerate(endpoint.pinned_urls):
-            pinned = request._replace(url=pinned_url, headers=headers)
+            remaining_timeout = deadline - time.monotonic()
+            if remaining_timeout <= 0:
+                raise TimeoutError("Ollama request timed out before it could connect")
+            pinned = request._replace(
+                url=pinned_url,
+                headers=headers,
+                timeout=remaining_timeout,
+            )
             try:
                 return self._sender(pinned)
             except _OllamaConnectFailure:
