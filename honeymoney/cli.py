@@ -64,6 +64,7 @@ from honeymoney.overlap import (
     enforce_overlap_review,
     list_duplicate_groups,
     project_corrections,
+    release_overlap_review_ownership,
     resolve_duplicate_group,
 )
 from honeymoney.persistence import persist_generation, recover_generation
@@ -386,6 +387,7 @@ def _run_pipeline(
         for row in ledger_rows
         if row.get("canonical_group_id") in affected_group_ids
     ]
+    release_overlap_review_ownership(transactions)
     correction_projection = project_corrections(overlap_result, corrections)
     canonical_corrections = correction_projection.corrections
     local_memory = build_local_categorization_memory(

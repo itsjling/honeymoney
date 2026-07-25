@@ -1389,6 +1389,87 @@ def open(source_path):
             )
             self.assertEqual(self._reset_state_bytes(root), before_repeat)
 
+    def test_rule_categorized_count_mismatch_resolutions_leave_review_clear(
+        self,
+    ) -> None:
+        repeated_row = "2026-05-04,SYNTHETIC RULED COUNT MISMATCH,-12.00,HKD"
+        for choice, expected_count in (("same-event", 1), ("keep-all", 2)):
+            with self.subTest(choice=choice), tempfile.TemporaryDirectory() as tmp:
+                root = self._setup_workspace(tmp)
+                (root / "rules.json").write_text(
+                    json.dumps(
+                        {
+                            "version": 1,
+                            "rules": [
+                                {
+                                    "id": "synthetic-count-mismatch",
+                                    "enabled": True,
+                                    "priority": 100,
+                                    "conditions": [
+                                        {
+                                            "field": "original_description",
+                                            "match_type": "exact",
+                                            "patterns": [
+                                                "SYNTHETIC RULED COUNT MISMATCH"
+                                            ],
+                                        }
+                                    ],
+                                    "category": "Dining",
+                                    "flow_type": "expense",
+                                    "owner": "Household",
+                                    "confidence": 0.99,
+                                }
+                            ],
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                statements = root / "statements"
+                statements.mkdir()
+                self._write_statement(statements / "a.csv", [repeated_row] * 2)
+                self._write_statement(statements / "b.csv", [repeated_row])
+                imported = self._run_cli(
+                    ["import", str(statements), "--no-interactive"], cwd=root
+                )
+                self.assertEqual(imported.returncode, 0, imported.stderr)
+                listed = self._run_cli(["duplicates", "--json"], cwd=root)
+                self.assertEqual(listed.returncode, 0, listed.stderr)
+                [group] = json.loads(listed.stdout)["data"]["groups"]
+
+                resolved = self._run_cli(
+                    [
+                        "duplicates",
+                        "resolve",
+                        group["group_id"],
+                        "--as",
+                        choice,
+                        "--json",
+                    ],
+                    cwd=root,
+                )
+
+                self.assertEqual(
+                    resolved.returncode, 0, resolved.stderr or resolved.stdout
+                )
+                rows = self._ledger_rows(root)
+                self.assertEqual(len(rows), expected_count)
+                self.assertTrue(
+                    all(
+                        row["category"] == "Dining"
+                        and row["needs_review"] == "false"
+                        and row["reason"] == "Matched rule synthetic-count-mismatch"
+                        for row in rows
+                    )
+                )
+                with (root / "output" / "review_needed.csv").open(
+                    newline="", encoding="utf-8"
+                ) as fh:
+                    self.assertEqual(list(csv.DictReader(fh)), [])
+                pending = self._run_cli(["pending", "2026-05", "--json"], cwd=root)
+                self.assertEqual(pending.returncode, 0, pending.stderr)
+                self.assertEqual(json.loads(pending.stdout)["data"]["count"], 0)
+                self.assertEqual(json.loads(pending.stdout)["data"]["transactions"], [])
+
     def test_reset_drift_gets_a_new_group_and_safe_warning(
         self,
     ) -> None:

@@ -17,6 +17,7 @@ from honeymoney.overlap import (
     overlap_manifest_document,
     parse_overlap_manifest,
     project_corrections,
+    release_overlap_review_ownership,
     resolve_duplicate_group,
     validate_overlap_agreement,
 )
@@ -706,10 +707,12 @@ class CanonicalOverlapTest(unittest.TestCase):
             occurrences, [], empty_overlap_manifest(_NAMESPACE_KEY)
         )
         [group] = list_duplicate_groups(unresolved, occurrences)
+        release_overlap_review_ownership(unresolved.rows)
         for row in unresolved.rows:
             row["needs_review"] = "true"
-            row["reason"] += "; Synthetic independent review"
-            row["flags"] += ";synthetic_independent_review"
+            row["reason"] = "Synthetic independent review"
+            row["flags"] = "synthetic_independent_review"
+        enforce_overlap_review(unresolved.rows, unresolved)
 
         for choice in ("same-event", "keep-all"):
             with self.subTest(choice=choice):

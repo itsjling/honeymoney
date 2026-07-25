@@ -358,6 +358,17 @@ def enforce_overlap_review(
             row["needs_review"] = "true"
 
 
+def release_overlap_review_ownership(rows: list[dict[str, str]]) -> None:
+    """Restore review state from before overlap review for categorization."""
+    for row in rows:
+        if OVERLAP_AMBIGUITY_FLAG in row.get("flags", "").split(";"):
+            _apply_overlap_review(
+                row,
+                row.get("provenance_status", ""),
+                resolved=True,
+            )
+
+
 def list_duplicate_groups(
     result: CanonicalizationResult,
     source_occurrences: list[Mapping[str, Any]] | tuple[Mapping[str, Any], ...],
@@ -919,9 +930,7 @@ def _apply_overlap_review(
         row["needs_review"] = "true"
     elif had_ambiguity and "manual_correction" not in flags:
         row["needs_review"] = (
-            "true"
-            if prior_review or reason or OVERLAP_HISTORY_FLAG in flags
-            else "false"
+            "true" if prior_review or OVERLAP_HISTORY_FLAG in flags else "false"
         )
     row["flags"] = ";".join(dict.fromkeys(flags))
     row["reason"] = reason
