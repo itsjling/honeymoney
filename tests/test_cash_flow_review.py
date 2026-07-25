@@ -529,16 +529,9 @@ class CashFlowReviewTest(unittest.TestCase):
     ) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = self._setup_workspace(tmp)
-            self._import_rows(
-                root, "credit.csv", ["2026-05-04,IDENTITY CREDIT,300.00,HKD"]
-            )
-            ledger_path = root / "output" / "categorized.csv"
+            self._import_rows(root, "credit.csv", ["2026-05-04,,300.00,HKD"])
             [row] = self._ledger(root)
-            row["institution"] = ""
-            with ledger_path.open("w", newline="", encoding="utf-8") as fh:
-                writer = csv.DictWriter(fh, fieldnames=list(row))
-                writer.writeheader()
-                writer.writerow(row)
+            self.assertEqual(row["original_description"], "")
             before = self._artifacts(root, include_rules=True)
 
             result = self._run_cli(
