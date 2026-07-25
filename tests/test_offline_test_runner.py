@@ -30,8 +30,20 @@ class OfflineTestRunnerTest(unittest.TestCase):
                         constructor()
             with self.assertRaisesRegex(AssertionError, "creating sockets"):
                 socket.create_connection(("localhost", 80))
+            address_info = socket.getaddrinfo(
+                "127.0.0.1",
+                80,
+                socket.AF_INET,
+                socket.SOCK_STREAM,
+            )
+            self.assertEqual(address_info[0][4], ("127.0.0.1", 80))
             with self.assertRaisesRegex(AssertionError, "DNS resolution"):
-                socket.getaddrinfo("example.test", 80)
+                socket.getaddrinfo(
+                    "example.test",
+                    80,
+                    socket.AF_INET,
+                    socket.SOCK_STREAM,
+                )
             with self.assertRaisesRegex(AssertionError, "DNS resolution"):
                 socket.gethostbyname("127.0.0.1")
             with self.assertRaisesRegex(AssertionError, "DNS resolution"):
@@ -148,6 +160,13 @@ class OfflineTestRunnerTest(unittest.TestCase):
                 "_socket.SocketType()",
                 "default tests must inject network transports",
             ),
+            "getaddrinfo_external": (
+                (
+                    "socket.getaddrinfo("
+                    "'example.test', 80, socket.AF_INET, socket.SOCK_STREAM)"
+                ),
+                "attempted DNS resolution",
+            ),
             "gethostbyname": (
                 "socket.gethostbyname('127.0.0.1')",
                 "must not perform direct DNS resolution",
@@ -189,9 +208,27 @@ class OfflineTestRunnerTest(unittest.TestCase):
         for scenario, (pythonpath, extra_environment) in scenarios.items():
             with self.subTest(scenario=scenario):
                 child_results: dict[str, subprocess.CompletedProcess[str]] = {}
+                loopback_result = None
 
                 def guarded_discover(start_dir: str) -> unittest.TestSuite:
+                    nonlocal loopback_result
                     del start_dir
+                    loopback_result = subprocess.run(
+                        [
+                            sys.executable,
+                            "-c",
+                            (
+                                "import socket; "
+                                "result = socket.getaddrinfo("
+                                "'127.0.0.1', 80, "
+                                "socket.AF_INET, socket.SOCK_STREAM); "
+                                "assert result[0][4] == ('127.0.0.1', 80)"
+                            ),
+                        ],
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                    )
                     for name, (expression, _) in guarded_calls.items():
                         child_results[name] = subprocess.run(
                             [
@@ -225,6 +262,8 @@ class OfflineTestRunnerTest(unittest.TestCase):
                     result = run_tests_offline.main()
 
                 self.assertEqual(result, 0)
+                assert loopback_result is not None
+                self.assertEqual(loopback_result.returncode, 0, loopback_result.stderr)
                 self.assertEqual(set(child_results), set(guarded_calls))
                 for name, child_result in child_results.items():
                     with self.subTest(scenario=scenario, resolver=name):

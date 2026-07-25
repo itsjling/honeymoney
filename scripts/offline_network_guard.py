@@ -26,7 +26,6 @@ def forbid_dns(*args: object, **kwargs: object) -> NoReturn:
 def offline_getaddrinfo(
     host: str,
     port: int,
-    *,
     family: int = socket.AF_UNSPEC,
     type: int = 0,
     proto: int = 0,
