@@ -1156,6 +1156,47 @@ def open(source_path):
                 self.assertEqual(len(rows), 1)
                 self.assertEqual(rows[0]["provenance_status"], "exact_one_to_one")
 
+    def test_public_overlap_diagnostics_keep_membership_digests_hidden(self) -> None:
+        repeated_row = "2026-05-04,SYNTHETIC PRIVATE MEMBERSHIP,-12.00,HKD"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._setup_workspace(tmp)
+            statements = root / "statements"
+            statements.mkdir()
+            for name, count in (("a.csv", 3), ("b.csv", 2), ("c.csv", 1)):
+                self._write_statement(statements / name, [repeated_row] * count)
+            imported = self._run_cli(
+                ["import", str(statements), "--no-interactive", "--json"], cwd=root
+            )
+            self.assertEqual(imported.returncode, 0, imported.stderr)
+
+            outputs = [
+                imported.stdout,
+                (root / "output" / "import_report.json").read_text(encoding="utf-8"),
+            ]
+            for args in (
+                ["reconcile", "--dry-run", "--json"],
+                ["report", "2026-05", "--no-open", "--json"],
+                ["duplicates", "--json"],
+            ):
+                result = self._run_cli(args, cwd=root)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                outputs.append(result.stdout)
+
+            overlap_manifest = json.loads(
+                (root / "output" / ".honeymoney-overlap-manifest.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertTrue(
+                any(
+                    membership.get("membership_digest")
+                    for group in overlap_manifest["groups"]
+                    for membership in group["memberships"]
+                )
+            )
+            for output in outputs:
+                self.assertNotIn("membership_digest", output)
+
     def test_duplicates_cli_lists_and_resolves_same_event_idempotently(self) -> None:
         repeated_row = "2026-05-04,SYNTHETIC COUNT MISMATCH,-12.00,HKD"
         with tempfile.TemporaryDirectory() as tmp:
@@ -1605,6 +1646,7 @@ def open(source_path):
                         {
                             "transaction_id": tail_id,
                             "category": "Dining",
+                            "flow_type": "expense",
                             "needs_review": False,
                         }
                     ]

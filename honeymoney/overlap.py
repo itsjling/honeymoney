@@ -411,7 +411,6 @@ def list_duplicate_groups(
         groups.append(
             {
                 "group_id": diagnostic["review_group_id"],
-                "membership_digest": diagnostic["membership_digest"],
                 "match_basis": "exact_normalized_financial_identity",
                 "source_counts": list(diagnostic["source_counts"]),
                 "keep_all_count": diagnostic["keep_all_count"],
@@ -602,19 +601,21 @@ def canonicalize_overlaps(
             ),
             None,
         )
-        if status == AMBIGUOUS_COUNT_STATUS and matching_membership is None:
-            if any(
-                membership["resolution"] != "unresolved" for membership in memberships
-            ):
+        if status == AMBIGUOUS_COUNT_STATUS:
+            if (
+                matching_membership is None
+                or matching_membership["resolution"] == "unresolved"
+            ) and _prior_group_has_resolved_review(prior_slots, prior_by_id):
                 changed_review_group_ids.add(review_group_id)
-            matching_membership = {
-                "overlap_group_id": group_id,
-                "group_id": review_group_id,
-                "membership_digest": membership_digest,
-                "resolution": "unresolved",
-            }
-            memberships.append(matching_membership)
-            memberships.sort(key=lambda item: item["membership_digest"])
+            if matching_membership is None:
+                matching_membership = {
+                    "overlap_group_id": group_id,
+                    "group_id": review_group_id,
+                    "membership_digest": membership_digest,
+                    "resolution": "unresolved",
+                }
+                memberships.append(matching_membership)
+                memberships.sort(key=lambda item: item["membership_digest"])
         decision_choice = (
             str(matching_membership["resolution"])
             if matching_membership is not None
@@ -650,7 +651,6 @@ def canonicalize_overlaps(
             "group_id": group_id,
             "canonical_group_id": group_id,
             "review_group_id": review_group_id,
-            "membership_digest": membership_digest,
             "canonical_transaction_ids": [
                 slot["transaction_id"] for slot in slots if slot["state"] == "active"
             ],
@@ -763,6 +763,22 @@ def _source_pools(
     ]
     pools.sort(key=lambda pool: str(pool[0]["transaction_id"]))
     return pools
+
+
+def _prior_group_has_resolved_review(
+    prior_slots: Mapping[int, Mapping[str, Any]],
+    prior_rows: Mapping[str, Mapping[str, Any]],
+) -> bool:
+    for slot in prior_slots.values():
+        if slot.get("state") != "active":
+            continue
+        row = prior_rows.get(str(slot.get("transaction_id", "")))
+        if row is None or row.get("provenance_status") != AMBIGUOUS_COUNT_STATUS:
+            continue
+        flags = set(filter(None, str(row.get("flags", "")).split(";")))
+        if OVERLAP_AMBIGUITY_FLAG not in flags:
+            return True
+    return False
 
 
 def _provenance_status(source_counts: list[int]) -> str:
@@ -1245,12 +1261,8 @@ def _safe_tail_corrections(
             raise DuplicateResolutionError("duplicate_history_conflict")
         if retained_patch is None:
             updates[retained_id] = patch
-        ignored_fields = {"flow_type", "flow_source"} if "category" in patch else set()
         histories = {
-            _protected_history(
-                _project_correction(row, patch), ignored_fields=ignored_fields
-            )
-            for row in rows
+            _protected_history(_project_correction(row, patch)) for row in rows
         }
         if len(histories) != 1:
             raise DuplicateResolutionError("duplicate_history_conflict")
@@ -1290,9 +1302,7 @@ def _project_correction(
     return projected
 
 
-def _protected_history(
-    row: Mapping[str, Any], *, ignored_fields: set[str] | None = None
-) -> tuple[tuple[str, str], ...]:
+def _protected_history(row: Mapping[str, Any]) -> tuple[tuple[str, str], ...]:
     values = {field: str(row.get(field, "")) for field in _MUTABLE_FIELDS}
     values["flags"] = ";".join(
         item
@@ -1300,11 +1310,7 @@ def _protected_history(
         if item and item not in {OVERLAP_AMBIGUITY_FLAG, OVERLAP_PRIOR_REVIEW_FLAG}
     )
     values["reason"] = _without_owned_reason(values["reason"], OVERLAP_AMBIGUITY_REASON)
-    return tuple(
-        (field, values[field])
-        for field in _MUTABLE_FIELDS
-        if field not in (ignored_fields or set())
-    )
+    return tuple((field, values[field]) for field in _MUTABLE_FIELDS)
 
 
 def _without_owned_reason(value: str, owned_reason: str) -> str:

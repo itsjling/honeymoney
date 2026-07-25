@@ -243,6 +243,8 @@ class CanonicalOverlapTest(unittest.TestCase):
         self.assertNotIn("original_description", str(group))
         self.assertNotIn("source_id", str(group))
         self.assertNotIn("namespace_key", str(group))
+        self.assertNotIn("membership_digest", str(group))
+        self.assertNotIn("membership_digest", str(result.diagnostic))
 
     def test_same_event_resolution_keeps_the_second_largest_multiplicity(
         self,
@@ -280,17 +282,13 @@ class CanonicalOverlapTest(unittest.TestCase):
             for item in resolved.result.manifest["groups"]
             if item["overlap_group_id"] == unresolved.rows[0]["canonical_group_id"]
         ]
+        [membership] = manifest_group["memberships"]
+        self.assertEqual(membership["group_id"], group["group_id"])
         self.assertEqual(
-            manifest_group["memberships"],
-            [
-                {
-                    "group_id": group["group_id"],
-                    "membership_digest": group["membership_digest"],
-                    "overlap_group_id": manifest_group["overlap_group_id"],
-                    "resolution": "same-event",
-                }
-            ],
+            membership["overlap_group_id"], manifest_group["overlap_group_id"]
         )
+        self.assertEqual(membership["resolution"], "same-event")
+        self.assertRegex(membership["membership_digest"], r"^ovm_[0-9a-f]{64}$")
 
     def test_same_resolution_is_byte_idempotent_and_conflict_fails(self) -> None:
         occurrences = [
@@ -406,6 +404,51 @@ class CanonicalOverlapTest(unittest.TestCase):
             )
         self.assertEqual(unknown.exception.code, "duplicate_group_unknown")
 
+    def test_returning_to_an_unresolved_membership_warns_after_a_resolution(
+        self,
+    ) -> None:
+        original_occurrences = [
+            *[_occurrence(str(index), "a") for index in range(1, 4)],
+            *[_occurrence(str(index), "b") for index in range(4, 6)],
+            _occurrence("6", "c"),
+        ]
+        original = canonicalize_overlaps(
+            original_occurrences, [], empty_overlap_manifest(_NAMESPACE_KEY)
+        )
+        [original_group] = list_duplicate_groups(original, original_occurrences)
+        changed_occurrences = original_occurrences[:-1]
+        changed = canonicalize_overlaps(
+            changed_occurrences, original.rows, original.manifest
+        )
+        [changed_group] = list_duplicate_groups(changed, changed_occurrences)
+        resolved = resolve_duplicate_group(
+            changed_occurrences,
+            changed.rows,
+            changed.manifest,
+            changed_group["group_id"],
+            "same-event",
+            {},
+        )
+
+        returned = canonicalize_overlaps(
+            original_occurrences,
+            resolved.result.rows,
+            resolved.result.manifest,
+        )
+        [returned_group] = list_duplicate_groups(returned, original_occurrences)
+
+        self.assertEqual(returned_group["group_id"], original_group["group_id"])
+        self.assertEqual(
+            returned.diagnostic["warnings"],
+            [
+                {
+                    "code": "duplicate_membership_changed",
+                    "group_id": original_group["group_id"],
+                }
+            ],
+        )
+        self.assertTrue(all(row["needs_review"] == "true" for row in returned.rows))
+
     def test_membership_binds_source_records_counts_slots_and_tail(self) -> None:
         occurrences = [
             *[_occurrence(str(index), "a") for index in range(1, 4)],
@@ -415,19 +458,25 @@ class CanonicalOverlapTest(unittest.TestCase):
             occurrences, [], empty_overlap_manifest(_NAMESPACE_KEY)
         )
         [first_group] = list_duplicate_groups(first, occurrences)
+        [first_membership] = first.manifest["groups"][0]["memberships"]
         reallocated = copy.deepcopy(occurrences)
         reallocated[0]["source_record_id"] = "rec_" + "f" * 64
 
         changed = canonicalize_overlaps(reallocated, first.rows, first.manifest)
         [changed_group] = list_duplicate_groups(changed, reallocated)
+        changed_membership = next(
+            membership
+            for membership in changed.manifest["groups"][0]["memberships"]
+            if membership["group_id"] == changed_group["group_id"]
+        )
 
         self.assertNotEqual(
-            changed_group["membership_digest"],
-            first_group["membership_digest"],
+            changed_membership["membership_digest"],
+            first_membership["membership_digest"],
         )
         self.assertNotEqual(changed_group["group_id"], first_group["group_id"])
         self.assertEqual(
-            first_group["membership_digest"],
+            first_membership["membership_digest"],
             "ovm_714ca8c7e9462c590f454d32ccd434805c82f84f66e5caab900325dd3c3822a9",
         )
         self.assertEqual(
@@ -527,6 +576,43 @@ class CanonicalOverlapTest(unittest.TestCase):
         self.assertEqual(resolved.removed_correction_ids, (tail_id,))
         self.assertEqual(resolved.correction_updates, {first_id: patch})
         self.assertEqual(len(resolved.result.rows), 1)
+
+    def test_same_event_rejects_category_tail_correction_with_flow_conflict(
+        self,
+    ) -> None:
+        occurrences = [
+            _occurrence("1", "a"),
+            _occurrence("2", "a"),
+            _occurrence("3", "b"),
+        ]
+        unresolved = canonicalize_overlaps(
+            occurrences, [], empty_overlap_manifest(_NAMESPACE_KEY)
+        )
+        [group] = list_duplicate_groups(unresolved, occurrences)
+        retained, tail = unresolved.rows
+        retained.update({"flow_type": "expense", "flow_source": "correction"})
+        tail.update({"flow_type": "income", "flow_source": "rule"})
+        patch = {"category": "Dining", "needs_review": "false"}
+        rows_before = copy.deepcopy(unresolved.rows)
+        manifest_before = copy.deepcopy(unresolved.manifest)
+
+        with self.assertRaises(DuplicateResolutionError) as conflict:
+            resolve_duplicate_group(
+                occurrences,
+                unresolved.rows,
+                unresolved.manifest,
+                group["group_id"],
+                "same-event",
+                {tail["transaction_id"]: patch},
+            )
+
+        self.assertEqual(conflict.exception.code, "duplicate_history_conflict")
+        self.assertEqual(
+            unresolved.manifest["groups"][0]["memberships"][0]["resolution"],
+            "unresolved",
+        )
+        self.assertEqual(unresolved.rows, rows_before)
+        self.assertEqual(unresolved.manifest, manifest_before)
 
     def test_same_event_rejects_multiple_tail_corrections_at_floor_one(self) -> None:
         occurrences = [
