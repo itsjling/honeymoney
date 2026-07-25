@@ -616,7 +616,13 @@ def canonicalize_overlaps(
             if (
                 matching_membership is None
                 or matching_membership["resolution"] == "unresolved"
-            ) and _prior_group_has_resolved_review(prior_slots, prior_by_id):
+            ) and (
+                _prior_group_has_resolved_review(prior_slots, prior_by_id)
+                or (
+                    matching_membership is None
+                    and _prior_group_has_resolved_membership(prior_group)
+                )
+            ):
                 changed_review_group_ids.add(review_group_id)
             if matching_membership is None:
                 matching_membership = {
@@ -790,6 +796,15 @@ def _prior_group_has_resolved_review(
         if OVERLAP_AMBIGUITY_FLAG not in flags:
             return True
     return False
+
+
+def _prior_group_has_resolved_membership(
+    prior_group: Mapping[str, Any] | None,
+) -> bool:
+    return any(
+        membership.get("resolution") in {"same-event", "keep-all"}
+        for membership in (prior_group or {}).get("memberships", [])
+    )
 
 
 def _provenance_status(source_counts: list[int]) -> str:

@@ -1571,6 +1571,86 @@ def open(source_path):
             )
             self.assertEqual(self._reset_state_bytes(root), before)
 
+    def test_strict_import_warns_for_mismatch_after_equal_count_transition(
+        self,
+    ) -> None:
+        repeated_row = "2026-05-04,SYNTHETIC EQUAL BRIDGE,-12.00,HKD"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._setup_workspace(tmp)
+            statements = root / "statements"
+            statements.mkdir()
+            first_source = statements / "a.csv"
+            second_source = statements / "b.csv"
+            third_source = statements / "c.csv"
+            self._write_statement(first_source, [repeated_row] * 3)
+            self._write_statement(second_source, [repeated_row] * 2)
+            self._write_statement(third_source, [repeated_row] * 2)
+            imported = self._run_cli(
+                ["import", str(statements), "--no-interactive"], cwd=root
+            )
+            self.assertEqual(imported.returncode, 0, imported.stderr)
+            [group] = json.loads(
+                self._run_cli(["duplicates", "--json"], cwd=root).stdout
+            )["data"]["groups"]
+            resolved = self._run_cli(
+                [
+                    "duplicates",
+                    "resolve",
+                    group["group_id"],
+                    "--as",
+                    "same-event",
+                    "--json",
+                ],
+                cwd=root,
+            )
+            self.assertEqual(resolved.returncode, 0, resolved.stderr)
+
+            self._write_statement(first_source, [])
+            equalized = self._run_cli(
+                [
+                    "import",
+                    str(first_source),
+                    "--reset",
+                    "--no-interactive",
+                    "--json",
+                ],
+                cwd=root,
+            )
+            self.assertEqual(
+                equalized.returncode, 0, equalized.stderr or equalized.stdout
+            )
+            self.assertEqual(json.loads(equalized.stdout)["warnings"], [])
+            self.assertEqual(
+                {row["provenance_status"] for row in self._ledger_rows(root)},
+                {"pooled_equal_count"},
+            )
+
+            new_source = statements / "d.csv"
+            self._write_statement(new_source, [repeated_row])
+            drifted = self._run_cli(
+                [
+                    "import",
+                    str(new_source),
+                    "--no-interactive",
+                    "--strict",
+                    "--json",
+                ],
+                cwd=root,
+            )
+
+            self.assertEqual(drifted.returncode, 1, drifted.stderr)
+            document = json.loads(drifted.stdout)
+            self.assertEqual(document["status"], "partial_success")
+            [warning] = document["data"]["overlap"]["warnings"]
+            self.assertEqual(warning["code"], "duplicate_membership_changed")
+            self.assertEqual(
+                document["warnings"],
+                [
+                    "duplicate_membership_changed: duplicate group membership "
+                    f"changed; review {warning['group_id']}"
+                ],
+            )
+
     def test_keep_all_preserves_corrections_and_resolution_fault_rolls_back(
         self,
     ) -> None:

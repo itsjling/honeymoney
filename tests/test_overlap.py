@@ -405,6 +405,57 @@ class CanonicalOverlapTest(unittest.TestCase):
             )
         self.assertEqual(unknown.exception.code, "duplicate_group_unknown")
 
+    def test_resolved_membership_history_warns_after_equal_count_transition(
+        self,
+    ) -> None:
+        original_occurrences = [
+            *[_occurrence(str(index), "a") for index in range(1, 4)],
+            *[_occurrence(str(index), "b") for index in range(4, 6)],
+        ]
+        original = canonicalize_overlaps(
+            original_occurrences, [], empty_overlap_manifest(_NAMESPACE_KEY)
+        )
+        [original_group] = list_duplicate_groups(original, original_occurrences)
+        resolved = resolve_duplicate_group(
+            original_occurrences,
+            original.rows,
+            original.manifest,
+            original_group["group_id"],
+            "same-event",
+            {},
+        )
+        equal_occurrences = original_occurrences[1:]
+        equal = canonicalize_overlaps(
+            equal_occurrences,
+            resolved.result.rows,
+            resolved.result.manifest,
+        )
+        changed_occurrences = equal_occurrences[:-1]
+
+        changed = canonicalize_overlaps(
+            changed_occurrences,
+            equal.rows,
+            equal.manifest,
+        )
+        [changed_group] = list_duplicate_groups(changed, changed_occurrences)
+        stable = canonicalize_overlaps(
+            changed_occurrences,
+            changed.rows,
+            changed.manifest,
+        )
+
+        self.assertEqual(equal.diagnostic["warnings"], [])
+        self.assertEqual(
+            changed.diagnostic["warnings"],
+            [
+                {
+                    "code": "duplicate_membership_changed",
+                    "group_id": changed_group["group_id"],
+                }
+            ],
+        )
+        self.assertEqual(stable.diagnostic["warnings"], [])
+
     def test_returning_to_an_unresolved_membership_warns_after_a_resolution(
         self,
     ) -> None:
