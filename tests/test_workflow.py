@@ -18,6 +18,7 @@ from honeymoney.cli import (
     _starter_csv_profile,
     _StatusLine,
 )
+from honeymoney.corrections import ledger_output_documents
 from honeymoney.duplicates import DUPLICATE_MATCH_TYPE
 from honeymoney.identity_state import load_identity_state
 from honeymoney.ollama import OllamaHttpRequest, apply_ollama_fallback
@@ -982,6 +983,87 @@ def open(source_path):
                     transaction_diagnostic["needs_review"],
                     expected_review_states[transaction_id] == "true",
                 )
+
+    def test_failed_import_reports_retained_duplicates_without_rewriting_state(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root, fake_modules, malformed_source, _ = (
+                self._seed_pdf_replacement_workspace(tmp)
+            )
+            for filename in ("duplicate-a.csv", "duplicate-b.csv"):
+                statement = root / filename
+                self._write_statement(
+                    statement,
+                    ["2026-05-04,SYNTHETIC PARENT DUPLICATE,-12.00,HKD"],
+                )
+                imported = self._run_cli(
+                    ["import", str(statement), "--no-interactive"], cwd=root
+                )
+                self.assertEqual(imported.returncode, 0, imported.stderr)
+
+            categorized_path = root / "output" / "categorized.csv"
+            rows = self._ledger_rows(root)
+            duplicate_rows = [
+                row for row in rows if row["merchant"] == "SYNTHETIC PARENT DUPLICATE"
+            ]
+            self.assertEqual(len(duplicate_rows), 2)
+            duplicate_rows.sort(key=lambda row: row["source_file"])
+            for row in duplicate_rows:
+                row["flags"] = "uncategorized"
+                row["reason"] = "No matching category rule"
+            duplicate_rows[1]["flags"] += ";duplicate_suspected"
+            duplicate_rows[1]["reason"] += "; Possible duplicate transaction"
+            for path, content in ledger_output_documents(
+                categorized_path, rows
+            ).items():
+                path.write_text(content, encoding="utf-8")
+
+            protected_before = self._artifact_bytes(
+                root,
+                [
+                    "output/categorized.csv",
+                    "output/review_needed.csv",
+                    "output/.honeymoney-identity-manifest.json",
+                ],
+            )
+            (fake_modules / "pdfplumber.py").write_text(
+                "def open(path):\n"
+                "    raise RuntimeError('synthetic malformed statement')\n",
+                encoding="utf-8",
+            )
+
+            failed = self._run_cli(
+                [
+                    "import",
+                    str(malformed_source),
+                    "--replace",
+                    "--no-interactive",
+                    "--json",
+                ],
+                cwd=root,
+                extra_pythonpath=fake_modules,
+            )
+
+            self.assertEqual(failed.returncode, 0, failed.stderr)
+            self.assertEqual(
+                self._artifact_bytes(root, list(protected_before)),
+                protected_before,
+            )
+            report = json.loads(failed.stdout)["data"]
+            persisted_report = json.loads(
+                (root / "output" / "import_report.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(persisted_report, report)
+            self.assertEqual(report["status"], "partial_success")
+            self.assertEqual(report["files"][0]["status"], "failed")
+            self.assertEqual(report["files"][0]["ledger_action"], "preserved")
+            self.assertEqual(report["duplicate_count"], 2)
+            self.assertEqual(report["duplicate_group_count"], 1)
+            self.assertEqual(
+                report["duplicate_candidates"]["occurrence_count"],
+                2,
+            )
 
     def test_interactive_review_keeps_duplicate_diagnostic_without_repromotion(
         self,

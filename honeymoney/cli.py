@@ -41,6 +41,7 @@ from honeymoney.corrections import (
 )
 from honeymoney.duplicates import (
     DuplicateEvaluation,
+    apply_duplicate_candidates,
     evaluate_duplicate_candidates,
     refresh_duplicate_candidates,
     release_duplicate_review_ownership,
@@ -270,6 +271,9 @@ def _run_pipeline(
             file_report["ledger_action"] = "replaced"
         else:
             file_report["ledger_action"] = "added"
+    has_processed_source = any(
+        file_report.get("status") == "processed" for file_report in file_reports
+    )
     resolution = resolve_batch(
         ledger_rows=identity_state.rows,
         manifest=identity_state.manifest,
@@ -308,7 +312,9 @@ def _run_pipeline(
     _status.update("Checking for duplicates...")
     retained_ledger_rows = [dict(row) for row in resolution.retained_ledger_rows]
     ledger_rows = [*retained_ledger_rows, *transactions]
-    duplicate_evaluation = refresh_duplicate_candidates(ledger_rows)
+    duplicate_evaluation = evaluate_duplicate_candidates(ledger_rows)
+    if has_processed_source:
+        apply_duplicate_candidates(ledger_rows, duplicate_evaluation)
     _status.update("Applying structural classifications...")
     structural_count = apply_structural_classification(transactions, config)
     ollama_report, ollama_warnings = apply_ollama_fallback(
@@ -332,9 +338,13 @@ def _run_pipeline(
     final_review_ids.update(
         transaction["transaction_id"] for transaction in categorized_interactively
     )
-    duplicate_evaluation = refresh_duplicate_candidates(
-        ledger_rows, final_review_ids=final_review_ids
-    )
+    duplicate_evaluation = evaluate_duplicate_candidates(ledger_rows)
+    if has_processed_source:
+        apply_duplicate_candidates(
+            ledger_rows,
+            duplicate_evaluation,
+            final_review_ids=final_review_ids,
+        )
     _enforce_identity_review(ledger_rows)
     review_rows = [row for row in transactions if row["needs_review"] == "true"]
     report = {
