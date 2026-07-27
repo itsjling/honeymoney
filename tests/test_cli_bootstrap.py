@@ -5457,7 +5457,7 @@ def open(path):
             self.assertEqual(manual["transaction_id"], manual_id)
             self.assertEqual(manual["category"], "Shopping")
             self.assertEqual(manual["owner"], "Justin")
-            self.assertEqual(manual["needs_review"], "false")
+            self.assertEqual(manual["needs_review"], "true")
             pdf_row = next(row for row in rows if row["source_file"] == "statement.pdf")
             self.assertEqual(pdf_row["notes"], "Imported from PDF")
 

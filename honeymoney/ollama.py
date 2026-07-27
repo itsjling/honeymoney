@@ -363,10 +363,15 @@ def apply_ollama_fallback(
     config: dict[str, Any],
     progress: Callable[[OllamaProgress], None] | None = None,
     transport: LoopbackOllamaTransport | None = None,
+    corrections: Mapping[str, Mapping[str, str]] | None = None,
 ) -> tuple[dict[str, Any], list[str]]:
     ollama_config = config.get("ollama", {})
     if not ollama_config.get("enabled", False):
-        return {"status": "disabled"}, []
+        return {
+            "status": "disabled",
+            "candidate_count": 0,
+            "skipped_exact_category_correction_count": 0,
+        }, []
 
     unresolved = [
         transaction
@@ -374,11 +379,29 @@ def apply_ollama_fallback(
         if transaction.get("category") == "Unknown"
         and transaction.get("needs_review") == "true"
     ]
+    correction_skip_ids = {
+        transaction["transaction_id"]
+        for transaction in unresolved
+        if _has_exact_category_correction(transaction, corrections, config)
+    }
+    skipped_exact_category_correction_count = len(correction_skip_ids)
+    unresolved = [
+        transaction
+        for transaction in unresolved
+        if transaction["transaction_id"] not in correction_skip_ids
+    ]
     if not unresolved:
         return {
             "status": "skipped",
-            "reason": "no unresolved transactions",
+            "reason": (
+                "no model candidates"
+                if skipped_exact_category_correction_count
+                else "no unresolved transactions"
+            ),
             "candidate_count": 0,
+            "skipped_exact_category_correction_count": (
+                skipped_exact_category_correction_count
+            ),
             "accepted_count": 0,
             "reviewable_count": 0,
             "rejected_count": 0,
@@ -449,6 +472,9 @@ def apply_ollama_fallback(
                 "status": "unavailable",
                 "error": error_text,
                 "candidate_count": len(unresolved),
+                "skipped_exact_category_correction_count": (
+                    skipped_exact_category_correction_count
+                ),
                 "accepted_count": accepted,
                 "reviewable_count": reviewable,
                 "rejected_count": rejected,
@@ -492,12 +518,27 @@ def apply_ollama_fallback(
     return {
         "status": status,
         "candidate_count": len(unresolved),
+        "skipped_exact_category_correction_count": (
+            skipped_exact_category_correction_count
+        ),
         "accepted_count": accepted,
         "reviewable_count": reviewable,
         "rejected_count": rejected,
         "applied_count": applied,
         "invalid_count": invalid,
     }, warnings
+
+
+def _has_exact_category_correction(
+    transaction: Mapping[str, str],
+    corrections: Mapping[str, Mapping[str, str]] | None,
+    config: dict[str, Any],
+) -> bool:
+    if corrections is None:
+        return False
+    correction = corrections.get(transaction.get("transaction_id", ""), {})
+    category = correction.get("category", "")
+    return category != "Unknown" and category in allowed_categories(config)
 
 
 def _batch_size(ollama_config: dict[str, Any]) -> int:
