@@ -24,10 +24,12 @@ from honeymoney.identity_state import (
     LEGACY_CATEGORIZED_COLUMNS,
     identity_manifest_path,
     load_identity_state,
+    validate_source_evidence_manifest_agreement,
 )
+from honeymoney.overlap import overlap_manifest_path, source_occurrences_path
 from honeymoney.persistence import persist_generation, recover_generation
 from honeymoney.reconciliation import reconcile_ledger
-from honeymoney.schema import CATEGORIZED_COLUMNS
+from honeymoney.schema import CATEGORIZED_COLUMNS, SOURCE_OCCURRENCE_COLUMNS
 
 
 class IdentityStateTest(unittest.TestCase):
@@ -97,7 +99,9 @@ class IdentityStateTest(unittest.TestCase):
     def _write_v2_state(self, path: Path) -> tuple[dict[str, str], str]:
         row, manifest = self._v2_state()
         document = manifest_document(manifest)
-        path.write_text(csv_document(CATEGORIZED_COLUMNS, [row]), encoding="utf-8")
+        path.write_text(
+            csv_document(SOURCE_OCCURRENCE_COLUMNS, [row]), encoding="utf-8"
+        )
         identity_manifest_path(path).write_text(document, encoding="utf-8")
         return row, document
 
@@ -154,10 +158,19 @@ class IdentityStateTest(unittest.TestCase):
 
             row, document = self._write_v2_state(path)
             row["source_revision"] = "rev_" + "0" * 64
-            path.write_text(csv_document(CATEGORIZED_COLUMNS, [row]), encoding="utf-8")
+            path.write_text(
+                csv_document(SOURCE_OCCURRENCE_COLUMNS, [row]), encoding="utf-8"
+            )
             with self.assertRaisesRegex(IdentityError, "identity_manifest_invalid"):
                 load_identity_state(path)
             self.assertTrue(document.endswith("\n"))
+
+    def test_missing_retired_source_evidence_fails_closed(self) -> None:
+        _, manifest = self._v2_state()
+        manifest["sources"][0]["records"][0]["state"] = "retired"
+
+        with self.assertRaisesRegex(IdentityError, "identity_manifest_invalid"):
+            validate_source_evidence_manifest_agreement([], manifest)
 
     def test_mutable_writes_preserve_manifest_bytes_and_publish_it(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -212,6 +225,14 @@ class IdentityStateTest(unittest.TestCase):
             self.assertEqual(
                 identity_manifest_path(path).read_text(encoding="utf-8"),
                 new_documents[identity_manifest_path(path)],
+            )
+            self.assertEqual(
+                source_occurrences_path(path).read_bytes(),
+                new_documents[source_occurrences_path(path)].encode("utf-8"),
+            )
+            self.assertEqual(
+                overlap_manifest_path(path).read_text(encoding="utf-8"),
+                new_documents[overlap_manifest_path(path)],
             )
 
     def test_ambiguous_legacy_correction_and_reconciliation_leave_rows_intact(

@@ -17,7 +17,7 @@ from datetime import date
 from decimal import Decimal
 from importlib import resources
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 from honeymoney import importers, normalization
 from honeymoney.categorization_memory import (
@@ -40,9 +40,7 @@ from honeymoney.corrections import (
     validate_correction,
 )
 from honeymoney.duplicates import (
-    DuplicateEvaluation,
-    apply_duplicate_candidates,
-    evaluate_duplicate_candidates,
+    DUPLICATE_MATCH_TYPE,
     refresh_duplicate_candidates,
     release_duplicate_review_ownership,
 )
@@ -57,6 +55,12 @@ from honeymoney.ollama import (
     apply_ollama_fallback,
     list_ollama_models,
     validate_ollama_endpoint,
+)
+from honeymoney.overlap import (
+    apply_history_ambiguity,
+    canonicalize_overlaps,
+    enforce_overlap_review,
+    project_corrections,
 )
 from honeymoney.persistence import persist_generation, recover_generation
 from honeymoney.reconciliation import (
@@ -275,12 +279,12 @@ def _run_pipeline(
         file_report.get("status") == "processed" for file_report in file_reports
     )
     resolution = resolve_batch(
-        ledger_rows=identity_state.rows,
+        ledger_rows=identity_state.source_rows,
         manifest=identity_state.manifest,
         sources=identity_sources,
         intent=requested_action,
     )
-    transactions = [dict(row) for row in resolution.resolved_rows]
+    source_transactions = [dict(row) for row in resolution.resolved_rows]
     resolved_source_ids = {
         str(source["source_namespace_id"]): str(source["source_id"])
         for source in resolution.next_manifest["sources"]
@@ -294,38 +298,116 @@ def _run_pipeline(
         _identity_diagnostic_warning(item) for item in resolution.diagnostics
     )
     reset_ids = set(resolution.reset_transaction_ids)
+    removed_correction_ids = set(reset_ids)
     corrections = load_corrections(config)
     correction_documents: dict[Path, str] = {}
+    retained_source_rows = [dict(row) for row in resolution.retained_ledger_rows]
+    source_rows = [*retained_source_rows, *source_transactions]
+    overlap_result = canonicalize_overlaps(
+        source_rows,
+        identity_state.rows,
+        identity_state.overlap_manifest,
+    )
+    ledger_rows = overlap_result.rows
     if args.reset and config.get("corrections"):
+        prior_overlap = canonicalize_overlaps(
+            identity_state.source_rows,
+            identity_state.rows,
+            identity_state.overlap_manifest,
+        )
+        prior_source_by_transaction = {
+            row["transaction_id"]: row["source_id"]
+            for row in identity_state.source_rows
+            if row.get("transaction_id") and row.get("source_id")
+        }
+        reset_source_ids = set(resolution.replaced_source_ids)
+        for group in prior_overlap.diagnostic["groups"]:
+            occurrence_ids = {
+                occurrence_id
+                for pool in group["source_occurrence_pools"]
+                for occurrence_id in pool
+            }
+            supporting_source_ids = {
+                prior_source_by_transaction[occurrence_id]
+                for occurrence_id in occurrence_ids
+                if occurrence_id in prior_source_by_transaction
+            }
+            if supporting_source_ids and supporting_source_ids <= reset_source_ids:
+                removed_correction_ids.update(group["canonical_transaction_ids"])
+        fingerprint_sources = _active_source_ids_by_fingerprint(identity_state.manifest)
+        historical_fingerprint_sources = _source_ids_by_fingerprint(
+            identity_state.manifest
+        )
+        for group in identity_state.overlap_manifest["groups"]:
+            fingerprint = group["record_fingerprint"]
+            supporting_source_ids = fingerprint_sources.get(
+                fingerprint
+            ) or historical_fingerprint_sources.get(fingerprint, set())
+            if supporting_source_ids and supporting_source_ids <= reset_source_ids:
+                removed_correction_ids.update(
+                    slot["transaction_id"] for slot in group["slots"]
+                )
         corrections_path, corrections_content, corrections = (
-            prepare_corrections_document(config, removed_transaction_ids=reset_ids)
+            prepare_corrections_document(
+                config, removed_transaction_ids=removed_correction_ids
+            )
         )
         correction_documents[corrections_path] = corrections_content
+        overlap_result = canonicalize_overlaps(
+            source_rows,
+            [
+                row
+                for row in identity_state.rows
+                if row.get("transaction_id") not in removed_correction_ids
+            ],
+            identity_state.overlap_manifest,
+        )
+        ledger_rows = overlap_result.rows
+    if not has_processed_source:
+        ledger_rows = [dict(row) for row in identity_state.rows]
+    incoming_occurrence_ids = {row["transaction_id"] for row in source_transactions}
+    affected_group_ids = {
+        group["group_id"]
+        for group in overlap_result.diagnostic["groups"]
+        if any(
+            occurrence_id in incoming_occurrence_ids
+            for pool in group["source_occurrence_pools"]
+            for occurrence_id in pool
+        )
+    }
+    transactions = [
+        row
+        for row in ledger_rows
+        if row.get("canonical_group_id") in affected_group_ids
+    ]
+    correction_projection = project_corrections(overlap_result, corrections)
+    canonical_corrections = correction_projection.corrections
     local_memory = build_local_categorization_memory(
-        identity_state.rows, corrections, config
+        ledger_rows, canonical_corrections, config
     )
     _status.update("Applying categorization rules...")
     rules = load_rules(config)
     apply_rules(transactions, rules, config)
     _status.update("Applying local categorization memory...")
     apply_local_categorization_memory(transactions, local_memory, config)
-    _status.update("Checking for duplicates...")
-    retained_ledger_rows = [dict(row) for row in resolution.retained_ledger_rows]
-    ledger_rows = [*retained_ledger_rows, *transactions]
-    duplicate_evaluation = evaluate_duplicate_candidates(ledger_rows)
-    if has_processed_source:
-        apply_duplicate_candidates(ledger_rows, duplicate_evaluation)
     _status.update("Applying structural classifications...")
     structural_count = apply_structural_classification(transactions, config)
     ollama_report, ollama_warnings = apply_ollama_fallback(
-        transactions, config, progress=_ollama_progress, corrections=corrections
+        transactions,
+        config,
+        progress=_ollama_progress,
+        corrections=canonical_corrections,
     )
     if ollama_warnings:
         _status.clear()
         for warning in ollama_warnings:
             print(f"Warning: {warning}", file=sys.stderr)
     _status.update("Applying corrections...")
-    apply_corrections(transactions, corrections)
+    apply_corrections(transactions, canonical_corrections)
+    apply_history_ambiguity(
+        ledger_rows, correction_projection.ambiguous_transaction_ids
+    )
+    enforce_overlap_review(ledger_rows)
     _enforce_identity_review(transactions)
     _status.clear()
     if interactive:
@@ -333,31 +415,33 @@ def _run_pipeline(
     else:
         categorized_interactively = []
     _status.update("Writing output files...")
-    reconciliation = reconcile_ledger(ledger_rows, config)
+    reconciliation = reconcile_ledger(ledger_rows, config, statement_rows=source_rows)
     final_review_ids = _final_review_ids(corrections)
     final_review_ids.update(
         transaction["transaction_id"] for transaction in categorized_interactively
     )
-    duplicate_evaluation = evaluate_duplicate_candidates(ledger_rows)
     if has_processed_source:
-        apply_duplicate_candidates(
-            ledger_rows,
-            duplicate_evaluation,
-            final_review_ids=final_review_ids,
-        )
+        refresh_duplicate_candidates(ledger_rows, final_review_ids=final_review_ids)
+    enforce_overlap_review(ledger_rows)
     _enforce_identity_review(ledger_rows)
     review_rows = [row for row in transactions if row["needs_review"] == "true"]
+    duplicate_count, duplicate_group_count, duplicate_candidates = (
+        _duplicate_compatibility(overlap_result.diagnostic)
+    )
     report = {
         "status": "partial_success" if import_warnings else "success",
         "input_count": len(input_files),
         "transaction_count": len(transactions),
-        "successful_record_count": len(transactions),
+        "successful_record_count": len(source_transactions),
+        "source_occurrence_count": len(source_transactions),
+        "canonical_occurrence_count": len(transactions),
         "unsuccessful_record_count": _unsuccessful_record_count(file_reports),
         "review_count": len(review_rows),
         "uncategorized_count": _uncategorized_count(transactions),
-        "duplicate_count": duplicate_evaluation.occurrence_count,
-        "duplicate_group_count": len(duplicate_evaluation.groups),
-        "duplicate_candidates": duplicate_evaluation.as_diagnostic(),
+        "overlap": overlap_result.diagnostic,
+        "duplicate_count": duplicate_count,
+        "duplicate_group_count": duplicate_group_count,
+        "duplicate_candidates": duplicate_candidates,
         "categorization": {"structural_count": structural_count},
         "strict": args.strict,
         "interactive": interactive,
@@ -370,6 +454,8 @@ def _run_pipeline(
         },
         "ledger": {
             "transaction_count": len(ledger_rows),
+            "source_occurrence_count": len(source_rows),
+            "canonical_occurrence_count": len(ledger_rows),
             "review_count": sum(
                 1 for row in ledger_rows if row.get("needs_review") == "true"
             ),
@@ -377,16 +463,19 @@ def _run_pipeline(
         },
         "files": file_reports,
         "transaction_flags": _transaction_flags(ledger_rows),
-        "transaction_diagnostics": _transaction_diagnostics(
-            ledger_rows, duplicate_evaluation
-        ),
+        "transaction_diagnostics": _transaction_diagnostics(ledger_rows),
         "warnings": import_warnings + ollama_warnings,
         "errors": [],
         "ollama": ollama_report,
         "reconciliation": reconciliation,
     }
     files = ledger_output_documents(
-        categorized_path, ledger_rows, identity_manifest=resolution.next_manifest
+        categorized_path,
+        ledger_rows,
+        identity_manifest=resolution.next_manifest,
+        source_occurrences=source_rows,
+        source_evidence=identity_state.source_evidence_rows,
+        overlap_manifest=overlap_result.manifest,
     )
     files[import_report_path] = json.dumps(report, indent=2, sort_keys=True) + "\n"
     files.update(correction_documents)
@@ -394,7 +483,7 @@ def _run_pipeline(
         _interactive_correction_documents(
             categorized_interactively,
             config,
-            removed_transaction_ids=reset_ids,
+            removed_transaction_ids=removed_correction_ids,
         )
     )
     persist_generation(categorized_path, files)
@@ -1030,18 +1119,34 @@ def _print_import_summary(report: dict[str, Any]) -> None:
             f"{uncategorized} records are still uncategorized; "
             "run `honeymoney status` to see totals or `honeymoney review` to categorize"
         )
-    duplicate_count = report.get("duplicate_count", 0)
-    if duplicate_count:
+    overlap = report.get("overlap", {})
+    consolidated = overlap.get("consolidated_occurrence_count", 0)
+    if consolidated:
         print(
-            "Duplicate candidates: "
-            + _duplicate_summary_text(
-                duplicate_count, report.get("duplicate_group_count", 0)
-            )
+            "Canonical overlap: "
+            f"{consolidated} source occurrence"
+            f"{'' if consolidated == 1 else 's'} consolidated across "
+            f"{overlap.get('group_count', 0)} group"
+            f"{'' if overlap.get('group_count', 0) == 1 else 's'}"
+        )
+    ambiguous = overlap.get("ambiguous_group_count", 0)
+    if ambiguous:
+        print(
+            f"Overlap review: {ambiguous} ambiguous group"
+            f"{'' if ambiguous == 1 else 's'}"
+        )
+    if report.get("source_occurrence_count") is not None:
+        print(
+            "This import parsed "
+            f"{report['source_occurrence_count']} source occurrence"
+            f"{'' if report['source_occurrence_count'] == 1 else 's'} and "
+            f"affected {report['canonical_occurrence_count']} canonical transaction"
+            f"{'' if report['canonical_occurrence_count'] == 1 else 's'}"
         )
     ledger = report.get("ledger", {})
     if ledger:
         print(
-            f"Ledger now has {ledger['transaction_count']} records "
+            f"Ledger now has {ledger['transaction_count']} canonical records "
             f"({ledger['uncategorized_count']} uncategorized)"
         )
 
@@ -1548,6 +1653,103 @@ def _unsuccessful_record_count(file_reports: list[dict[str, str]]) -> int:
     )
 
 
+def _overlap_diagnostic_for_rows(
+    overlap_result: Any,
+    rows: list[dict[str, str]],
+    source_rows: list[dict[str, str]],
+) -> dict[str, Any]:
+    canonical_ids = {row.get("transaction_id", "") for row in rows}
+    groups = [
+        group
+        for group in overlap_result.diagnostic["groups"]
+        if canonical_ids.intersection(group["canonical_transaction_ids"])
+    ]
+    source_ids = {
+        occurrence_id
+        for group in groups
+        for pool in group["source_occurrence_pools"]
+        for occurrence_id in pool
+    }
+    legacy_source_count = sum(
+        1
+        for row in source_rows
+        if not row.get("canonical_group_id")
+        and row.get("transaction_id", "") in canonical_ids
+    )
+    source_count = len(source_ids) + legacy_source_count
+    canonical_count = len(rows)
+    return {
+        "group_count": len(groups),
+        "ambiguous_group_count": sum(
+            group["provenance_status"] == "ambiguous_count_mismatch" for group in groups
+        ),
+        "source_occurrence_count": source_count,
+        "canonical_occurrence_count": canonical_count,
+        "consolidated_occurrence_count": source_count - canonical_count,
+        "provenance_counts": {
+            status: sum(int(row.get("provenance_status") == status) for row in rows)
+            for status in (
+                "single_source",
+                "exact_one_to_one",
+                "pooled_equal_count",
+                "ambiguous_count_mismatch",
+            )
+        },
+        "groups": groups,
+    }
+
+
+def _normalize_loaded_rows(rows: list[dict[str, str]]) -> list[dict[str, str]]:
+    normalized = [dict(row) for row in rows]
+    for row in normalized:
+        if not row.get("account_type") and not row.get("canonical_group_id"):
+            row["account_type"] = {
+                "Bank Account": "bank",
+                "Credit Card": "credit_card",
+                "Brokerage": "investment",
+            }.get(row.get("payment_method", ""), "unknown")
+    return normalized
+
+
+def _unmigrated_overlap(rows: list[dict[str, str]]) -> dict[str, Any]:
+    return {
+        "group_count": 0,
+        "ambiguous_group_count": 0,
+        "source_occurrence_count": len(rows),
+        "canonical_occurrence_count": len(rows),
+        "consolidated_occurrence_count": 0,
+        "provenance_counts": {},
+        "groups": [],
+    }
+
+
+def _duplicate_compatibility(
+    overlap: dict[str, Any],
+) -> tuple[int, int, dict[str, Any]]:
+    groups = []
+    for group in overlap["groups"]:
+        occurrence_ids = sorted(
+            occurrence_id
+            for pool in group["source_occurrence_pools"]
+            for occurrence_id in pool
+        )
+        if len(occurrence_ids) <= len(group["canonical_transaction_ids"]):
+            continue
+        groups.append(
+            {
+                "match_type": DUPLICATE_MATCH_TYPE,
+                "occurrence_ids": occurrence_ids,
+            }
+        )
+    occurrence_count = sum(len(group["occurrence_ids"]) for group in groups)
+    diagnostic = {
+        "group_count": len(groups),
+        "occurrence_count": occurrence_count,
+        "groups": groups,
+    }
+    return occurrence_count, len(groups), diagnostic
+
+
 def _clean_pasted_path(value: str) -> str:
     cleaned = value.strip()
     if len(cleaned) >= 2 and cleaned[0] == cleaned[-1] and cleaned[0] in {"'", '"'}:
@@ -1572,7 +1774,8 @@ def _status_command(argv: list[str]) -> int:
     start, end = _resolve_period(args.month or args.period, args.start, args.end)
     config = _load_config(args.config_path)
     categorized_path = Path(config["paths"]["output"])
-    ledger_rows = read_ledger(categorized_path)
+    state = load_identity_state(categorized_path)
+    ledger_rows = _normalize_loaded_rows(state.rows)
     if not ledger_rows:
         if args.json:
             _emit_json(
@@ -1585,9 +1788,25 @@ def _status_command(argv: list[str]) -> int:
                     "categorized": 0,
                     "uncategorized": 0,
                     "needs_review": 0,
+                    "source_occurrence_count": 0,
+                    "canonical_occurrence_count": 0,
+                    "consolidated_occurrence_count": 0,
                     "duplicate_count": 0,
                     "duplicate_group_count": 0,
-                    "duplicate_candidates": DuplicateEvaluation(()).as_diagnostic(),
+                    "duplicate_candidates": {
+                        "group_count": 0,
+                        "occurrence_count": 0,
+                        "groups": [],
+                    },
+                    "overlap": {
+                        "group_count": 0,
+                        "ambiguous_group_count": 0,
+                        "source_occurrence_count": 0,
+                        "canonical_occurrence_count": 0,
+                        "consolidated_occurrence_count": 0,
+                        "provenance_counts": {},
+                        "groups": [],
+                    },
                     "unresolved_inflows": 0,
                     "unresolved_outflows": 0,
                     "ledger": {
@@ -1604,12 +1823,22 @@ def _status_command(argv: list[str]) -> int:
         return 0
 
     rows = _rows_in_period(ledger_rows, start, end)
+    source_rows = _rows_in_period(state.source_rows, start, end)
     categorized = [row for row in rows if _is_categorized(row)]
-    statements = {row.get("source_file", "") for row in rows if row.get("source_file")}
+    statements = {
+        row.get("source_file", "") for row in source_rows if row.get("source_file")
+    }
     review = [row for row in rows if row.get("needs_review") == "true"]
-    duplicate_evaluation = evaluate_duplicate_candidates(ledger_rows)
-    period_ids = {row.get("transaction_id", "") for row in rows}
-    period_duplicates = duplicate_evaluation.restricted_to(period_ids)
+    if state.canonical_migration_required:
+        overlap = _unmigrated_overlap(rows)
+    else:
+        overlap_result = canonicalize_overlaps(
+            state.source_rows, state.rows, state.overlap_manifest
+        )
+        overlap = _overlap_diagnostic_for_rows(overlap_result, rows, source_rows)
+    duplicate_count, duplicate_group_count, duplicate_candidates = (
+        _duplicate_compatibility(overlap)
+    )
     unresolved_inflows = sum(
         1
         for row in rows
@@ -1635,12 +1864,16 @@ def _status_command(argv: list[str]) -> int:
                 "period": {"start": start.isoformat(), "end": end.isoformat()},
                 "statements_processed": len(statements),
                 "records_processed": len(rows),
+                "source_occurrence_count": len(source_rows),
+                "canonical_occurrence_count": len(rows),
+                "consolidated_occurrence_count": len(source_rows) - len(rows),
                 "categorized": len(categorized),
                 "uncategorized": len(rows) - len(categorized),
                 "needs_review": len(review),
-                "duplicate_count": period_duplicates.occurrence_count,
-                "duplicate_group_count": len(period_duplicates.groups),
-                "duplicate_candidates": period_duplicates.as_diagnostic(),
+                "overlap": overlap,
+                "duplicate_count": duplicate_count,
+                "duplicate_group_count": duplicate_group_count,
+                "duplicate_candidates": duplicate_candidates,
                 "unresolved_inflows": unresolved_inflows,
                 "unresolved_outflows": unresolved_outflows,
                 "ledger": {
@@ -1655,16 +1888,13 @@ def _status_command(argv: list[str]) -> int:
 
     print(f"Status for {start.isoformat()} to {end.isoformat()}")
     print(f"  Statements processed: {len(statements)}")
-    print(f"  Records processed:    {len(rows)}")
+    print(f"  Source occurrences:   {len(source_rows)}")
+    print(f"  Canonical records:    {len(rows)}")
     print(f"  Categorized:          {len(categorized)}")
     print(f"  Uncategorized:        {len(rows) - len(categorized)}")
     print(f"  Needs review:         {len(review)}")
-    print(
-        "  Duplicate candidates: "
-        + _duplicate_summary_text(
-            period_duplicates.occurrence_count, len(period_duplicates.groups)
-        )
-    )
+    print(f"  Consolidated overlap: {len(source_rows) - len(rows)}")
+    print(f"  Ambiguous groups:     {overlap['ambiguous_group_count']}")
     print(f"  Unresolved inflows:   {unresolved_inflows}")
     print(f"  Unresolved outflows:  {unresolved_outflows}")
     print(
@@ -1695,19 +1925,35 @@ def _report_command(argv: list[str]) -> int:
 
     config = _load_config(args.config_path)
     categorized_path = Path(config["paths"]["output"])
-    ledger_rows = read_ledger(categorized_path)
-    reconcile_ledger(ledger_rows, config)
-    duplicate_evaluation = evaluate_duplicate_candidates(ledger_rows)
+    state = load_identity_state(categorized_path)
+    ledger_rows = _normalize_loaded_rows(state.rows)
+    reconcile_ledger(ledger_rows, config, statement_rows=state.source_rows)
+    enforce_overlap_review(ledger_rows)
 
     start, end = _resolve_period(args.month or args.period, args.start, args.end)
     rows = _rows_in_period(ledger_rows, start, end)
+    period_source_rows = _rows_in_period(state.source_rows, start, end)
+    if state.canonical_migration_required:
+        period_overlap = _unmigrated_overlap(rows)
+    else:
+        overlap_result = canonicalize_overlaps(
+            state.source_rows, ledger_rows, state.overlap_manifest
+        )
+        period_overlap = _overlap_diagnostic_for_rows(
+            overlap_result, rows, period_source_rows
+        )
+    duplicate_count, duplicate_group_count, duplicate_candidates = (
+        _duplicate_compatibility(period_overlap)
+    )
     period_label = f"{start.isoformat()} to {end.isoformat()}"
 
     report_path = Path(args.output_path or categorized_path.parent / "report.html")
     report_path.parent.mkdir(parents=True, exist_ok=True)
     report_path.write_text(
         build_report_html(
-            rows, period_label, duplicate_evaluation=duplicate_evaluation
+            rows,
+            period_label,
+            source_occurrence_count=len(period_source_rows),
         ),
         encoding="utf-8",
     )
@@ -1718,9 +1964,10 @@ def _report_command(argv: list[str]) -> int:
             data={
                 "period": {"start": start.isoformat(), "end": end.isoformat()},
                 "transaction_count": len(rows),
-                "duplicate_candidates": duplicate_evaluation.restricted_to(
-                    {row.get("transaction_id", "") for row in rows}
-                ).as_diagnostic(),
+                "overlap": period_overlap,
+                "duplicate_count": duplicate_count,
+                "duplicate_group_count": duplicate_group_count,
+                "duplicate_candidates": duplicate_candidates,
             },
             artifacts={"report_html": str(report_path.resolve())},
         )
@@ -1745,25 +1992,74 @@ def _reconcile_command(argv: list[str]) -> int:
 
     config = _load_config(args.config_path)
     categorized_path = Path(args.output_path or config["paths"]["output"])
-    rows = read_ledger(categorized_path)
     corrections = load_corrections(config)
     final_review_ids = _final_review_ids(corrections)
-    duplicate_evaluation = refresh_duplicate_candidates(
-        rows, final_review_ids=final_review_ids
+    state = load_identity_state(categorized_path)
+    if (
+        state.canonical_migration_required
+        and not state.bootstrap_required
+        and not args.dry_run
+    ):
+        overlap_result = canonicalize_overlaps(
+            state.source_rows, [], state.overlap_manifest
+        )
+        rows = _normalize_loaded_rows(overlap_result.rows)
+        correction_projection = project_corrections(
+            overlap_result, load_corrections(config)
+        )
+        apply_corrections(rows, correction_projection.corrections)
+        apply_history_ambiguity(rows, correction_projection.ambiguous_transaction_ids)
+    else:
+        rows = _normalize_loaded_rows(state.rows)
+        overlap_result = (
+            None
+            if state.canonical_migration_required
+            or not any(row.get("canonical_group_id") for row in rows)
+            else canonicalize_overlaps(state.source_rows, rows, state.overlap_manifest)
+        )
+    refresh_duplicate_candidates(rows, final_review_ids=final_review_ids)
+    summary = reconcile_ledger(rows, config, statement_rows=state.source_rows)
+    enforce_overlap_review(rows)
+    if overlap_result is not None and not state.bootstrap_required:
+        overlap_result = canonicalize_overlaps(
+            state.source_rows, rows, overlap_result.manifest
+        )
+        rows = overlap_result.rows
+    overlap_diagnostic = (
+        _unmigrated_overlap(rows)
+        if overlap_result is None
+        else overlap_result.diagnostic
     )
-    summary = reconcile_ledger(rows, config)
     if not args.dry_run:
-        _write_ledger_outputs(categorized_path, rows, final_review_ids=final_review_ids)
+        _write_ledger_outputs(
+            categorized_path,
+            rows,
+            final_review_ids=final_review_ids,
+            source_rows=state.source_rows,
+            source_evidence=state.source_evidence_rows,
+            overlap_manifest=(
+                state.overlap_manifest
+                if overlap_result is None
+                else overlap_result.manifest
+            ),
+            identity_manifest_document=state.manifest_document,
+        )
 
     artifacts = {"categorized_csv": str(categorized_path.resolve())}
     if args.json:
+        duplicate_count, duplicate_group_count, duplicate_candidates = (
+            _duplicate_compatibility(overlap_diagnostic)
+        )
         _emit_json(
             "reconcile",
             "success",
             data={
                 **summary,
                 "dry_run": args.dry_run,
-                "duplicate_candidates": duplicate_evaluation.as_diagnostic(),
+                "overlap": overlap_diagnostic,
+                "duplicate_count": duplicate_count,
+                "duplicate_group_count": duplicate_group_count,
+                "duplicate_candidates": duplicate_candidates,
             },
             artifacts=artifacts,
         )
@@ -1776,14 +2072,11 @@ def _reconcile_command(argv: list[str]) -> int:
         f"{summary['unmatched_transactions']} unmatched, "
         f"{summary['unresolved_transactions']} unresolved"
     )
-    if duplicate_evaluation.occurrence_count:
-        print(
-            "Duplicate candidates: "
-            + _duplicate_summary_text(
-                duplicate_evaluation.occurrence_count,
-                len(duplicate_evaluation.groups),
-            )
-        )
+    print(
+        "Canonical overlap: "
+        f"{overlap_diagnostic['consolidated_occurrence_count']} consolidated, "
+        f"{overlap_diagnostic['ambiguous_group_count']} ambiguous groups"
+    )
     return 0
 
 
@@ -1804,20 +2097,37 @@ def _pending_command(argv: list[str]) -> int:
     start, end = _resolve_period(args.month or args.period, args.start, args.end)
     config = _load_config(args.config_path)
     categorized_path = Path(config["paths"]["output"])
-    ledger_rows = [dict(row) for row in read_ledger(categorized_path)]
-    duplicate_evaluation = refresh_duplicate_candidates(
+    state = load_identity_state(categorized_path)
+    ledger_rows = _normalize_loaded_rows(state.rows)
+    refresh_duplicate_candidates(
         ledger_rows,
         final_review_ids=_final_review_ids(load_corrections(config)),
+    )
+    overlap_result = (
+        None
+        if state.canonical_migration_required
+        else canonicalize_overlaps(
+            state.source_rows, state.rows, state.overlap_manifest
+        )
     )
     pending_rows = [
         to_review_row(row)
         for row in _rows_in_period(ledger_rows, start, end)
         if row.get("needs_review") == "true"
     ]
-    pending_ids = {row.get("transaction_id", "") for row in pending_rows}
-    pending_duplicates = duplicate_evaluation.restricted_to(pending_ids)
+    period_source_rows = _rows_in_period(state.source_rows, start, end)
 
     if args.json:
+        pending_overlap = (
+            _unmigrated_overlap(pending_rows)
+            if overlap_result is None
+            else _overlap_diagnostic_for_rows(
+                overlap_result, pending_rows, period_source_rows
+            )
+        )
+        duplicate_count, duplicate_group_count, duplicate_candidates = (
+            _duplicate_compatibility(pending_overlap)
+        )
         _emit_json(
             "pending",
             "success",
@@ -1825,7 +2135,10 @@ def _pending_command(argv: list[str]) -> int:
                 "period": {"start": start.isoformat(), "end": end.isoformat()},
                 "count": len(pending_rows),
                 "transactions": pending_rows,
-                "duplicate_candidates": pending_duplicates.as_diagnostic(),
+                "overlap": pending_overlap,
+                "duplicate_count": duplicate_count,
+                "duplicate_group_count": duplicate_group_count,
+                "duplicate_candidates": duplicate_candidates,
             },
             artifacts={
                 "categorized_csv": str(categorized_path.resolve()),
@@ -1838,14 +2151,15 @@ def _pending_command(argv: list[str]) -> int:
 
     print(f"Pending review for {start.isoformat()} to {end.isoformat()}")
     print(f"  Transactions: {len(pending_rows)}")
-    if pending_duplicates.occurrence_count:
-        print(
-            "  Duplicate candidates: "
-            + _duplicate_summary_text(
-                pending_duplicates.occurrence_count,
-                len(pending_duplicates.groups),
-            )
+    pending_overlap = (
+        _unmigrated_overlap(pending_rows)
+        if overlap_result is None
+        else _overlap_diagnostic_for_rows(
+            overlap_result, pending_rows, period_source_rows
         )
+    )
+    if pending_overlap["ambiguous_group_count"]:
+        print(f"  Ambiguous overlap groups: {pending_overlap['ambiguous_group_count']}")
     for row in pending_rows:
         print(f"  {row['transaction_id']}  {row['date']}  {row['merchant']}")
     return 0
@@ -2085,11 +2399,58 @@ def _write_ledger_outputs(
     ledger_rows: list[dict[str, str]],
     *,
     final_review_ids: set[str] | None = None,
+    source_rows: list[dict[str, str]] | None = None,
+    source_evidence: list[dict[str, str]] | None = None,
+    overlap_manifest: dict[str, object] | None = None,
+    identity_manifest_document: str | None = None,
 ) -> None:
     refresh_duplicate_candidates(ledger_rows, final_review_ids=final_review_ids)
+    enforce_overlap_review(ledger_rows)
     persist_generation(
-        categorized_path, ledger_output_documents(categorized_path, ledger_rows)
+        categorized_path,
+        ledger_output_documents(
+            categorized_path,
+            ledger_rows,
+            source_occurrences=source_rows,
+            source_evidence=source_evidence,
+            overlap_manifest=overlap_manifest,
+            identity_manifest_document=identity_manifest_document,
+        ),
     )
+
+
+def _active_source_ids_by_fingerprint(
+    manifest: Mapping[str, Any],
+) -> dict[str, set[str]]:
+    """Return only active source support for reset ownership checks."""
+    return _source_ids_by_fingerprint(manifest, active_only=True)
+
+
+def _source_ids_by_fingerprint(
+    manifest: Mapping[str, Any],
+    *,
+    active_only: bool = False,
+) -> dict[str, set[str]]:
+    support: dict[str, set[str]] = {}
+    sources = manifest.get("sources", [])
+    if not isinstance(sources, list):
+        return support
+    for source in sources:
+        if not isinstance(source, Mapping):
+            continue
+        source_id = source.get("source_id")
+        records = source.get("records", [])
+        if not isinstance(source_id, str) or not isinstance(records, list):
+            continue
+        for record in records:
+            if not isinstance(record, Mapping):
+                continue
+            if active_only and record.get("state") != "active":
+                continue
+            fingerprint = record.get("record_fingerprint")
+            if isinstance(fingerprint, str):
+                support.setdefault(fingerprint, set()).add(source_id)
+    return support
 
 
 def _prompt_uncategorized(
@@ -2426,12 +2787,6 @@ def _identity_diagnostic_warning(diagnostic: Any) -> str:
     )
 
 
-def _duplicate_summary_text(occurrence_count: int, group_count: int) -> str:
-    occurrence_label = "occurrence" if occurrence_count == 1 else "occurrences"
-    group_label = "group" if group_count == 1 else "groups"
-    return f"{occurrence_count} {occurrence_label} in {group_count} {group_label}"
-
-
 def _transaction_flags(transactions: list[dict[str, str]]) -> dict[str, list[str]]:
     flagged: dict[str, list[str]] = {}
     for transaction in transactions:
@@ -2443,22 +2798,10 @@ def _transaction_flags(transactions: list[dict[str, str]]) -> dict[str, list[str
 
 def _transaction_diagnostics(
     transactions: list[dict[str, str]],
-    duplicate_evaluation: DuplicateEvaluation | None = None,
 ) -> dict[str, dict[str, Any]]:
     diagnostics: dict[str, dict[str, Any]] = {}
     for transaction in transactions:
         if transaction.get("needs_review") != "true" and not transaction.get("reason"):
-            continue
-        duplicate_candidate = (
-            duplicate_evaluation.diagnostic_for(transaction["transaction_id"])
-            if duplicate_evaluation is not None
-            else None
-        )
-        if duplicate_candidate is not None:
-            diagnostics[transaction["transaction_id"]] = {
-                "needs_review": transaction.get("needs_review") == "true",
-                "duplicate_candidate": duplicate_candidate,
-            }
             continue
         diagnostics[transaction["transaction_id"]] = {
             "needs_review": transaction.get("needs_review") == "true",

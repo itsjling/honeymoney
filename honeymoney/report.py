@@ -4,8 +4,6 @@ import html
 import json
 from decimal import Decimal, InvalidOperation
 
-from honeymoney.duplicates import DuplicateEvaluation, evaluate_duplicate_candidates
-
 _PAGE_TEMPLATE = """<!doctype html>
 <html lang="en">
 <head>
@@ -253,7 +251,7 @@ _PAGE_TEMPLATE = """<!doctype html>
   .cat-cell { display: flex; align-items: center; gap: 0.5rem; min-width: 0; }
   .cat-cell span.name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .cat-cell .review { flex: none; font-size: 0.68rem; letter-spacing: 0.04em; color: var(--neg); }
-  .cat-cell .duplicate { flex: none; font-size: 0.68rem; letter-spacing: 0.04em; color: var(--neg); }
+  .cat-cell .provenance { flex: none; font-size: 0.68rem; letter-spacing: 0.04em; color: var(--ink-muted); }
 
   .empty { color: var(--ink-faint); font-style: italic; padding: 1rem 0.75rem; }
 
@@ -284,7 +282,7 @@ _PAGE_TEMPLATE = """<!doctype html>
   <header class="report-head rise">
     <div>
       <h1>Honeymoney Report</h1>
-      <div class="meta">__PERIOD__ <span class="count">&middot; <span id="txn-count"></span> transactions</span></div>
+      <div class="meta">__PERIOD__ <span class="count">&middot; __SOURCE_COUNT__ source occurrences &middot; <span id="txn-count">__CANONICAL_COUNT__</span> canonical transactions</span></div>
     </div>
     <button id="theme-toggle" type="button" aria-label="Switch color theme">Auto</button>
   </header>
@@ -549,14 +547,13 @@ _PAGE_TEMPLATE = """<!doctype html>
           rv.textContent = "review";
           wrap.appendChild(rv);
         }
-        if (row.duplicate_candidate) {
-          var duplicate = document.createElement("span");
-          duplicate.className = "duplicate";
-          duplicate.textContent = "duplicate";
-          duplicate.title = row.duplicate_candidate.match_type +
-            " · counterparts " +
-            row.duplicate_candidate.counterpart_occurrence_ids.join(", ");
-          wrap.appendChild(duplicate);
+        if (row.provenance_status && row.provenance_status !== "single_source") {
+          var provenance = document.createElement("span");
+          provenance.className = "provenance";
+          provenance.textContent = "overlap";
+          provenance.title = row.provenance_status + " · " +
+            row.source_occurrence_count + " source occurrences";
+          wrap.appendChild(provenance);
         }
         catCell.appendChild(wrap);
 
@@ -592,17 +589,20 @@ def build_report_html(
     rows: list[dict[str, str]],
     period_label: str,
     *,
-    duplicate_evaluation: DuplicateEvaluation | None = None,
+    source_occurrence_count: int | None = None,
 ) -> str:
-    duplicates = duplicate_evaluation or evaluate_duplicate_candidates(rows)
     data = json.dumps(
-        [_report_row(row, duplicates) for row in rows],
+        [_report_row(row) for row in rows],
         ensure_ascii=True,
         sort_keys=True,
     ).replace("</", "<\\/")
     summary = _flow_summary(rows)
     replacements = {
         "__PERIOD__": html.escape(period_label),
+        "__SOURCE_COUNT__": str(
+            len(rows) if source_occurrence_count is None else source_occurrence_count
+        ),
+        "__CANONICAL_COUNT__": str(len(rows)),
         "__DATA__": data,
         "__SPENDING__": _format_amount(summary["spending"]),
         "__INCOME__": _format_amount(summary["income"]),
@@ -617,9 +617,7 @@ def build_report_html(
     return document
 
 
-def _report_row(
-    row: dict[str, str], duplicate_evaluation: DuplicateEvaluation
-) -> dict[str, object]:
+def _report_row(row: dict[str, str]) -> dict[str, object]:
     return {
         "date": row.get("date", ""),
         "merchant": row.get("merchant", ""),
@@ -629,9 +627,11 @@ def _report_row(
         "account": row.get("account", ""),
         "owner": row.get("owner", ""),
         "needs_review": row.get("needs_review") == "true",
-        "duplicate_candidate": duplicate_evaluation.diagnostic_for(
-            row.get("transaction_id", "")
-        ),
+        "transaction_id": row.get("transaction_id", ""),
+        "canonical_group_id": row.get("canonical_group_id", ""),
+        "canonical_slot": row.get("canonical_slot", ""),
+        "provenance_status": row.get("provenance_status", ""),
+        "source_occurrence_count": row.get("source_occurrence_count", ""),
     }
 
 

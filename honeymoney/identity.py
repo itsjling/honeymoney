@@ -929,21 +929,33 @@ def resolve_batch(
 
 def record_fingerprint(row: Mapping[str, Any]) -> str:
     """Calculate the normalized immutable financial record fingerprint."""
-    fields = (
-        _normalize_folded_text(row.get("account_id", "")),
-        _normalize_iso_date(row.get("date", "")),
-        _normalize_iso_date(row.get("transaction_date", "")),
-        _normalize_iso_date(row.get("posting_date", "")),
-        _normalize_decimal(row.get("original_amount", "")),
-        _normalize_currency(row.get("original_currency", "")),
-        _normalize_decimal(row.get("posted_amount", "")),
-        _normalize_currency(row.get("posted_currency", "")),
-        _normalize_folded_text(row.get("merchant", "")),
-        _normalize_folded_text(row.get("original_description", "")),
-    )
+    fields = normalized_record_identity(row).values()
     return "fp_" + digest(
         "record-fingerprint-v2", *(field.encode("utf-8") for field in fields)
     )
+
+
+def normalized_record_identity(row: Mapping[str, Any]) -> dict[str, str]:
+    """Return the normalized values that define one record fingerprint."""
+    return {
+        "account_id": _normalize_folded_text(row.get("account_id", "")),
+        "date": _normalize_iso_date(row.get("date", "")),
+        "transaction_date": _normalize_iso_date(row.get("transaction_date", "")),
+        "posting_date": _normalize_iso_date(row.get("posting_date", "")),
+        "original_amount": _normalize_decimal(row.get("original_amount", "")),
+        "original_currency": _normalize_currency(row.get("original_currency", "")),
+        "posted_amount": _normalize_decimal(row.get("posted_amount", "")),
+        "posted_currency": _normalize_currency(row.get("posted_currency", "")),
+        "merchant": _normalize_folded_text(row.get("merchant", "")),
+        "original_description": _normalize_folded_text(
+            row.get("original_description", "")
+        ),
+    }
+
+
+def normalized_decimal(value: Any) -> str:
+    """Return the decimal form used by stable record identity."""
+    return _normalize_decimal(value)
 
 
 def allocation_locator_bytes(locator: AllocationLocator) -> bytes:

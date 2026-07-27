@@ -16,7 +16,19 @@ from honeymoney.identity_state import (
     IdentityState,
     identity_manifest_path,
     load_identity_state,
+    validate_source_evidence_manifest_agreement,
     validated_manifest_document,
+)
+from honeymoney.overlap import (
+    apply_history_ambiguity,
+    canonicalize_overlaps,
+    clear_history_ambiguity,
+    enforce_overlap_review,
+    overlap_manifest_document,
+    overlap_manifest_path,
+    project_corrections,
+    source_occurrences_path,
+    validate_overlap_agreement,
 )
 from honeymoney.persistence import persist_generation
 from honeymoney.reconciliation import reconcile_ledger
@@ -25,6 +37,7 @@ from honeymoney.schema import (
     ALLOWED_FLOW_TYPES,
     CATEGORIZED_COLUMNS,
     REVIEW_NEEDED_COLUMNS,
+    SOURCE_OCCURRENCE_COLUMNS,
     allowed_categories,
     allowed_owners,
     allowed_payment_methods,
@@ -175,6 +188,7 @@ def apply_corrections(
         if "needs_review" in correction:
             release_duplicate_review_ownership(transaction)
             transaction["needs_review"] = correction["needs_review"].casefold()
+        clear_history_ambiguity([transaction], {transaction["transaction_id"]})
         transaction["flags"] = _append_flag(
             transaction.get("flags", ""), "manual_correction"
         )
@@ -213,20 +227,148 @@ def ledger_output_documents(
     *,
     identity_manifest: Mapping[str, object] | None = None,
     identity_manifest_document: str | None = None,
+    source_occurrences: list[dict[str, str]] | None = None,
+    source_evidence: list[dict[str, str]] | None = None,
+    overlap_manifest: Mapping[str, object] | None = None,
+    overlap_manifest_document_value: str | None = None,
 ) -> dict[Path, str]:
-    """Build all ledger artifacts, including validated identity ownership."""
+    """Build public and hidden artifacts for one canonical generation."""
     if identity_manifest is not None and identity_manifest_document is not None:
         raise ValueError("Pass either an identity manifest or its document, not both")
+    if overlap_manifest is not None and overlap_manifest_document_value is not None:
+        raise ValueError("Pass either an overlap manifest or its document, not both")
+    state: IdentityState | None = None
+    if (
+        source_occurrences is None
+        or source_evidence is None
+        or (overlap_manifest is None and overlap_manifest_document_value is None)
+        or (identity_manifest is None and identity_manifest_document is None)
+    ):
+        state = load_identity_state(categorized_path)
+    explicit_v2_bootstrap = (
+        state is not None
+        and not state.rows
+        and source_occurrences is None
+        and (identity_manifest is not None or identity_manifest_document is not None)
+        and bool(ledger_rows)
+    )
+    evidence = (
+        source_occurrences
+        if source_occurrences is not None
+        else (
+            [dict(row) for row in ledger_rows]
+            if explicit_v2_bootstrap
+            else state.source_rows
+        )
+    )
+    supplied_by_id = {row.get("transaction_id", ""): row for row in ledger_rows}
+    evidence = [dict(row) for row in evidence]
+    for row in evidence:
+        supplied = supplied_by_id.get(row.get("transaction_id", ""))
+        if (
+            supplied is not None
+            and not row.get("source_id")
+            and not row.get("account_type")
+        ):
+            row["account_type"] = supplied.get("account_type", "")
+    write_time_migration = (
+        state is not None
+        and state.canonical_migration_required
+        and not state.bootstrap_required
+        and source_occurrences is None
+        and overlap_manifest is None
+        and overlap_manifest_document_value is None
+    )
+    migrated_overlap = None
+    if write_time_migration or explicit_v2_bootstrap:
+        for row in evidence:
+            supplied = supplied_by_id.get(row.get("transaction_id", ""))
+            if supplied is None:
+                continue
+            for field in (
+                "category",
+                "flow_type",
+                "flow_source",
+                "transfer_group_id",
+                "paired_transaction_id",
+                "reconciliation_status",
+                "reconciliation_confidence",
+                "owner",
+                "payment_method",
+                "confidence",
+                "needs_review",
+                "reason",
+                "flags",
+                "notes",
+            ):
+                row[field] = supplied.get(field, "")
+        migrated_overlap = canonicalize_overlaps(evidence, [], state.overlap_manifest)
+        ledger_rows = migrated_overlap.rows
     if identity_manifest_document is not None:
         from honeymoney.identity import parse_manifest
 
         manifest = parse_manifest(identity_manifest_document)
-        manifest_content = validated_manifest_document(ledger_rows, manifest)
+        manifest_content = validated_manifest_document(evidence, manifest)
     elif identity_manifest is not None:
-        manifest_content = validated_manifest_document(ledger_rows, identity_manifest)
+        manifest = identity_manifest
+        manifest_content = validated_manifest_document(evidence, manifest)
     else:
-        state = load_identity_state(categorized_path)
-        manifest_content = validated_manifest_document(ledger_rows, state.manifest)
+        manifest = state.manifest
+        manifest_content = validated_manifest_document(evidence, manifest)
+    retained_evidence = (
+        source_evidence
+        if source_evidence is not None
+        else (state.source_evidence_rows if state is not None else evidence)
+    )
+    by_transaction_id = {row["transaction_id"]: dict(row) for row in retained_evidence}
+    by_transaction_id.update({row["transaction_id"]: dict(row) for row in evidence})
+    manifest_ids = {
+        record["transaction_id"]
+        for source in manifest["sources"]
+        for record in source["records"]
+    }
+    active_order = [row["transaction_id"] for row in evidence]
+    active_ids = set(active_order)
+    retained_evidence = [
+        by_transaction_id[identifier]
+        for identifier in active_order
+        if identifier in manifest_ids
+    ]
+    retained_evidence.extend(
+        row
+        for identifier, row in sorted(by_transaction_id.items())
+        if identifier in manifest_ids and identifier not in active_ids
+    )
+    records_by_transaction_id = {
+        record["transaction_id"]: (source, record)
+        for source in manifest["sources"]
+        for record in source["records"]
+    }
+    for row in retained_evidence:
+        source, record = records_by_transaction_id[row["transaction_id"]]
+        row["source_id"] = source["source_id"]
+        row["source_namespace_id"] = source["source_namespace_id"]
+        row["source_record_id"] = record["source_record_id"]
+        if record["state"] == "retired":
+            row["source_revision"] = record["allocation_origin"]["source_revision"]
+        else:
+            row["source_revision"] = source["source_revision"]
+    validate_source_evidence_manifest_agreement(retained_evidence, manifest)
+    if overlap_manifest_document_value is not None:
+        from honeymoney.overlap import parse_overlap_manifest
+
+        canonical_manifest = parse_overlap_manifest(overlap_manifest_document_value)
+        overlap_content = overlap_manifest_document_value
+    elif overlap_manifest is not None:
+        canonical_manifest = overlap_manifest
+        overlap_content = overlap_manifest_document(overlap_manifest)
+    elif migrated_overlap is not None:
+        canonical_manifest = migrated_overlap.manifest
+        overlap_content = overlap_manifest_document(canonical_manifest)
+    else:
+        canonical_manifest = state.overlap_manifest
+        overlap_content = state.overlap_manifest_document
+    validate_overlap_agreement(ledger_rows, evidence, canonical_manifest)
     review_rows = [
         to_review_row(row) for row in ledger_rows if row.get("needs_review") == "true"
     ]
@@ -236,6 +378,10 @@ def ledger_output_documents(
             REVIEW_NEEDED_COLUMNS, review_rows
         ),
         identity_manifest_path(categorized_path): manifest_content,
+        source_occurrences_path(categorized_path): csv_document(
+            SOURCE_OCCURRENCE_COLUMNS, retained_evidence
+        ),
+        overlap_manifest_path(categorized_path): overlap_content,
     }
 
 
@@ -292,16 +438,28 @@ def apply_correction_operation(
         effective_batch[transaction_id] = merged_correction
         merged_corrections[transaction_id] = merged_correction
 
+    operation_overlap_manifest = state.overlap_manifest
+    migration_ambiguous_ids: tuple[str, ...] = ()
+    if state.canonical_migration_required and not state.bootstrap_required:
+        canonical = canonicalize_overlaps(state.source_rows, [], state.overlap_manifest)
+        ledger_rows = canonical.rows
+        operation_overlap_manifest = canonical.manifest
+        projection = project_corrections(canonical, effective_batch)
+        effective_batch = projection.corrections
+        migration_ambiguous_ids = projection.ambiguous_transaction_ids
+
     baseline_ledger = [dict(row) for row in ledger_rows]
-    reconcile_ledger(baseline_ledger, config)
+    reconcile_ledger(baseline_ledger, config, statement_rows=state.source_rows)
     corrected_ledger = [dict(row) for row in ledger_rows]
     apply_corrections(corrected_ledger, effective_batch)
-    reconcile_ledger(corrected_ledger, config)
+    reconcile_ledger(corrected_ledger, config, statement_rows=state.source_rows)
     refresh_duplicate_candidates(
         corrected_ledger,
         final_review_ids=_final_review_ids(merged_corrections),
     )
-    corrected_ids = set(normalized_patches)
+    apply_history_ambiguity(corrected_ledger, migration_ambiguous_ids)
+    enforce_overlap_review(corrected_ledger)
+    corrected_ids = set(effective_batch)
     for index, (original, baseline, corrected) in enumerate(
         zip(ledger_rows, baseline_ledger, corrected_ledger)
     ):
@@ -324,6 +482,9 @@ def apply_correction_operation(
         categorized_path,
         corrected_ledger,
         identity_manifest_document=state.manifest_document,
+        source_occurrences=state.source_rows,
+        source_evidence=state.source_evidence_rows,
+        overlap_manifest=operation_overlap_manifest,
     )
     files[corrections_path] = csv_document(CORRECTION_COLUMNS, correction_rows)
     rules_added = 0
@@ -422,7 +583,7 @@ def read_ledger(path: Path) -> list[dict[str, str]]:
 def _normalize_ledger_rows(state: IdentityState) -> list[dict[str, str]]:
     rows = state.rows
     for row in rows:
-        if not row["account_type"]:
+        if not row["account_type"] and not row.get("canonical_group_id"):
             row["account_type"] = {
                 "Bank Account": "bank",
                 "Credit Card": "credit_card",
