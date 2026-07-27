@@ -423,7 +423,7 @@ Common edits:
 - Set `ollama.enabled` to `true` only when you want local Ollama fallback.
 - Add filename mappings in `profile_mappings.json` when automatic detection is ambiguous.
 
-Profiles may set `account_type` to `bank`, `credit_card`, `investment`, or `unknown`; omission remains compatible and common payment methods are inferred. CSV/PDF column mappings may optionally expose `statement_opening_balance` and `statement_closing_balance`. Reconciliation reports an explicit `unavailable` balance status when the source does not supply both rather than inventing balances.
+Profiles may set `account_type` to `bank`, `credit_card`, `investment`, or `unknown`; omission remains compatible and common payment methods are inferred. CSV/PDF column mappings may optionally expose `statement_opening_balance`, `statement_closing_balance`, and `statement_section`. Reconciliation reports an explicit `unavailable` balance status when the source does not supply both rather than inventing balances.
 
 Rules may assign `flow_type` as well as `category`. For institution-specific treatment, use `conditions` to combine exact, keyword, or regex matches on fields such as `institution`, `account_id`, `account_type`, and `original_description`. The derived `direction` condition supports exact `inflow` or `outflow` matching without changing transaction identity. These deterministic rules run before local Ollama; Ollama can suggest spending merchant categories but does not set an owner or replace `flow_type`.
 
@@ -475,9 +475,10 @@ Current example profiles cover HSBC One, HSBC credit-card, and Mox bank/card sta
 
 The bundled HSBC and Mox PDF profiles also read statement opening and closing
 balances. Reconciliation checks each source, account, and posted currency and
-keeps the existing `status` values while the added `result` field reports
+statement section. It keeps the existing `status` values while the added `result` field reports
 `matched`, `mismatched`, or `unavailable` with a reason. The balance lines do
-not become ledger transactions.
+not become ledger transactions. A true conflict reports the source, page,
+section, and field without exposing either balance value.
 
 Migration: remove `hsbc_hk_bank` and `hsbc_hk_bank_pdf` paths or mappings from
 existing configurations. Use `hsbc_one_pdf` for HSBC One PDF statements. For

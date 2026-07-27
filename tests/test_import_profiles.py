@@ -389,9 +389,7 @@ class PdfBalanceMappingValidationTest(unittest.TestCase):
         ):
             _validate_profile(profile, Path("profile.json"), base_config())
 
-    def test_dynamic_mapping_conflicts_with_fixed_target_for_same_account(
-        self,
-    ) -> None:
+    def test_dynamic_section_and_account_target_conflict_at_runtime(self) -> None:
         profile = load_profile("hsbc_one_pdf.json")
         profile["pdf"]["balance_mappings"] = [
             {
@@ -420,7 +418,7 @@ class PdfBalanceMappingValidationTest(unittest.TestCase):
         ):
             _validate_profile(profile, Path("profile.json"), base_config())
 
-    def test_static_and_section_targets_share_duplicate_namespace(self) -> None:
+    def test_static_section_and_account_targets_cannot_collapse(self) -> None:
         profile = load_profile("hsbc_one_pdf.json")
         profile["pdf"]["balance_mappings"] = [
             {
@@ -443,6 +441,25 @@ class PdfBalanceMappingValidationTest(unittest.TestCase):
         ):
             _validate_profile(profile, Path("profile.json"), base_config())
 
+    def test_section_and_account_targets_can_use_distinct_currencies(self) -> None:
+        profile = load_profile("hsbc_one_pdf.json")
+        profile["pdf"]["balance_mappings"] = [
+            {
+                "section": "HKD Savings",
+                "currency": "HKD",
+                "opening_regex": r"^B/F (?P<balance>\d+\.\d{2})$",
+                "closing_regex": r"^C/F (?P<balance>\d+\.\d{2})$",
+            },
+            {
+                "account_id": "hsbc_one_hkd_savings",
+                "currency": "USD",
+                "opening_regex": r"^OPEN (?P<balance>\d+\.\d{2})$",
+                "closing_regex": r"^CLOSE (?P<balance>\d+\.\d{2})$",
+            },
+        ]
+
+        _validate_profile(profile, Path("profile.json"), base_config())
+
 
 class PdfBalanceReconciliationTest(unittest.TestCase):
     def test_mox_balance_rows_allow_account_text_between_label_and_amount(
@@ -460,7 +477,7 @@ class PdfBalanceReconciliationTest(unittest.TestCase):
         )
 
         self.assertEqual(
-            observations[("mox_bank_main", "HKD")],
+            observations[("mox_bank_main", "", "HKD")],
             {
                 "opening": [Decimal("100.00")],
                 "closing": [Decimal("110.00")],
@@ -501,7 +518,7 @@ class PdfBalanceReconciliationTest(unittest.TestCase):
         self.assertEqual(
             observations,
             {
-                ("hsbc_one_fcy_savings", "EUR"): {
+                ("hsbc_one_fcy_savings", "Foreign Currency Savings", "EUR"): {
                     "opening": [Decimal("100.00")],
                     "closing": [Decimal("110.00")],
                 }
@@ -550,6 +567,119 @@ class PdfBalanceReconciliationTest(unittest.TestCase):
                 self.assertEqual(statement["result"], "matched")
                 self.assertEqual(statement["opening_balance"], "100.00")
                 self.assertEqual(statement["closing_balance"], "110.00")
+
+    def test_hsbc_one_sections_with_one_account_keep_distinct_balances(
+        self,
+    ) -> None:
+        profile = load_profile("hsbc_one_pdf.json")
+        accounts = profile["pdf"]["sectioned_word_rows"]["accounts"]
+        accounts["HKD Savings"]["account_id"] = "hsbc_shared_hkd"
+        accounts["HKD Current"]["account_id"] = "hsbc_shared_hkd"
+        _validate_profile(profile, Path("profile.json"), base_config())
+        page_tables = [
+            [
+                [
+                    ["HKD Savings"],
+                    ["B/F BALANCE 100.00"],
+                    ["C/F BALANCE 110.00"],
+                ]
+            ],
+            [
+                [
+                    ["HKD Current"],
+                    ["B/F BALANCE 200.00"],
+                    ["C/F BALANCE 210.00"],
+                ]
+            ],
+        ]
+        page_words = [
+            _hsbc_one_transaction_words("HKD Savings", "HKD", "02"),
+            _hsbc_one_transaction_words("HKD Current", "HKD", "03"),
+        ]
+
+        rows, warnings, _ = _import_fake_pdf(
+            profile,
+            page_tables=page_tables,
+            page_words=page_words,
+        )
+        preview_rows, preview_warnings = _import_fake_pdf(
+            profile,
+            page_tables=page_tables,
+            page_words=page_words,
+            preview=True,
+        )
+        statements = reconcile_ledger(rows, {})["balance_reconciliation"][
+            "hsbc_shared_hkd"
+        ]["statements"]
+
+        self.assertEqual(warnings, [])
+        self.assertEqual(preview_warnings, warnings)
+        self.assertEqual(
+            [
+                (
+                    row["account_id"],
+                    row["statement_section"],
+                    row["statement_opening_balance"],
+                    row["statement_closing_balance"],
+                )
+                for row in preview_rows
+            ],
+            [
+                (
+                    row["account_id"],
+                    row["statement_section"],
+                    row["statement_opening_balance"],
+                    row["statement_closing_balance"],
+                )
+                for row in rows
+            ],
+        )
+        self.assertEqual(
+            [row["statement_section"] for row in rows],
+            ["HKD Savings", "HKD Current"],
+        )
+        self.assertEqual(
+            [
+                (
+                    row["statement_opening_balance"],
+                    row["statement_closing_balance"],
+                )
+                for row in rows
+            ],
+            [("100.00", "110.00"), ("200.00", "210.00")],
+        )
+        self.assertEqual(
+            [statement["statement_section"] for statement in statements],
+            ["HKD Current", "HKD Savings"],
+        )
+        self.assertEqual(
+            [statement["result"] for statement in statements],
+            ["matched", "matched"],
+        )
+
+    def test_sectioned_profile_keeps_account_targeted_balances(self) -> None:
+        profile = load_profile("hsbc_one_pdf.json")
+        mapping = profile["pdf"]["balance_mappings"][0]
+        mapping["account_id"] = "hsbc_one_hkd_savings"
+        mapping.pop("section")
+        _validate_profile(profile, Path("profile.json"), base_config())
+
+        rows, warnings, _ = _import_fake_pdf(
+            profile,
+            tables=[
+                [
+                    ["HKD Savings"],
+                    ["B/F BALANCE 100.00"],
+                    ["C/F BALANCE 110.00"],
+                ]
+            ],
+            words=_hsbc_one_transaction_words("HKD Savings", "HKD", "02"),
+        )
+
+        self.assertEqual(warnings, [])
+        self.assertEqual(rows[0]["statement_section"], "HKD Savings")
+        self.assertEqual(rows[0]["statement_opening_balance"], "100.00")
+        self.assertEqual(rows[0]["statement_closing_balance"], "110.00")
 
     def test_positive_credit_liability_balances_reconcile_against_signed_rows(
         self,
@@ -651,7 +781,7 @@ class PdfBalanceReconciliationTest(unittest.TestCase):
                     ],
                 )
                 self.assertEqual(
-                    observations[(account_id, "HKD")],
+                    observations[(account_id, "", "HKD")],
                     {
                         "opening": [expected_open],
                         "closing": [expected_close],
@@ -708,15 +838,15 @@ class PdfBalanceReconciliationTest(unittest.TestCase):
         )
 
         self.assertEqual(
-            broken[("mox_bank_main", "HKD")]["opening"],
+            broken[("mox_bank_main", "", "HKD")]["opening"],
             [Decimal("100.00"), Decimal("111.00")],
         )
         self.assertEqual(
-            missing_close[("mox_bank_main", "HKD")]["opening"],
+            missing_close[("mox_bank_main", "", "HKD")]["opening"],
             [Decimal("100.00"), Decimal("110.00")],
         )
         self.assertEqual(
-            missing_close[("mox_bank_main", "HKD")]["closing"],
+            missing_close[("mox_bank_main", "", "HKD")]["closing"],
             [Decimal("110.00")],
         )
 
@@ -737,11 +867,11 @@ class PdfBalanceReconciliationTest(unittest.TestCase):
         self.assertEqual(
             observations,
             {
-                ("hsbc_one_fcy_savings", "AUD"): {
+                ("hsbc_one_fcy_savings", "Foreign Currency Savings", "AUD"): {
                     "opening": [Decimal("100.00")],
                     "closing": [Decimal("110.00")],
                 },
-                ("hsbc_one_fcy_savings", "EUR"): {
+                ("hsbc_one_fcy_savings", "Foreign Currency Savings", "EUR"): {
                     "opening": [Decimal("50.00")],
                     "closing": [Decimal("55.00")],
                 },
@@ -754,11 +884,11 @@ class PdfBalanceReconciliationTest(unittest.TestCase):
         self.assertEqual(
             observations,
             {
-                ("hsbc_one_hkd_savings", "HKD"): {
+                ("hsbc_one_hkd_savings", "HKD Savings", "HKD"): {
                     "opening": [Decimal("100.00")],
                     "closing": [Decimal("110.00")],
                 },
-                ("hsbc_one_hkd_current", "HKD"): {
+                ("hsbc_one_hkd_current", "HKD Current", "HKD"): {
                     "opening": [Decimal("200.00")],
                     "closing": [Decimal("210.00")],
                 },
@@ -782,11 +912,11 @@ class PdfBalanceReconciliationTest(unittest.TestCase):
         self.assertEqual(
             observations,
             {
-                ("hsbc_one_hkd_savings", "HKD"): {
+                ("hsbc_one_hkd_savings", "HKD Savings", "HKD"): {
                     "opening": [Decimal("100.00")],
                     "closing": [],
                 },
-                ("hsbc_one_hkd_current", "HKD"): {
+                ("hsbc_one_hkd_current", "HKD Current", "HKD"): {
                     "opening": [Decimal("200.00")],
                     "closing": [Decimal("210.00")],
                 },
@@ -830,19 +960,27 @@ class PdfBalanceReconciliationTest(unittest.TestCase):
 
     def test_conflicting_extracted_balances_mark_rows_and_do_not_fail(self) -> None:
         profile = load_profile("mox_bank_pdf.json")
-        tables = [
+        page_tables = [
             [
-                ["01 Apr 02 Apr SYNTHETIC CREDIT +10.00"],
-                ["01 Apr 01 Apr OPENING BALANCE +100.00"],
-                ["02 Apr 02 Apr OPENING BALANCE +101.00"],
-                ["30 Apr 30 Apr CLOSING BALANCE +110.00"],
-            ]
+                [
+                    ["01 Apr 01 Apr OPENING BALANCE +100.00"],
+                    ["01 Apr 02 Apr SYNTHETIC CREDIT +10.00"],
+                    ["15 Apr 15 Apr CLOSING BALANCE +110.00"],
+                ]
+            ],
+            [
+                [
+                    ["16 Apr 16 Apr OPENING BALANCE +101.00"],
+                    ["16 Apr 17 Apr SYNTHETIC CREDIT +10.00"],
+                    ["30 Apr 30 Apr CLOSING BALANCE +110.00"],
+                ]
+            ],
         ]
 
-        rows, warnings, _ = _import_fake_pdf(profile, tables=tables)
+        rows, warnings, _ = _import_fake_pdf(profile, page_tables=page_tables)
 
         self.assertEqual(warnings, [])
-        self.assertEqual(len(rows), 1)
+        self.assertEqual(len(rows), 2)
         self.assertEqual(rows[0]["statement_opening_balance"], "")
         self.assertIn("statement_opening_balance_conflict", rows[0]["flags"])
         report = reconcile_ledger(rows, {})["balance_reconciliation"]["mox_bank_main"]
@@ -851,6 +989,73 @@ class PdfBalanceReconciliationTest(unittest.TestCase):
         self.assertEqual(
             report["statements"][0]["reason"], "Opening balances conflict."
         )
+        self.assertEqual(
+            report["statements"][0]["conflicts"],
+            [
+                {
+                    "source_file": "statement.pdf",
+                    "source_page": "1",
+                    "statement_section": "",
+                    "field": "statement_opening_balance",
+                },
+                {
+                    "source_file": "statement.pdf",
+                    "source_page": "2",
+                    "statement_section": "",
+                    "field": "statement_opening_balance",
+                },
+            ],
+        )
+        self.assertNotIn(
+            "100.00",
+            json.dumps(report["statements"][0]["conflicts"], sort_keys=True),
+        )
+        self.assertNotIn(
+            "101.00",
+            json.dumps(report["statements"][0]["conflicts"], sort_keys=True),
+        )
+
+    def test_mapped_endpoint_conflicts_include_safe_row_context(self) -> None:
+        rows = [
+            {
+                "transaction_id": f"txn_{index}",
+                "source_file": "private/statements/synthetic.csv",
+                "source_page": str(index),
+                "account_id": "synthetic_bank",
+                "account_type": "bank",
+                "posted_currency": "HKD",
+                "posted_amount": "10.00",
+                "amount_hkd": "10.00",
+                "statement_opening_balance": opening,
+                "statement_closing_balance": "120.00",
+                "flags": "",
+            }
+            for index, opening in ((4, "100.00"), (5, "101.00"))
+        ]
+
+        statement = reconcile_ledger(rows, {})["balance_reconciliation"][
+            "synthetic_bank"
+        ]["statements"][0]
+
+        self.assertEqual(statement["reason"], "Opening balances conflict.")
+        self.assertEqual(
+            statement["conflicts"],
+            [
+                {
+                    "source_file": "synthetic.csv",
+                    "source_page": "4",
+                    "statement_section": "",
+                    "field": "statement_opening_balance",
+                },
+                {
+                    "source_file": "synthetic.csv",
+                    "source_page": "5",
+                    "statement_section": "",
+                    "field": "statement_opening_balance",
+                },
+            ],
+        )
+        self.assertNotIn("private/", json.dumps(statement["conflicts"]))
 
     def test_balance_scanner_reads_table_rows_alongside_words(self) -> None:
         profile = load_profile("mox_bank_pdf.json")
@@ -934,11 +1139,11 @@ class PdfBalanceReconciliationTest(unittest.TestCase):
         self.assertEqual(
             observations,
             {
-                ("hsbc_one_hkd_savings", "HKD"): {
+                ("hsbc_one_hkd_savings", "HKD Savings", "HKD"): {
                     "opening": [Decimal("100.00")],
                     "closing": [Decimal("110.00")],
                 },
-                ("hsbc_one_hkd_current", "HKD"): {
+                ("hsbc_one_hkd_current", "HKD Current", "HKD"): {
                     "opening": [Decimal("100.00")],
                     "closing": [Decimal("110.00")],
                 },
@@ -982,11 +1187,11 @@ class PdfBalanceReconciliationTest(unittest.TestCase):
         self.assertEqual(
             observations,
             {
-                ("hsbc_one_hkd_savings", "HKD"): {
+                ("hsbc_one_hkd_savings", "HKD Savings", "HKD"): {
                     "opening": [Decimal("100.00"), Decimal("100.00")],
                     "closing": [Decimal("110.00")],
                 },
-                ("hsbc_one_hkd_current", "HKD"): {
+                ("hsbc_one_hkd_current", "HKD Current", "HKD"): {
                     "opening": [Decimal("200.00")],
                     "closing": [Decimal("210.00")],
                 },
@@ -1940,7 +2145,7 @@ def _hsbc_one_transaction_words(
 def _balance_observations_from_table_pages(
     profile: dict,
     pages: list[list[str]],
-) -> dict[tuple[str, str], dict[str, list[Decimal]]]:
+) -> dict[tuple[str, str, str], dict[str, list[Decimal]]]:
     class Page:
         def __init__(self, lines: list[str]):
             self.lines = lines
@@ -1959,7 +2164,7 @@ def _balance_observations_from_table_pages(
 
 
 def _hsbc_one_split_word_table_observations() -> dict[
-    tuple[str, str], dict[str, list[Decimal]]
+    tuple[str, str, str], dict[str, list[Decimal]]
 ]:
     def words(lines: list[str]) -> list[dict[str, object]]:
         return [

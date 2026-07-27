@@ -9,12 +9,21 @@ Config: TypeAlias = Mapping[str, object]
 GenerationDocuments: TypeAlias = Mapping[Path, str]
 
 
+class BalanceConflict(TypedDict):
+    source_file: str
+    source_page: str
+    statement_section: str
+    field: str
+
+
 class StatementBalance(TypedDict, total=False):
     source_file: str
+    statement_section: str
     posted_currency: str
     status: str
     result: str
     reason: str
+    conflicts: list[BalanceConflict]
     opening_balance: str
     closing_balance: str
     calculated_closing_balance: str

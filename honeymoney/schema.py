@@ -44,13 +44,19 @@ PREVIOUS_SOURCE_OCCURRENCE_COLUMNS = [
     "source_row",
 ]
 
-SOURCE_OCCURRENCE_COLUMNS = [
+PRE_STATEMENT_SECTION_SOURCE_OCCURRENCE_COLUMNS = [
     *PREVIOUS_SOURCE_OCCURRENCE_COLUMNS[:18],
     "valuation_source",
     "valuation_status",
     *PREVIOUS_SOURCE_OCCURRENCE_COLUMNS[18:33],
     "review_reasons",
     *PREVIOUS_SOURCE_OCCURRENCE_COLUMNS[33:],
+]
+
+SOURCE_OCCURRENCE_COLUMNS = [
+    *PRE_STATEMENT_SECTION_SOURCE_OCCURRENCE_COLUMNS[:22],
+    "statement_section",
+    *PRE_STATEMENT_SECTION_SOURCE_OCCURRENCE_COLUMNS[22:],
 ]
 
 PREVIOUS_CATEGORIZED_COLUMNS = [
@@ -60,6 +66,15 @@ PREVIOUS_CATEGORIZED_COLUMNS = [
     "provenance_status",
     "source_occurrence_count",
     *PREVIOUS_SOURCE_OCCURRENCE_COLUMNS[1:],
+]
+
+PRE_STATEMENT_SECTION_CATEGORIZED_COLUMNS = [
+    "transaction_id",
+    "canonical_group_id",
+    "canonical_slot",
+    "provenance_status",
+    "source_occurrence_count",
+    *PRE_STATEMENT_SECTION_SOURCE_OCCURRENCE_COLUMNS[1:],
 ]
 
 CATEGORIZED_COLUMNS = [
@@ -118,7 +133,7 @@ PREVIOUS_REVIEW_NEEDED_COLUMNS = [
     "source_row",
 ]
 
-REVIEW_NEEDED_COLUMNS = [
+PRE_STATEMENT_SECTION_REVIEW_NEEDED_COLUMNS = [
     *PREVIOUS_REVIEW_NEEDED_COLUMNS[:22],
     "valuation_source",
     "valuation_status",
@@ -126,6 +141,12 @@ REVIEW_NEEDED_COLUMNS = [
     "review_reasons",
     "review_reason_labels",
     *PREVIOUS_REVIEW_NEEDED_COLUMNS[38:],
+]
+
+REVIEW_NEEDED_COLUMNS = [
+    *PRE_STATEMENT_SECTION_REVIEW_NEEDED_COLUMNS[:26],
+    "statement_section",
+    *PRE_STATEMENT_SECTION_REVIEW_NEEDED_COLUMNS[26:],
 ]
 
 

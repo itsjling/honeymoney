@@ -145,14 +145,16 @@ provides an explicit inspect/rewrite seam.
 
 PDF profiles may map statement opening and closing balance lines. The importer
 scans raw word or table lines, then puts each balance on the first or last
-transaction for the mapped account and posted currency. It never turns a
-balance line into a transaction. Statement-balance reconciliation groups hidden
-source occurrences by source identity, account, and posted currency. It uses
+transaction for the mapped account, statement section, and posted currency. It
+never turns a balance line into a transaction. Statement-balance reconciliation
+groups hidden source occurrences by source identity, account, statement
+section, and posted currency. It uses
 `source_file` only for legacy rows that
 lack `source_id`. The existing `status` field stays `reconciled`, `difference`,
 or `unavailable`. The added `result` field reports `matched`, `mismatched`, or
 `unavailable`; unavailable results include a reason. Conflicting balance values
-add a safe row flag and make the result unavailable.
+add a safe row flag and make the result unavailable. Conflict output names the
+source, page, section, and field but omits the values.
 
 Canonical cash-flow and report totals use the public ledger. The maximum
 per-source multiplicity sets the canonical count for each exact overlap group.

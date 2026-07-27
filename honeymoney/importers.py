@@ -12,7 +12,7 @@ from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from fnmatch import fnmatch
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, TypeAlias
 
 from honeymoney.identity import (
     AllocationLocator,
@@ -54,6 +54,18 @@ class _PdfBalanceCandidate:
     page_number: int
     line_number: int
     value: Decimal
+
+
+_PdfBalanceTarget: TypeAlias = tuple[str, str, str]
+
+
+class _PdfBalanceObservations(dict[_PdfBalanceTarget, dict[str, list[Decimal]]]):
+    def __init__(self) -> None:
+        super().__init__()
+        self.pages: dict[
+            tuple[_PdfBalanceTarget, str, Decimal],
+            set[int],
+        ] = {}
 
 
 def _relative_source(path: Path, input_root: Path) -> str:
@@ -387,8 +399,7 @@ def _validate_pdf_balance_mappings(profile_id: str, settings: dict[str, Any]) ->
         if isinstance(section_settings, dict)
         else {}
     )
-    fixed_targets: dict[tuple[str, str], int] = {}
-    dynamic_targets: dict[str, int] = {}
+    validated_targets: list[tuple[_PdfBalanceTarget, bool, int]] = []
     allowed_fields = {
         "account_id",
         "section",
@@ -455,6 +466,7 @@ def _validate_pdf_balance_mappings(profile_id: str, settings: dict[str, Any]) ->
                     "account_id and currency, or a known section and currency"
                 )
             target_account_id = account_id.strip()
+            target_section = ""
             target_currency = str(currency).strip().upper()
             mapping["account_id"] = target_account_id
             mapping["currency"] = target_currency
@@ -487,6 +499,7 @@ def _validate_pdf_balance_mappings(profile_id: str, settings: dict[str, Any]) ->
                         "must name a group in both regexes for a dynamic-currency section"
                     )
                 target_account_id = str(account.get("account_id", ""))
+                target_section = section.strip()
                 target_currency = ""
                 dynamic_target = True
             else:
@@ -501,33 +514,41 @@ def _validate_pdf_balance_mappings(profile_id: str, settings: dict[str, Any]) ->
                         "must match the fixed currency for its section"
                     )
                 target_account_id = str(account.get("account_id", ""))
+                target_section = section.strip()
                 target_currency = str(currency).upper()
                 dynamic_target = False
-        conflicting_index = (
-            dynamic_targets.get(target_account_id)
-            if dynamic_target
-            else fixed_targets.get((target_account_id, target_currency))
+        conflicting_index = next(
+            (
+                prior_index
+                for (
+                    (prior_account, prior_section, prior_currency),
+                    prior_dynamic,
+                    prior_index,
+                ) in validated_targets
+                if prior_account == target_account_id
+                and (
+                    prior_section == target_section
+                    or not prior_section
+                    or not target_section
+                )
+                and (
+                    prior_dynamic or dynamic_target or prior_currency == target_currency
+                )
+            ),
+            None,
         )
-        if conflicting_index is None and dynamic_target:
-            conflicting_index = next(
-                (
-                    prior_index
-                    for (account, _currency), prior_index in fixed_targets.items()
-                    if account == target_account_id
-                ),
-                None,
-            )
-        if conflicting_index is None and not dynamic_target:
-            conflicting_index = dynamic_targets.get(target_account_id)
         if conflicting_index is not None:
             raise ValueError(
                 f"Profile {profile_id} field {mapping_field} conflicts with "
                 f"mapping {conflicting_index}"
             )
-        if dynamic_target:
-            dynamic_targets[target_account_id] = index
-        else:
-            fixed_targets[(target_account_id, target_currency)] = index
+        validated_targets.append(
+            (
+                (target_account_id, target_section, target_currency),
+                dynamic_target,
+                index,
+            )
+        )
 
 
 def _valid_balance_currency(value: Any) -> bool:
@@ -1185,6 +1206,7 @@ def _import_pdf(
 
     pdf_settings = profile.get("pdf", {})
     columns = dict(pdf_settings.get("columns", {}))
+    columns.setdefault("statement_section", "Statement Section")
     columns["debit_values"] = pdf_settings.get("debit_values", [])
     columns["credit_values"] = pdf_settings.get("credit_values", [])
     columns["amount_default_sign"] = pdf_settings.get("amount_default_sign", "")
@@ -1358,7 +1380,7 @@ def _import_pdf(
 
 def _pdf_balance_observations(
     pdf: Any, pdf_settings: dict[str, Any]
-) -> dict[tuple[str, str], dict[str, list[Decimal]]]:
+) -> _PdfBalanceObservations:
     mappings = pdf_settings.get("balance_mappings")
     if not isinstance(mappings, list) or not mappings:
         return {}
@@ -1372,7 +1394,7 @@ def _pdf_balance_observations(
     transaction_tables = {"words": False, "tables": False}
     source_observations: dict[
         str,
-        dict[tuple[str, str], dict[str, list[_PdfBalanceCandidate]]],
+        dict[_PdfBalanceTarget, dict[str, list[_PdfBalanceCandidate]]],
     ] = {
         "words": {},
         "tables": {},
@@ -1421,7 +1443,12 @@ def _pdf_balance_observations(
                         )
                         if match is None:
                             continue
-                        target = _pdf_balance_target(mapping, accounts, match)
+                        target = _pdf_balance_target(
+                            mapping,
+                            accounts,
+                            match,
+                            current_section=current_section,
+                        )
                         target_candidates = observations.setdefault(
                             target, {"opening": [], "closing": []}
                         )
@@ -1523,8 +1550,8 @@ def _pdf_balance_line_sources(
 
 def _merge_pdf_balance_observations(
     sources: Any,
-) -> dict[tuple[str, str], dict[str, list[Decimal]]]:
-    merged: dict[tuple[str, str], dict[str, list[Decimal]]] = {}
+) -> _PdfBalanceObservations:
+    merged = _PdfBalanceObservations()
     for observations in sources:
         for target, balances in observations.items():
             target_balances = merged.setdefault(target, {"opening": [], "closing": []})
@@ -1541,16 +1568,18 @@ def _merge_pdf_balance_observations(
                     if missing > 0:
                         target_balances[kind].extend([value] * missing)
                         existing_counts[value] = source_counts[value]
+        for key, pages in observations.pages.items():
+            merged.pages.setdefault(key, set()).update(pages)
     return merged
 
 
 def _reduce_pdf_balance_observations(
     observations: dict[
-        tuple[str, str],
+        _PdfBalanceTarget,
         dict[str, list[_PdfBalanceCandidate]],
     ],
-) -> dict[tuple[str, str], dict[str, list[Decimal]]]:
-    reduced: dict[tuple[str, str], dict[str, list[Decimal]]] = {}
+) -> _PdfBalanceObservations:
+    reduced = _PdfBalanceObservations()
     for target, candidates in observations.items():
         openings = sorted(
             candidates["opening"],
@@ -1571,6 +1600,8 @@ def _reduce_pdf_balance_observations(
             and len({candidate.value for candidate in closings}) <= 1
         ):
             reduced[target] = raw
+            _record_pdf_balance_pages(reduced, target, "opening", openings)
+            _record_pdf_balance_pages(reduced, target, "closing", closings)
             continue
 
         page_openings = _single_pdf_balance_per_page(openings)
@@ -1581,6 +1612,8 @@ def _reduce_pdf_balance_observations(
             or max(page_closings) < max(page_openings)
         ):
             reduced[target] = raw
+            _record_pdf_balance_pages(reduced, target, "opening", openings)
+            _record_pdf_balance_pages(reduced, target, "closing", closings)
             continue
 
         first_opening_page = min(page_openings)
@@ -1609,13 +1642,32 @@ def _reduce_pdf_balance_observations(
                 break
             unmatched_closing_pages.remove(prior_page)
         if rollover_valid and not unmatched_closing_pages:
+            opening_value = page_openings[first_opening_page]
+            closing_value = page_closings[final_closing_page]
             reduced[target] = {
-                "opening": [page_openings[first_opening_page]],
-                "closing": [page_closings[final_closing_page]],
+                "opening": [opening_value],
+                "closing": [closing_value],
             }
+            reduced.pages[(target, "opening", opening_value)] = {first_opening_page}
+            reduced.pages[(target, "closing", closing_value)] = {final_closing_page}
         else:
             reduced[target] = raw
+            _record_pdf_balance_pages(reduced, target, "opening", openings)
+            _record_pdf_balance_pages(reduced, target, "closing", closings)
     return reduced
+
+
+def _record_pdf_balance_pages(
+    observations: _PdfBalanceObservations,
+    target: _PdfBalanceTarget,
+    kind: str,
+    candidates: list[_PdfBalanceCandidate],
+) -> None:
+    for candidate in candidates:
+        observations.pages.setdefault(
+            (target, kind, candidate.value),
+            set(),
+        ).add(candidate.page_number)
 
 
 def _single_pdf_balance_per_page(
@@ -1698,20 +1750,28 @@ def _pdf_balance_target(
     mapping: dict[str, Any],
     accounts: dict[str, Any],
     match: re.Match[str],
-) -> tuple[str, str]:
+    *,
+    current_section: str,
+) -> _PdfBalanceTarget:
     section = str(mapping.get("section", ""))
     if section:
         account = accounts.get(section, {})
         account_id = str(account.get("account_id", ""))
     else:
         account_id = str(mapping.get("account_id", ""))
+        current_account = accounts.get(current_section, {})
+        if (
+            current_section
+            and str(current_account.get("account_id", "")).strip() == account_id.strip()
+        ):
+            section = current_section
     currency_group = mapping.get("currency_group")
     currency = (
         match.group(str(currency_group))
         if isinstance(currency_group, str) and currency_group
         else str(mapping.get("currency", ""))
     )
-    return account_id.strip(), currency.strip().upper()
+    return account_id.strip(), section.strip(), currency.strip().upper()
 
 
 def _strict_pdf_balance(value: str | None, balance_sign: str | None = None) -> Decimal:
@@ -1730,19 +1790,28 @@ def _strict_pdf_balance(value: str | None, balance_sign: str | None = None) -> D
 
 def _attach_pdf_balances(
     rows: list[dict[str, str]],
-    observations: dict[tuple[str, str], dict[str, list[Decimal]]],
+    observations: _PdfBalanceObservations,
 ) -> None:
-    grouped_rows: dict[tuple[str, str], list[dict[str, str]]] = {}
+    grouped_rows: dict[_PdfBalanceTarget, list[dict[str, str]]] = {}
     for row in rows:
         grouped_rows.setdefault(
             (
                 row.get("account_id", ""),
+                row.get("statement_section", ""),
                 row.get("posted_currency", "").upper(),
             ),
             [],
         ).append(row)
     for target, balances in observations.items():
         target_rows = grouped_rows.get(target, [])
+        if not target_rows and not target[1]:
+            matching_groups = [
+                candidate_rows
+                for candidate_target, candidate_rows in grouped_rows.items()
+                if candidate_target[0] == target[0] and candidate_target[2] == target[2]
+            ]
+            if len(matching_groups) == 1:
+                target_rows = matching_groups[0]
         if not target_rows:
             continue
         for kind, target_row in (
@@ -1755,6 +1824,16 @@ def _attach_pdf_balances(
                     target_row.get("flags", ""),
                     f"statement_{kind}_balance_conflict",
                 )
+                pages = {
+                    page
+                    for value in values
+                    for page in observations.pages.get((target, kind, value), set())
+                }
+                for page in sorted(pages):
+                    target_row["flags"] = _append_flag(
+                        target_row.get("flags", ""),
+                        f"statement_{kind}_balance_conflict_page_{page}",
+                    )
                 continue
             if values:
                 target_row[f"statement_{kind}_balance"] = _format_decimal(
@@ -1831,6 +1910,7 @@ def _pdf_sectioned_word_source_rows(
                 current_account = {
                     "account_id": str(matched_account.get("account_id", "")),
                     "account": str(matched_account.get("account", "")),
+                    "statement_section": matched_section,
                     "currency": str(matched_account.get("currency", "")),
                     "currency_from_row": bool(
                         matched_account.get("currency_from_row", False)
@@ -1918,6 +1998,7 @@ def _pdf_sectioned_word_source_rows(
                         "Withdrawal": withdrawals[0] if withdrawals else "",
                         "Account ID": current_account["account_id"],
                         "Account": current_account["account"],
+                        "Statement Section": current_account["statement_section"],
                         "Currency": current_currency,
                     },
                     page_number,

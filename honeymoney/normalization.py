@@ -51,6 +51,7 @@ def _normalized_row(
     statement_closing_balance = _optional_decimal_value(
         source_row, columns.get("statement_closing_balance")
     )
+    statement_section = _value(source_row, columns.get("statement_section"))
 
     flags = ["uncategorized"]
     amount_reason = ""
@@ -92,6 +93,7 @@ def _normalized_row(
         "valuation_status": "",
         "statement_opening_balance": statement_opening_balance,
         "statement_closing_balance": statement_closing_balance,
+        "statement_section": statement_section,
         "merchant": merchant,
         "original_description": description,
         "category": "Unknown",
