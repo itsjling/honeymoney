@@ -1,12 +1,12 @@
 from __future__ import annotations
 
+import http.client
 import ipaddress
 import json
 import socket
 import threading
 import time
 import urllib.error
-import urllib.request
 from decimal import Decimal, InvalidOperation
 from io import BytesIO
 from typing import Any, Callable, Mapping, NamedTuple
@@ -41,41 +41,108 @@ class OllamaHttpResponse(NamedTuple):
 
 
 class _ValidatedEndpoint(NamedTuple):
-    pinned_url: str
+    pinned_urls: tuple[str, ...]
     host_header: str
 
 
-class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
-    def redirect_request(self, *args: Any, **kwargs: Any) -> None:
-        return None
+class _OllamaConnectFailure(OSError):
+    """A connection failure known to occur before request transmission."""
+
+    def __init__(self, cause: BaseException) -> None:
+        self.cause = cause
+        super().__init__(str(cause))
+
+
+class _RequestDeadline:
+    """Keep a request's wall-clock timeout active across all HTTP reads."""
+
+    def __init__(self, connection: http.client.HTTPConnection, timeout: float) -> None:
+        self._connection = connection
+        self._deadline = time.monotonic() + timeout
+        self._expired = threading.Event()
+        self._timer = threading.Timer(timeout, self._abort)
+        self._timer.daemon = True
+
+    def __enter__(self) -> "_RequestDeadline":
+        self._timer.start()
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        self._timer.cancel()
+
+    def enforce(self) -> None:
+        if self._expired.is_set():
+            self._abort()
+            raise TimeoutError("Ollama request timed out")
+        remaining = self._deadline - time.monotonic()
+        if remaining <= 0:
+            self._abort()
+            raise TimeoutError("Ollama request timed out")
+        sock = getattr(self._connection, "sock", None)
+        if sock is not None:
+            sock.settimeout(remaining)
+
+    def _abort(self) -> None:
+        self._expired.set()
+        sock = getattr(self._connection, "sock", None)
+        if sock is not None:
+            try:
+                sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            try:
+                sock.close()
+            except OSError:
+                pass
+        self._connection.close()
 
 
 def _default_sender(request: OllamaHttpRequest) -> OllamaHttpResponse:
-    opener = urllib.request.build_opener(
-        urllib.request.ProxyHandler({}),
-        _NoRedirectHandler(),
-    )
-    wire_request = urllib.request.Request(
-        request.url,
-        data=request.body,
-        headers=request.headers,
-        method=request.method,
+    parsed = urlsplit(request.url)
+    hostname = parsed.hostname
+    if hostname is None:
+        raise ValueError("Pinned Ollama endpoint is missing its host")
+    connection = http.client.HTTPConnection(
+        hostname,
+        parsed.port,
+        timeout=request.timeout,
     )
     try:
-        with opener.open(wire_request, timeout=request.timeout) as response:
+        with _RequestDeadline(connection, request.timeout) as deadline:
+            try:
+                connection.connect()
+            except OSError as error:
+                raise _OllamaConnectFailure(error) from error
+            deadline.enforce()
+
+            target = urlunsplit(("", "", parsed.path or "/", parsed.query, ""))
+            connection.request(
+                request.method,
+                target,
+                body=request.body,
+                headers=request.headers,
+            )
+            deadline.enforce()
+            try:
+                response = connection.getresponse()
+            except (OSError, ValueError):
+                deadline.enforce()
+                raise
+            deadline.enforce()
+            try:
+                body = response.read()
+            except (OSError, ValueError):
+                deadline.enforce()
+                raise
+            deadline.enforce()
             return OllamaHttpResponse(
                 int(response.status),
                 str(response.reason),
-                dict(response.headers.items()),
-                response.read(),
+                dict(response.getheaders()),
+                body,
             )
-    except urllib.error.HTTPError as error:
-        return OllamaHttpResponse(
-            error.code,
-            str(error.reason),
-            dict(error.headers.items()) if error.headers is not None else {},
-            error.read(),
-        )
+    finally:
+        connection.close()
 
 
 class LoopbackOllamaTransport:
@@ -94,12 +161,14 @@ class LoopbackOllamaTransport:
 
     def request(self, request: OllamaHttpRequest) -> bytes:
         current = request
+        deadline = time.monotonic() + request.timeout
         for redirect_count in range(self._max_redirects + 1):
             endpoint = validate_ollama_endpoint(current.url, resolver=self._resolver)
             headers = dict(current.headers)
             headers["Host"] = endpoint.host_header
-            pinned = current._replace(url=endpoint.pinned_url, headers=headers)
-            response = self._sender(pinned)
+            response = self._send_to_validated_address(
+                current, endpoint, headers, deadline
+            )
             if response.status not in _REDIRECT_STATUSES:
                 if response.status >= 400:
                     raise urllib.error.HTTPError(
@@ -129,13 +198,36 @@ class LoopbackOllamaTransport:
             )
         raise AssertionError("redirect loop accounting failed")
 
+    def _send_to_validated_address(
+        self,
+        request: OllamaHttpRequest,
+        endpoint: _ValidatedEndpoint,
+        headers: dict[str, str],
+        deadline: float,
+    ) -> OllamaHttpResponse:
+        for index, pinned_url in enumerate(endpoint.pinned_urls):
+            remaining_timeout = deadline - time.monotonic()
+            if remaining_timeout <= 0:
+                raise TimeoutError("Ollama request timed out before it could connect")
+            pinned = request._replace(
+                url=pinned_url,
+                headers=headers,
+                timeout=remaining_timeout,
+            )
+            try:
+                return self._sender(pinned)
+            except _OllamaConnectFailure:
+                if index == len(endpoint.pinned_urls) - 1:
+                    raise
+        raise AssertionError("validated address loop accounting failed")
+
 
 def validate_ollama_endpoint(
     url: str,
     *,
     resolver: Callable[..., list[tuple[Any, ...]]] | None = None,
 ) -> _ValidatedEndpoint:
-    """Validate and pin an HTTP Ollama URL to one resolved loopback address."""
+    """Validate an HTTP Ollama URL and pin it to resolved loopback addresses."""
     try:
         parsed = urlsplit(url)
         port = parsed.port
@@ -186,12 +278,14 @@ def validate_ollama_endpoint(
     if not addresses:
         raise ValueError("Ollama endpoint did not resolve to a usable loopback address")
 
-    selected = addresses[0]
-    pinned_host = f"[{selected}]" if ":" in selected else selected
-    pinned_netloc = f"{pinned_host}:{port}" if port is not None else pinned_host
-    path = parsed.path or "/"
-    pinned_url = urlunsplit(("http", pinned_netloc, path, parsed.query, ""))
-    return _ValidatedEndpoint(pinned_url, parsed.netloc)
+    pinned_urls = []
+    for address in addresses:
+        pinned_host = f"[{address}]" if ":" in address else address
+        pinned_netloc = f"{pinned_host}:{port}" if port is not None else pinned_host
+        pinned_urls.append(
+            urlunsplit(("http", pinned_netloc, parsed.path or "/", parsed.query, ""))
+        )
+    return _ValidatedEndpoint(tuple(pinned_urls), parsed.netloc)
 
 
 def _header(headers: Mapping[str, str], name: str) -> str:
