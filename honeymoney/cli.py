@@ -19,7 +19,7 @@ from datetime import date
 from decimal import Decimal
 from importlib import resources
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 from honeymoney import importers, normalization
 from honeymoney.categorization_memory import (
@@ -87,6 +87,13 @@ from honeymoney.persistence import (
     configured_generation_paths,
     persist_generation,
     recover_generation,
+)
+from honeymoney.rate_fetch import (
+    HKMA_API_ENDPOINT,
+    RateFetchError,
+    RateFetchRequest,
+    fetch_hkma_daily_rates,
+    prepare_hkma_fetch,
 )
 from honeymoney.rates import (
     HKMA_MAX_RATE_AGE_DAYS,
@@ -180,6 +187,17 @@ class _ReviewBatchPlan:
     patches: dict[str, dict[str, str]]
     applied_count: int
     unchanged_count: int
+
+
+@dataclass(frozen=True)
+class _RateApplicationResult:
+    rate_cache_path: Path
+    imported_count: int
+    cached_count: int
+    requested_count: int
+    resolved_count: int
+    valued_count: int
+    changed: bool
 
 
 class _ReviewBatchError(ValueError):
@@ -929,6 +947,8 @@ Commands:
   honeymoney learn [--yes]          Build exact rules from active reviews
   honeymoney valuation missing      Trace missing values to source evidence
   honeymoney rates import FILE      Import downloaded official HKMA daily rates
+  honeymoney rates fetch EUR --start DATE --end DATE --allow-network
+                                   Fetch public official HKMA daily rates
   honeymoney status [MONTH]        Show processed/categorized counts for a period
   honeymoney pending [MONTH]       List transactions that need review
   honeymoney duplicates            List unresolved exact-overlap count groups
@@ -1136,9 +1156,15 @@ def _valuation_command(argv: list[str]) -> int:
 
 
 def _rates_command(argv: list[str]) -> int:
-    if not argv or argv[0] != "import":
-        raise ValueError("honeymoney rates requires the `import` subcommand")
-    command_argv = argv[1:]
+    if not argv or argv[0] not in {"import", "fetch"}:
+        raise ValueError("honeymoney rates requires an `import` or `fetch` subcommand")
+    if argv[0] == "fetch":
+        return _rates_fetch_command(argv[1:])
+    return _rates_import_command(argv[1:])
+
+
+def _rates_import_command(argv: list[str]) -> int:
+    command_argv = argv
     parser = _command_parser(
         command_argv,
         prog="honeymoney rates import",
@@ -1150,11 +1176,76 @@ def _rates_command(argv: list[str]) -> int:
     args = parser.parse_args(command_argv)
 
     config = _load_config(args.config_path)
-    rate_cache_path = _configured_rate_cache_path(config)
     observations = parse_hkma_daily_document(
         Path(args.file).read_bytes(),
         base_currency=str(config.get("base_currency", "HKD")),
     )
+    result = _apply_rate_observations(config, observations)
+    return _emit_rate_result(
+        "rates.import",
+        args.json,
+        result,
+    )
+
+
+def _rates_fetch_command(argv: list[str]) -> int:
+    parser = _command_parser(
+        argv,
+        prog="honeymoney rates fetch",
+        description="Fetch public official HKMA daily rates after explicit consent.",
+    )
+    parser.add_argument("currencies", nargs="+")
+    parser.add_argument("--start", required=True)
+    parser.add_argument("--end", required=True)
+    parser.add_argument("--allow-network", action="store_true")
+    parser.add_argument("--config", dest="config_path")
+    parser.add_argument("--json", action="store_true")
+    args = parser.parse_args(argv)
+
+    config = _load_config(args.config_path)
+    _configured_rate_cache_path(config)
+    request = prepare_hkma_fetch(
+        args.currencies,
+        start=args.start,
+        end=args.end,
+        base_currency=str(config.get("base_currency", "HKD")),
+    )
+    output = sys.stderr if args.json else sys.stdout
+    print(
+        f"Provider: {HKMA_PROVIDER}\n"
+        f"Public endpoint: {HKMA_API_ENDPOINT}\n"
+        f"Requested range: {request.start} to {request.end}\n"
+        f"Currencies: {', '.join(request.currencies)}",
+        file=output,
+        flush=True,
+    )
+    if not args.allow_network:
+        if args.json or not sys.stdin.isatty():
+            raise RateFetchError(
+                "rate_fetch_opt_in_required",
+                "Non-interactive rate fetch requires --allow-network.",
+            )
+        answer = input("Fetch these public rates now? [y/N] ").strip().casefold()
+        if answer not in {"y", "yes"}:
+            print("Rate fetch cancelled.")
+            return 0
+
+    fetched = fetch_hkma_daily_rates(request)
+    result = _apply_rate_observations(config, fetched.observations)
+    return _emit_rate_result(
+        "rates.fetch",
+        args.json,
+        result,
+        request=request,
+        fetched_page_count=len(fetched.request_urls),
+    )
+
+
+def _apply_rate_observations(
+    config: dict[str, Any],
+    observations: Sequence[Mapping[str, object]],
+) -> _RateApplicationResult:
+    rate_cache_path = _configured_rate_cache_path(config)
     categorized_path = Path(config["paths"]["output"])
     if not categorized_path.exists():
         cache = merge_rate_cache(
@@ -1169,9 +1260,8 @@ def _rates_command(argv: list[str]) -> int:
                 rate_cache_path,
                 {rate_cache_path: cache_content},
             )
-        return _emit_rate_import_result(
-            args.json,
-            rate_cache_path,
+        return _RateApplicationResult(
+            rate_cache_path=rate_cache_path,
             imported_count=len(observations),
             cached_count=len(cache["observations"]),
             requested_count=0,
@@ -1275,9 +1365,8 @@ def _rates_command(argv: list[str]) -> int:
     valued_count = sum(
         row.get("valuation_source") == VALUATION_SOURCE_HKMA_RATE for row in rows
     )
-    return _emit_rate_import_result(
-        args.json,
-        rate_cache_path,
+    return _RateApplicationResult(
+        rate_cache_path=rate_cache_path,
         imported_count=len(observations),
         cached_count=len(cache["observations"]),
         requested_count=len(requested_keys),
@@ -1317,41 +1406,51 @@ def _requested_rate_pairs(
     )
 
 
-def _emit_rate_import_result(
+def _emit_rate_result(
+    command: str,
     json_output: bool,
-    rate_cache_path: Path,
+    result: _RateApplicationResult,
     *,
-    imported_count: int,
-    cached_count: int,
-    requested_count: int,
-    resolved_count: int,
-    valued_count: int,
-    changed: bool,
+    request: RateFetchRequest | None = None,
+    fetched_page_count: int | None = None,
 ) -> int:
-    data = {
+    data: dict[str, Any] = {
         "provider": HKMA_PROVIDER,
-        "imported_observation_count": imported_count,
-        "cached_observation_count": cached_count,
-        "requested_transaction_date_count": requested_count,
-        "resolved_transaction_date_count": resolved_count,
-        "valued_transaction_count": valued_count,
+        "imported_observation_count": result.imported_count,
+        "cached_observation_count": result.cached_count,
+        "requested_transaction_date_count": result.requested_count,
+        "resolved_transaction_date_count": result.resolved_count,
+        "valued_transaction_count": result.valued_count,
         "max_prior_age_days": HKMA_MAX_RATE_AGE_DAYS,
-        "changed": changed,
+        "changed": result.changed,
     }
+    if request is not None:
+        data.update(
+            {
+                "network_access": True,
+                "requested_currencies": list(request.currencies),
+                "requested_range": {
+                    "start": request.start,
+                    "end": request.end,
+                },
+                "fetched_page_count": fetched_page_count or 0,
+            }
+        )
     if json_output:
         _emit_json(
-            "rates.import",
+            command,
             "success",
             data=data,
-            artifacts={"rate_cache_json": str(rate_cache_path.resolve())},
+            artifacts={"rate_cache_json": str(result.rate_cache_path.resolve())},
         )
         return 0
+    action = "Fetched" if command == "rates.fetch" else "Imported"
     print(
-        f"Imported {imported_count} HKMA observations; "
-        f"{resolved_count}/{requested_count} transaction dates resolved; "
-        f"{valued_count} transaction(s) valued."
+        f"{action} {result.imported_count} HKMA observations; "
+        f"{result.resolved_count}/{result.requested_count} transaction dates "
+        f"resolved; {result.valued_count} transaction(s) valued."
     )
-    print(f"Rate cache: {rate_cache_path}")
+    print(f"Rate cache: {result.rate_cache_path}")
     return 0
 
 
@@ -4591,6 +4690,15 @@ def run() -> int:
             if isinstance(error, RateImportError)
             else None
         )
+        rate_fetch_details = (
+            {
+                "type": "RateFetchError",
+                "code": error.code,
+                "message": str(error),
+            }
+            if isinstance(error, RateFetchError)
+            else None
+        )
         if "--json" in argv:
             command = _json_error_command(argv)
             error_items = (
@@ -4601,6 +4709,7 @@ def run() -> int:
                     or duplicate_details
                     or manual_pair_details
                     or valuation_inspection_details
+                    or rate_fetch_details
                     or rate_import_details
                     or {
                         "type": type(error).__name__,
@@ -4662,6 +4771,8 @@ def _json_error_command(argv: list[str]) -> str:
         return "valuation.missing"
     if len(argv) > 1 and argv[:2] == ["rates", "import"]:
         return "rates.import"
+    if len(argv) > 1 and argv[:2] == ["rates", "fetch"]:
+        return "rates.fetch"
     return argv[0] if argv and not argv[0].startswith("-") else "run"
 
 

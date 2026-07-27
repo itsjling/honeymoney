@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Iterable, Mapping
+from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -87,6 +88,12 @@ class RateCache(TypedDict):
     resolutions: list[RateResolution]
 
 
+@dataclass(frozen=True)
+class ParsedRatePage:
+    observations: list[RateObservation]
+    record_dates: tuple[str, ...]
+
+
 def empty_rate_cache() -> RateCache:
     return {
         "schema_version": RATE_CACHE_SCHEMA_VERSION,
@@ -131,6 +138,19 @@ def parse_hkma_daily_document(
     *,
     base_currency: str,
 ) -> list[RateObservation]:
+    return parse_hkma_daily_page(
+        content,
+        base_currency=base_currency,
+        allow_empty=False,
+    ).observations
+
+
+def parse_hkma_daily_page(
+    content: bytes,
+    *,
+    base_currency: str,
+    allow_empty: bool,
+) -> ParsedRatePage:
     if base_currency.strip().upper() != HKMA_BASE_CURRENCY:
         raise RateImportError(
             "rate_direction_unsupported",
@@ -219,12 +239,19 @@ def parse_hkma_daily_document(
                     "import_provenance": [document_hash],
                 }
             )
-    if not observations:
+    if not observations and not allow_empty:
         raise RateImportError(
             "hkma_document_empty",
             "The HKMA daily-rate document has no supported rates.",
         )
-    return sorted(observations, key=_observation_key)
+    return ParsedRatePage(
+        observations=sorted(observations, key=_observation_key),
+        record_dates=tuple(
+            str(record["end_of_day"])
+            for record in records
+            if isinstance(record, Mapping)
+        ),
+    )
 
 
 def merge_rate_cache(

@@ -31,6 +31,12 @@ CLI loads identity state without recovery for this command.
 date resolution. It performs no network or ledger I/O. The CLI owns local file
 reads and recoverable publication.
 
+`rate_fetch.py` owns the sole public HTTPS boundary. It builds only the fixed
+HKMA query, makes direct requests without redirects or proxy routing, limits
+response size and time, and collects complete checked pages. It has no ledger
+or statement API. The CLI asks for consent before calling it and opens ledger
+state only after it returns.
+
 These boundaries preserve the identity rule: display source fields never choose
 identity ownership. The identity resolver remains the only owner of source and
 record resolution.
