@@ -1,6 +1,6 @@
 # ADR 0003: Canonical ledger identity for exact statement overlaps
 
-- Status: Accepted by the implementation request for GitHub #32
+- Status: Accepted by the implementation requests for GitHub #32 and #33
 - Date: 2026-07-25
 - Issue: GitHub #32
 - Narrows: ADR 0001 for the public canonical ledger and ADR 0002 for canonical
@@ -88,11 +88,19 @@ transaction_id,source_id,source_namespace_id,source_revision,source_record_id,da
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "namespace_key": "ovns_<64 lowercase hex>",
   "groups": [
     {
-      "group_id": "ovg_<64 lowercase hex>",
+      "memberships": [
+        {
+          "group_id": "ovr_<64 lowercase hex>",
+          "membership_digest": "ovm_<64 lowercase hex>",
+          "overlap_group_id": "ovg_<64 lowercase hex>",
+          "resolution": "unresolved"
+        }
+      ],
+      "overlap_group_id": "ovg_<64 lowercase hex>",
       "record_fingerprint": "fp_<64 lowercase hex>",
       "slots": [
         {
@@ -108,9 +116,18 @@ transaction_id,source_id,source_namespace_id,source_revision,source_record_id,da
 
 The namespace key is generated once with 256 bits from the operating-system
 random source. It is hidden and never appears in diagnostics. Groups sort by
-group ID. Slots sort by positive integer slot and remain as active or retired
-tombstones. The manifest stores no paths, source display, revision, record
-value, correction, or statement text.
+`overlap_group_id`. Membership records sort by `membership_digest` and have
+exactly `group_id`, `membership_digest`, `overlap_group_id`, and `resolution`,
+in canonical JSON key order. `resolution` is `unresolved`, `same-event`, or
+`keep-all`; there is no decision revision field. Slots sort by positive integer
+slot and remain as active or retired tombstones. The manifest stores no paths,
+source display, source ID, revision, record value, correction patch, or
+statement text.
+
+Schema 1 remains a valid migration input. A read checks its exact bytes, builds
+schema 2 in memory from active hidden evidence, and leaves disk unchanged. The
+next ledger generation publishes schema 2 through the recoverable generation
+boundary.
 
 Missing one hidden file from a migrated workspace fails closed. Neither hidden
 file is reconstructed from canonical rows.
@@ -176,6 +193,33 @@ The public IDs do not expose an unsalted equality hash of financial facts.
 Validation recomputes both IDs and rejects collisions with source or canonical
 IDs.
 
+For duplicate review, the keyed membership digest frames these current inputs:
+
+1. sorted active `(source_id, source_record_id)` pairs;
+2. sorted `(source_id, occurrence_count)` pairs;
+3. the keep-all canonical slot IDs `1..M`; and
+4. the ambiguous tail slot IDs `K+1..M`.
+
+Each section starts with its literal ASCII tag and an unsigned 64-bit
+big-endian item count. Text values are separate ASCII components under the
+same HMAC framing. The domain is `duplicate-membership-v1`; the result is
+`"ovm_" + hmac_sha256(...)`. Source IDs take part only as HMAC input and never
+appear in the manifest.
+
+The public review group ID is:
+
+```text
+"ovr_" + hmac_sha256(namespace_key,
+  frame("duplicate-review-group-v1",
+        overlap_group_id, membership_digest))
+```
+
+With the fixed namespace, overlap group, and synthetic membership in
+`tests/test_overlap.py`, the digest is
+`ovm_714ca8c7e9462c590f454d32ccd434805c82f84f66e5caab900325dd3c3822a9`
+and the review group is
+`ovr_b7c20c5ed9091bea3b85c91b57935a7fac92e5ba73b3ae24fcb92d32a3524596`.
+
 ## Multiset rule
 
 For every accepted record fingerprint, count active occurrences per
@@ -210,6 +254,11 @@ statement period.
   `pooled_equal_count` rows.
 - Different source counts produce `M` `ambiguous_count_mismatch` rows.
 
+For a count mismatch, let `K` be the second-largest source count: the largest
+multiplicity supported by at least two sources. `honeymoney duplicates` lists
+only unresolved count mismatches. `keep-all` retains `M`. `same-event` retains
+`K` and never fewer. Equal-count groups never enter this list.
+
 For slot `k`, the support count is the number of sources whose count is at
 least `k`. This identifies overlap and unmatched cardinality without selecting
 which raw occurrence is unmatched.
@@ -221,6 +270,14 @@ They never expose or persist an invented pairwise association.
 Count mismatch forces review with the idempotent
 `overlap_count_ambiguous` flag. Equal pooled counts do not force review because
 their supported multiplicity is exact.
+
+Every observed mismatch membership gets one exact manifest membership record.
+Resolving it changes only `resolution`. Repeating the same resolution changes
+no bytes. A different resolution for the same active membership fails. If
+replacement, reset, or import changes any bound membership input, the old
+record remains a tombstone, its decision does not apply, and the new membership
+gets a new public group ID with `unresolved` review state. Commands distinguish
+unknown and stale IDs with stable error codes.
 
 ## Mutable state
 
@@ -236,6 +293,14 @@ Source-ID corrections from the pre-canonical ledger remain migration aliases.
 Canonical corrections take precedence. Retired-slot corrections remain so an
 exact slot recurrence restores the reviewed decision.
 
+`keep-all` leaves corrections unchanged. `same-event` removes tail corrections
+only when the retained state proves that no reviewed choice or flow history
+will be lost. At floor `K=1`, one compatible tail correction may move to the
+sole retained slot when that slot has no conflict. At `K>1`, no correction
+moves between abstract slots. Non-overlap `needs_review`, reason, flag, note,
+category, flow, transfer, reconciliation, owner, payment, and confidence state
+is protected. Any doubt fails before persistence.
+
 Reset removes corrections owned only by reset source occurrences. It removes a
 canonical correction only when every active source supporting its group belongs
 to the reset batch. A remaining source keeps the canonical decision.
@@ -247,8 +312,9 @@ report totals run against canonical rows.
 ## Persistence and migration
 
 The source-occurrence CSV, identity manifest, overlap manifest, canonical
-ledger, review CSV, corrections, and import report publish in one recoverable
-generation. `categorized.csv` remains the generation commit point.
+ledger, review CSV, and changed corrections publish in one recoverable
+generation. `categorized.csv` remains the generation commit point. Duplicate
+resolution does not rewrite the last import report.
 
 Replacement and reset retain normalized evidence for retired identity records
 in the hidden source-occurrence CSV. The identity manifest remains the source
@@ -276,9 +342,14 @@ ledger occurrences. Privacy-safe overlap diagnostics may include:
 - structural source, occurrence, slot, and ambiguity counts; and
 - sorted pools of opaque source occurrence transaction IDs.
 
-They never include the namespace key, record fingerprint, source ID, source
-revision, path, source display, allocation locator, transaction values, or
-statement text.
+Operational warnings never include the namespace key, record fingerprint,
+source ID, source revision, path, source display, allocation locator,
+transaction values, or statement text. The explicit local `duplicates` list
+may show bounded account ID, account, institution, date, merchant, posted
+amount and currency, safe source basename and locator, opaque source occurrence
+IDs, and the separate pooled canonical slot IDs. It never pairs a source
+occurrence with a canonical slot. It never shows raw descriptions, paths, the
+private namespace, or source IDs.
 
 ## Consequences
 

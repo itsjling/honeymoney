@@ -21,7 +21,7 @@ from honeymoney.identity import (
 )
 from honeymoney.schema import CATEGORIZED_COLUMNS
 
-OVERLAP_MANIFEST_SCHEMA_VERSION = 1
+OVERLAP_MANIFEST_SCHEMA_VERSION = 2
 OVERLAP_MANIFEST_NAME = ".honeymoney-overlap-manifest.json"
 SOURCE_OCCURRENCES_NAME = ".honeymoney-source-occurrences.csv"
 
@@ -37,6 +37,7 @@ PROVENANCE_STATUSES = {
 }
 
 OVERLAP_AMBIGUITY_FLAG = "overlap_count_ambiguous"
+OVERLAP_PRIOR_REVIEW_FLAG = "overlap_count_prior_review"
 OVERLAP_AMBIGUITY_REASON = (
     "Exact overlap has different source occurrence counts; provenance remains pooled"
 )
@@ -47,6 +48,8 @@ OVERLAP_HISTORY_REASON = (
 
 _NAMESPACE_RE = re.compile(r"^ovns_[0-9a-f]{64}$")
 _GROUP_RE = re.compile(r"^ovg_[0-9a-f]{64}$")
+_REVIEW_GROUP_RE = re.compile(r"^ovr_[0-9a-f]{64}$")
+_MEMBERSHIP_RE = re.compile(r"^ovm_[0-9a-f]{64}$")
 _TRANSACTION_RE = re.compile(r"^txn_[0-9a-f]{32}$")
 _FINGERPRINT_RE = re.compile(r"^fp_[0-9a-f]{64}$")
 
@@ -126,6 +129,27 @@ class CorrectionProjection:
     ambiguous_transaction_ids: tuple[str, ...]
 
 
+@dataclass(frozen=True)
+class DuplicateResolution:
+    """One validated duplicate decision and its canonical result."""
+
+    result: CanonicalizationResult
+    removed_correction_ids: tuple[str, ...]
+    correction_updates: dict[str, dict[str, str]]
+    idempotent: bool
+    old_group_canonical_count: int
+    new_group_canonical_count: int
+    remaining_unresolved_count: int
+
+
+class DuplicateResolutionError(ValueError):
+    """Stable duplicate-resolution failure safe for CLI output."""
+
+    def __init__(self, code: str) -> None:
+        self.code = code
+        super().__init__(code)
+
+
 def empty_overlap_manifest(namespace_key: str) -> dict[str, Any]:
     """Return an empty manifest for one persisted workspace namespace."""
     if _NAMESPACE_RE.fullmatch(namespace_key) is None:
@@ -160,8 +184,21 @@ def parse_overlap_manifest(document: str) -> dict[str, Any]:
         raise ValueError("overlap_manifest_invalid") from error
     if not isinstance(value, dict):
         raise ValueError("overlap_manifest_invalid")
-    _validate_manifest(value)
-    if overlap_manifest_document(value) != document:
+    if value.get("schema_version") == 1:
+        _validate_v1_manifest(value)
+        canonical = (
+            json.dumps(
+                value,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+            + "\n"
+        )
+    else:
+        _validate_manifest(value)
+        canonical = overlap_manifest_document(value)
+    if canonical != document:
         raise ValueError("overlap_manifest_invalid")
     return value
 
@@ -219,7 +256,7 @@ def validate_overlap_agreement(
         group_fingerprint = next(
             group["record_fingerprint"]
             for group in manifest["groups"]
-            if group["group_id"] == actual["canonical_group_id"]
+            if group["overlap_group_id"] == actual["canonical_group_id"]
         )
         if record_fingerprint(actual) != group_fingerprint:
             raise ValueError("overlap_manifest_invalid")
@@ -299,14 +336,185 @@ def clear_history_ambiguity(
         row["reason"] = _remove_reason(row.get("reason", ""), OVERLAP_HISTORY_REASON)
 
 
-def enforce_overlap_review(rows: list[dict[str, str]]) -> None:
+def enforce_overlap_review(
+    rows: list[dict[str, str]],
+    result: CanonicalizationResult | None = None,
+) -> None:
     """Reapply protected count/history review after mutable processing."""
+    resolved_group_ids = {
+        diagnostic["canonical_group_id"]
+        for diagnostic in (result.diagnostic["groups"] if result is not None else ())
+        if diagnostic["decision"] is not None
+    }
     for row in rows:
         if not row.get("canonical_group_id"):
             _clear_duplicate_state(row)
-        _apply_overlap_review(row, row.get("provenance_status", ""))
+        _apply_overlap_review(
+            row,
+            row.get("provenance_status", ""),
+            resolved=row.get("canonical_group_id") in resolved_group_ids,
+        )
         if OVERLAP_HISTORY_FLAG in row.get("flags", "").split(";"):
             row["needs_review"] = "true"
+
+
+def release_overlap_review_ownership(rows: list[dict[str, str]]) -> None:
+    """Restore review state from before overlap review for categorization."""
+    for row in rows:
+        if OVERLAP_AMBIGUITY_FLAG in row.get("flags", "").split(";"):
+            _apply_overlap_review(
+                row,
+                row.get("provenance_status", ""),
+                resolved=True,
+            )
+
+
+def list_duplicate_groups(
+    result: CanonicalizationResult,
+    source_occurrences: list[Mapping[str, Any]] | tuple[Mapping[str, Any], ...],
+) -> list[dict[str, Any]]:
+    """Return bounded local evidence for unresolved count mismatches."""
+    by_id = {
+        str(row.get("transaction_id", "")): row
+        for row in source_occurrences
+        if row.get("transaction_id")
+    }
+    groups: list[dict[str, Any]] = []
+    for diagnostic in result.diagnostic["groups"]:
+        if (
+            diagnostic["provenance_status"] != AMBIGUOUS_COUNT_STATUS
+            or diagnostic["decision"] is not None
+        ):
+            continue
+        occurrence_ids = sorted(
+            str(identifier)
+            for pool in diagnostic["source_occurrence_pools"]
+            for identifier in pool
+        )
+        occurrences = []
+        for identifier in occurrence_ids:
+            row = by_id[identifier]
+            occurrences.append(
+                {
+                    "occurrence_id": identifier,
+                    "account_id": _bounded(row.get("account_id", "")),
+                    "account": _bounded(row.get("account", "")),
+                    "institution": _bounded(row.get("institution", "")),
+                    "date": _bounded(
+                        row.get("date")
+                        or row.get("transaction_date")
+                        or row.get("posting_date")
+                        or ""
+                    ),
+                    "merchant": _bounded(row.get("merchant", "")),
+                    "amount": _bounded(
+                        row.get("posted_amount") or row.get("amount_hkd", "")
+                    ),
+                    "currency": _bounded(
+                        row.get("posted_currency")
+                        or ("HKD" if row.get("amount_hkd") else "")
+                    ),
+                    "source_display": _safe_source_display(row.get("source_file", "")),
+                    "source_page": _bounded(row.get("source_page", "")),
+                    "source_row": _bounded(row.get("source_row", "")),
+                }
+            )
+        groups.append(
+            {
+                "group_id": diagnostic["review_group_id"],
+                "match_basis": "exact_normalized_financial_identity",
+                "source_counts": list(diagnostic["source_counts"]),
+                "keep_all_count": diagnostic["keep_all_count"],
+                "same_event_count": diagnostic["same_event_count"],
+                "canonical_occurrence_ids": sorted(
+                    diagnostic["canonical_transaction_ids"]
+                ),
+                "occurrences": occurrences,
+            }
+        )
+    return groups
+
+
+def resolve_duplicate_group(
+    source_occurrences: list[Mapping[str, Any]] | tuple[Mapping[str, Any], ...],
+    prior_canonical_rows: list[Mapping[str, Any]] | tuple[Mapping[str, Any], ...],
+    prior_manifest: Mapping[str, Any],
+    review_group_id: str,
+    choice: str,
+    corrections: Mapping[str, Mapping[str, str]],
+) -> DuplicateResolution:
+    """Apply one decision to the exact current membership or fail closed."""
+    if choice not in {"same-event", "keep-all"}:
+        raise DuplicateResolutionError("duplicate_choice_invalid")
+    current = canonicalize_overlaps(
+        source_occurrences, prior_canonical_rows, prior_manifest
+    )
+    diagnostic = next(
+        (
+            item
+            for item in current.diagnostic["groups"]
+            if item["review_group_id"] == review_group_id
+            and item["provenance_status"] == AMBIGUOUS_COUNT_STATUS
+        ),
+        None,
+    )
+    if diagnostic is None:
+        if any(
+            membership["group_id"] == review_group_id
+            for group in current.manifest["groups"]
+            for membership in group["memberships"]
+        ):
+            raise DuplicateResolutionError("duplicate_group_stale")
+        raise DuplicateResolutionError("duplicate_group_unknown")
+    existing_resolution = diagnostic["decision"]
+    if existing_resolution is not None:
+        if existing_resolution != choice:
+            raise DuplicateResolutionError("duplicate_resolution_conflict")
+        count = len(diagnostic["canonical_transaction_ids"])
+        return DuplicateResolution(
+            current,
+            (),
+            {},
+            True,
+            count,
+            count,
+            current.ambiguous_group_count,
+        )
+
+    removed_correction_ids: tuple[str, ...] = ()
+    correction_updates: dict[str, dict[str, str]] = {}
+    if choice == "same-event":
+        removed_correction_ids, correction_updates = _safe_tail_corrections(
+            current, diagnostic, corrections
+        )
+
+    manifest = copy.deepcopy(current.manifest)
+    group = next(
+        item
+        for item in manifest["groups"]
+        if item["overlap_group_id"] == diagnostic["canonical_group_id"]
+    )
+    membership = next(
+        item for item in group["memberships"] if item["group_id"] == review_group_id
+    )
+    membership["resolution"] = choice
+    resolved = canonicalize_overlaps(source_occurrences, current.rows, manifest)
+    for row in resolved.rows:
+        correction = corrections.get(row["transaction_id"])
+        if correction is not None and "needs_review" in correction:
+            row["needs_review"] = str(correction["needs_review"]).casefold()
+    return DuplicateResolution(
+        resolved,
+        removed_correction_ids,
+        correction_updates,
+        False,
+        len(diagnostic["canonical_transaction_ids"]),
+        sum(
+            row.get("canonical_group_id") == diagnostic["canonical_group_id"]
+            for row in resolved.rows
+        ),
+        resolved.ambiguous_group_count,
+    )
 
 
 def canonicalize_overlaps(
@@ -345,6 +553,7 @@ def canonicalize_overlaps(
     canonical_rows: list[dict[str, str]] = []
     diagnostics: list[dict[str, Any]] = []
     ambiguous_groups = 0
+    changed_review_group_ids: set[str] = set()
     source_transaction_ids = {
         str(row.get("transaction_id", ""))
         for row in occurrences
@@ -363,24 +572,78 @@ def canonicalize_overlaps(
         bucket = buckets.get(fingerprint, [])
         source_pools = _source_pools(bucket)
         source_counts = sorted(len(pool) for pool in source_pools)
-        active_count = max(source_counts, default=0)
+        keep_all_count = max(source_counts, default=0)
+        same_event_count = (
+            source_counts[-2] if len(source_counts) >= 2 else keep_all_count
+        )
         prior_group = prior_groups.get(fingerprint)
         group_id = (
-            str(prior_group["group_id"])
+            str(prior_group["overlap_group_id"])
             if prior_group is not None
             else _group_id(namespace_key, fingerprint)
         )
         prior_slots = {
             int(slot["slot"]): slot for slot in (prior_group or {}).get("slots", [])
         }
-        slot_count = max(active_count, max(prior_slots, default=0))
-        slots = []
-        for slot_number in range(1, slot_count + 1):
-            identifier = (
+        slot_count = max(keep_all_count, max(prior_slots, default=0))
+        slot_identifiers = [
+            (
                 str(prior_slots[slot_number]["transaction_id"])
                 if slot_number in prior_slots
                 else _canonical_transaction_id(namespace_key, group_id, slot_number)
             )
+            for slot_number in range(1, slot_count + 1)
+        ]
+        membership_digest = _membership_digest(
+            namespace_key,
+            bucket,
+            source_pools,
+            slot_identifiers[:keep_all_count],
+            slot_identifiers[same_event_count:keep_all_count],
+        )
+        review_group_id = _review_group_id(namespace_key, group_id, membership_digest)
+        memberships = copy.deepcopy((prior_group or {}).get("memberships", []))
+        status = _provenance_status(source_counts)
+        matching_membership = next(
+            (
+                membership
+                for membership in memberships
+                if membership["membership_digest"] == membership_digest
+            ),
+            None,
+        )
+        if status == AMBIGUOUS_COUNT_STATUS:
+            if (
+                matching_membership is None
+                or matching_membership["resolution"] == "unresolved"
+            ) and (
+                _prior_group_has_resolved_review(prior_slots, prior_by_id)
+                or (
+                    matching_membership is None
+                    and _prior_group_has_resolved_membership(prior_group)
+                )
+            ):
+                changed_review_group_ids.add(review_group_id)
+            if matching_membership is None:
+                matching_membership = {
+                    "overlap_group_id": group_id,
+                    "group_id": review_group_id,
+                    "membership_digest": membership_digest,
+                    "resolution": "unresolved",
+                }
+                memberships.append(matching_membership)
+                memberships.sort(key=lambda item: item["membership_digest"])
+        decision_choice = (
+            str(matching_membership["resolution"])
+            if matching_membership is not None
+            and matching_membership["resolution"] != "unresolved"
+            else None
+        )
+        active_count = (
+            same_event_count if decision_choice == "same-event" else keep_all_count
+        )
+        slots = []
+        for slot_number, identifier in enumerate(slot_identifiers, start=1):
             slots.append(
                 {
                     "slot": slot_number,
@@ -390,24 +653,29 @@ def canonicalize_overlaps(
             )
         next_groups.append(
             {
-                "group_id": group_id,
+                "overlap_group_id": group_id,
                 "record_fingerprint": fingerprint,
+                "memberships": memberships,
                 "slots": slots,
             }
         )
         if not bucket:
             continue
 
-        status = _provenance_status(source_counts)
-        if status == AMBIGUOUS_COUNT_STATUS:
+        if status == AMBIGUOUS_COUNT_STATUS and decision_choice is None:
             ambiguous_groups += 1
         diagnostic = {
             "group_id": group_id,
+            "canonical_group_id": group_id,
+            "review_group_id": review_group_id,
             "canonical_transaction_ids": [
                 slot["transaction_id"] for slot in slots if slot["state"] == "active"
             ],
             "provenance_status": status,
+            "decision": decision_choice,
             "source_counts": source_counts,
+            "keep_all_count": keep_all_count,
+            "same_event_count": same_event_count,
             "slot_support_counts": [
                 sum(count >= slot for count in source_counts)
                 for slot in range(1, active_count + 1)
@@ -440,12 +708,12 @@ def canonicalize_overlaps(
             )
             _clear_source_provenance(row)
             _clear_duplicate_state(row)
-            _apply_overlap_review(row, status)
+            _apply_overlap_review(row, status, resolved=decision_choice is not None)
             if history_ambiguous and prior is None:
                 apply_history_ambiguity([row], {identifier})
             canonical_rows.append(row)
 
-    next_groups.sort(key=lambda group: group["group_id"])
+    next_groups.sort(key=lambda group: group["overlap_group_id"])
     canonical_rows.sort(
         key=lambda row: (
             row.get("date", ""),
@@ -471,6 +739,13 @@ def canonicalize_overlaps(
     diagnostic = {
         "group_count": len(diagnostics),
         "ambiguous_group_count": ambiguous_groups,
+        "warnings": [
+            {
+                "code": "duplicate_membership_changed",
+                "group_id": review_group_id,
+            }
+            for review_group_id in sorted(changed_review_group_ids)
+        ],
         "source_occurrence_count": len(occurrences),
         "canonical_occurrence_count": len(canonical_rows),
         "consolidated_occurrence_count": len(occurrences) - len(canonical_rows),
@@ -505,6 +780,31 @@ def _source_pools(
     ]
     pools.sort(key=lambda pool: str(pool[0]["transaction_id"]))
     return pools
+
+
+def _prior_group_has_resolved_review(
+    prior_slots: Mapping[int, Mapping[str, Any]],
+    prior_rows: Mapping[str, Mapping[str, Any]],
+) -> bool:
+    for slot in prior_slots.values():
+        if slot.get("state") != "active":
+            continue
+        row = prior_rows.get(str(slot.get("transaction_id", "")))
+        if row is None or row.get("provenance_status") != AMBIGUOUS_COUNT_STATUS:
+            continue
+        flags = set(filter(None, str(row.get("flags", "")).split(";")))
+        if OVERLAP_AMBIGUITY_FLAG not in flags:
+            return True
+    return False
+
+
+def _prior_group_has_resolved_membership(
+    prior_group: Mapping[str, Any] | None,
+) -> bool:
+    return any(
+        membership.get("resolution") in {"same-event", "keep-all"}
+        for membership in (prior_group or {}).get("memberships", [])
+    )
 
 
 def _provenance_status(source_counts: list[int]) -> str:
@@ -626,17 +926,27 @@ def _clear_duplicate_state(row: dict[str, str]) -> None:
     row["reason"] = "; ".join(reasons)
 
 
-def _apply_overlap_review(row: dict[str, str], status: str) -> None:
+def _apply_overlap_review(
+    row: dict[str, str], status: str, *, resolved: bool = False
+) -> None:
     flags = [item for item in row.get("flags", "").split(";") if item]
     reason = _remove_reason(row.get("reason", ""), OVERLAP_AMBIGUITY_REASON)
     had_ambiguity = OVERLAP_AMBIGUITY_FLAG in flags
+    prior_review = OVERLAP_PRIOR_REVIEW_FLAG in flags
     flags = [item for item in flags if item != OVERLAP_AMBIGUITY_FLAG]
-    if status == AMBIGUOUS_COUNT_STATUS:
+    flags = [item for item in flags if item != OVERLAP_PRIOR_REVIEW_FLAG]
+    if status == AMBIGUOUS_COUNT_STATUS and not resolved:
+        if not had_ambiguity and row.get("needs_review") == "true":
+            flags.append(OVERLAP_PRIOR_REVIEW_FLAG)
+        elif prior_review:
+            flags.append(OVERLAP_PRIOR_REVIEW_FLAG)
         flags.append(OVERLAP_AMBIGUITY_FLAG)
         reason = _append_reason(reason, OVERLAP_AMBIGUITY_REASON)
         row["needs_review"] = "true"
-    elif had_ambiguity and not flags and not reason:
-        row["needs_review"] = "false"
+    elif had_ambiguity and "manual_correction" not in flags:
+        row["needs_review"] = (
+            "true" if prior_review or OVERLAP_HISTORY_FLAG in flags else "false"
+        )
     row["flags"] = ";".join(dict.fromkeys(flags))
     row["reason"] = reason
 
@@ -695,6 +1005,58 @@ def _canonical_transaction_id(namespace_key: str, group_id: str, slot: int) -> s
     )
 
 
+def _membership_digest(
+    namespace_key: str,
+    bucket: list[Mapping[str, Any]],
+    source_pools: list[list[Mapping[str, Any]]],
+    canonical_slot_ids: list[str],
+    ambiguous_tail_ids: list[str],
+) -> str:
+    members = sorted(
+        (
+            str(row["source_id"]),
+            str(row["source_record_id"]),
+        )
+        for row in bucket
+    )
+    source_counts = sorted(
+        (str(pool[0]["source_id"]), len(pool)) for pool in source_pools if pool
+    )
+    components = [
+        b"active-source-record-membership-v1",
+        struct.pack(">Q", len(members)),
+    ]
+    for source_id, source_record_id in members:
+        components.extend((source_id.encode("ascii"), source_record_id.encode("ascii")))
+    components.extend((b"per-source-counts-v1", struct.pack(">Q", len(source_counts))))
+    for source_id, count in source_counts:
+        components.extend((source_id.encode("ascii"), struct.pack(">Q", count)))
+    components.extend(
+        (b"active-canonical-slots-v1", struct.pack(">Q", len(canonical_slot_ids)))
+    )
+    components.extend(identifier.encode("ascii") for identifier in canonical_slot_ids)
+    components.extend(
+        (b"ambiguous-tail-slots-v1", struct.pack(">Q", len(ambiguous_tail_ids)))
+    )
+    components.extend(identifier.encode("ascii") for identifier in ambiguous_tail_ids)
+    return "ovm_" + _keyed_digest(
+        namespace_key,
+        "duplicate-membership-v1",
+        *components,
+    )
+
+
+def _review_group_id(
+    namespace_key: str, overlap_group_id: str, membership_digest: str
+) -> str:
+    return "ovr_" + _keyed_digest(
+        namespace_key,
+        "duplicate-review-group-v1",
+        overlap_group_id.encode("ascii"),
+        membership_digest.encode("ascii"),
+    )
+
+
 def _keyed_digest(namespace_key: str, domain: str, *components: bytes) -> str:
     if _NAMESPACE_RE.fullmatch(namespace_key) is None:
         raise ValueError("overlap_manifest_invalid")
@@ -712,6 +1074,22 @@ def _keyed_digest(namespace_key: str, domain: str, *components: bytes) -> str:
 
 def _validated_manifest_copy(manifest: Mapping[str, Any]) -> dict[str, Any]:
     copied = copy.deepcopy(dict(manifest))
+    if copied.get("schema_version") == 1:
+        _validate_v1_manifest(copied)
+        namespace_key = copied["namespace_key"]
+        copied = {
+            "schema_version": OVERLAP_MANIFEST_SCHEMA_VERSION,
+            "namespace_key": namespace_key,
+            "groups": [
+                {
+                    "overlap_group_id": group["group_id"],
+                    "record_fingerprint": group["record_fingerprint"],
+                    "memberships": [],
+                    "slots": group["slots"],
+                }
+                for group in copied["groups"]
+            ],
+        }
     _validate_manifest(copied)
     return copied
 
@@ -733,7 +1111,102 @@ def _validate_manifest(manifest: Mapping[str, Any]) -> None:
     prior_group = ""
     seen_transactions: set[str] = set()
     seen_fingerprints: set[str] = set()
+    seen_review_groups: set[str] = set()
     for group in groups:
+        if not isinstance(group, dict) or set(group) != {
+            "overlap_group_id",
+            "record_fingerprint",
+            "memberships",
+            "slots",
+        }:
+            raise ValueError("overlap_manifest_invalid")
+        overlap_group_id = group.get("overlap_group_id")
+        fingerprint = group.get("record_fingerprint")
+        if (
+            not isinstance(overlap_group_id, str)
+            or _GROUP_RE.fullmatch(overlap_group_id) is None
+            or not isinstance(fingerprint, str)
+            or _FINGERPRINT_RE.fullmatch(fingerprint) is None
+            or overlap_group_id != _group_id(namespace_key, fingerprint)
+            or overlap_group_id <= prior_group
+            or fingerprint in seen_fingerprints
+        ):
+            raise ValueError("overlap_manifest_invalid")
+        prior_group = overlap_group_id
+        seen_fingerprints.add(fingerprint)
+        memberships = group.get("memberships")
+        if not isinstance(memberships, list):
+            raise ValueError("overlap_manifest_invalid")
+        prior_membership = ""
+        for membership in memberships:
+            if (
+                not isinstance(membership, dict)
+                or set(membership)
+                != {
+                    "overlap_group_id",
+                    "group_id",
+                    "membership_digest",
+                    "resolution",
+                }
+                or membership.get("overlap_group_id") != overlap_group_id
+                or membership.get("resolution")
+                not in {"unresolved", "same-event", "keep-all"}
+                or not isinstance(membership.get("membership_digest"), str)
+                or _MEMBERSHIP_RE.fullmatch(membership["membership_digest"]) is None
+                or membership["membership_digest"] <= prior_membership
+                or not isinstance(membership.get("group_id"), str)
+                or _REVIEW_GROUP_RE.fullmatch(membership["group_id"]) is None
+                or membership["group_id"] in seen_review_groups
+                or membership.get("group_id")
+                != _review_group_id(
+                    namespace_key,
+                    overlap_group_id,
+                    membership["membership_digest"],
+                )
+            ):
+                raise ValueError("overlap_manifest_invalid")
+            prior_membership = membership["membership_digest"]
+            seen_review_groups.add(membership["group_id"])
+        slots = group.get("slots")
+        if not isinstance(slots, list):
+            raise ValueError("overlap_manifest_invalid")
+        for expected_slot, slot in enumerate(slots, start=1):
+            if (
+                not isinstance(slot, dict)
+                or set(slot) != {"slot", "transaction_id", "state"}
+                or slot.get("slot") != expected_slot
+                or slot.get("state") not in {"active", "retired"}
+            ):
+                raise ValueError("overlap_manifest_invalid")
+            identifier = slot.get("transaction_id")
+            if (
+                not isinstance(identifier, str)
+                or _TRANSACTION_RE.fullmatch(identifier) is None
+                or identifier
+                != _canonical_transaction_id(
+                    namespace_key, overlap_group_id, expected_slot
+                )
+                or identifier in seen_transactions
+            ):
+                raise ValueError("overlap_manifest_invalid")
+            seen_transactions.add(identifier)
+
+
+def _validate_v1_manifest(manifest: Mapping[str, Any]) -> None:
+    if set(manifest) != {"schema_version", "namespace_key", "groups"}:
+        raise ValueError("overlap_manifest_invalid")
+    namespace_key = manifest.get("namespace_key")
+    if (
+        manifest.get("schema_version") != 1
+        or not isinstance(namespace_key, str)
+        or _NAMESPACE_RE.fullmatch(namespace_key) is None
+        or not isinstance(manifest.get("groups"), list)
+    ):
+        raise ValueError("overlap_manifest_invalid")
+    prior_group = ""
+    seen_transactions: set[str] = set()
+    seen_fingerprints: set[str] = set()
+    for group in manifest["groups"]:
         if not isinstance(group, dict) or set(group) != {
             "group_id",
             "record_fingerprint",
@@ -775,3 +1248,108 @@ def _validate_manifest(manifest: Mapping[str, Any]) -> None:
             ):
                 raise ValueError("overlap_manifest_invalid")
             seen_transactions.add(identifier)
+
+
+def _safe_tail_corrections(
+    result: CanonicalizationResult,
+    diagnostic: Mapping[str, Any],
+    corrections: Mapping[str, Mapping[str, str]],
+) -> tuple[tuple[str, ...], dict[str, dict[str, str]]]:
+    rows = [
+        row
+        for row in result.rows
+        if row.get("canonical_group_id") == diagnostic["canonical_group_id"]
+    ]
+    rows.sort(key=lambda row: int(row["canonical_slot"]))
+    keep_count = int(diagnostic["same_event_count"])
+    retained_rows = rows[:keep_count]
+    tail_rows = rows[keep_count:]
+    tail_ids = tuple(row["transaction_id"] for row in rows[keep_count:])
+    patches = {
+        row["transaction_id"]: dict(corrections[row["transaction_id"]])
+        for row in rows
+        if row["transaction_id"] in corrections
+    }
+    unique_patches = {tuple(sorted(patch.items())): patch for patch in patches.values()}
+    removed = tuple(identifier for identifier in tail_ids if identifier in patches)
+    updates: dict[str, dict[str, str]] = {}
+    if keep_count == 1 and patches:
+        if len(removed) > 1:
+            raise DuplicateResolutionError("duplicate_history_conflict")
+        if len(unique_patches) != 1:
+            raise DuplicateResolutionError("duplicate_history_conflict")
+        patch = dict(next(iter(unique_patches.values())))
+        retained_id = retained_rows[0]["transaction_id"]
+        retained_patch = patches.get(retained_id)
+        if retained_patch is not None and retained_patch != patch:
+            raise DuplicateResolutionError("duplicate_history_conflict")
+        if retained_patch is None:
+            updates[retained_id] = patch
+        histories = {
+            _protected_history(_project_correction(row, patch)) for row in rows
+        }
+        if len(histories) != 1:
+            raise DuplicateResolutionError("duplicate_history_conflict")
+        return removed, updates
+
+    if any(identifier in patches for identifier in tail_ids):
+        if len(patches) != len(rows) or len(unique_patches) != 1:
+            raise DuplicateResolutionError("duplicate_history_conflict")
+    retained_histories = {_protected_history(row) for row in retained_rows}
+    if any(_protected_history(row) not in retained_histories for row in tail_rows):
+        raise DuplicateResolutionError("duplicate_history_conflict")
+    return removed, updates
+
+
+def _project_correction(
+    row: Mapping[str, Any], patch: Mapping[str, str]
+) -> dict[str, str]:
+    projected = {str(key): str(value) for key, value in row.items()}
+    for field in (
+        "category",
+        "flow_type",
+        "owner",
+        "payment_method",
+        "confidence",
+        "reason",
+        "notes",
+        "needs_review",
+    ):
+        if field in patch:
+            projected[field] = str(patch[field])
+    if "flow_type" in patch:
+        projected["flow_source"] = "correction"
+    flags = [item for item in projected.get("flags", "").split(";") if item]
+    if "manual_correction" not in flags:
+        flags.append("manual_correction")
+    projected["flags"] = ";".join(flags)
+    return projected
+
+
+def _protected_history(row: Mapping[str, Any]) -> tuple[tuple[str, str], ...]:
+    values = {field: str(row.get(field, "")) for field in _MUTABLE_FIELDS}
+    values["flags"] = ";".join(
+        item
+        for item in values["flags"].split(";")
+        if item and item not in {OVERLAP_AMBIGUITY_FLAG, OVERLAP_PRIOR_REVIEW_FLAG}
+    )
+    values["reason"] = _without_owned_reason(values["reason"], OVERLAP_AMBIGUITY_REASON)
+    return tuple((field, values[field]) for field in _MUTABLE_FIELDS)
+
+
+def _without_owned_reason(value: str, owned_reason: str) -> str:
+    if owned_reason not in value:
+        return value
+    return "; ".join(
+        item for item in value.replace(owned_reason, "").strip(" ;").split("; ") if item
+    )
+
+
+def _bounded(value: Any, limit: int = 120) -> str:
+    text = str(value)
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def _safe_source_display(value: Any) -> str:
+    parts = re.split(r"[/\\\\]+", str(value))
+    return _bounded(parts[-1] if parts else "")

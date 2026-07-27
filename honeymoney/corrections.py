@@ -440,13 +440,19 @@ def apply_correction_operation(
 
     operation_overlap_manifest = state.overlap_manifest
     migration_ambiguous_ids: tuple[str, ...] = ()
+    operation_overlap_result = None
     if state.canonical_migration_required and not state.bootstrap_required:
         canonical = canonicalize_overlaps(state.source_rows, [], state.overlap_manifest)
         ledger_rows = canonical.rows
         operation_overlap_manifest = canonical.manifest
+        operation_overlap_result = canonical
         projection = project_corrections(canonical, effective_batch)
         effective_batch = projection.corrections
         migration_ambiguous_ids = projection.ambiguous_transaction_ids
+    elif any(row.get("canonical_group_id") for row in ledger_rows):
+        operation_overlap_result = canonicalize_overlaps(
+            state.source_rows, ledger_rows, state.overlap_manifest
+        )
 
     baseline_ledger = [dict(row) for row in ledger_rows]
     reconcile_ledger(baseline_ledger, config, statement_rows=state.source_rows)
@@ -458,7 +464,7 @@ def apply_correction_operation(
         final_review_ids=_final_review_ids(merged_corrections),
     )
     apply_history_ambiguity(corrected_ledger, migration_ambiguous_ids)
-    enforce_overlap_review(corrected_ledger)
+    enforce_overlap_review(corrected_ledger, operation_overlap_result)
     corrected_ids = set(effective_batch)
     for index, (original, baseline, corrected) in enumerate(
         zip(ledger_rows, baseline_ledger, corrected_ledger)

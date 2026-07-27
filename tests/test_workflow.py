@@ -1156,6 +1156,784 @@ def open(source_path):
                 self.assertEqual(len(rows), 1)
                 self.assertEqual(rows[0]["provenance_status"], "exact_one_to_one")
 
+    def test_public_overlap_diagnostics_keep_membership_digests_hidden(self) -> None:
+        repeated_row = "2026-05-04,SYNTHETIC PRIVATE MEMBERSHIP,-12.00,HKD"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._setup_workspace(tmp)
+            statements = root / "statements"
+            statements.mkdir()
+            for name, count in (("a.csv", 3), ("b.csv", 2), ("c.csv", 1)):
+                self._write_statement(statements / name, [repeated_row] * count)
+            imported = self._run_cli(
+                ["import", str(statements), "--no-interactive", "--json"], cwd=root
+            )
+            self.assertEqual(imported.returncode, 0, imported.stderr)
+
+            outputs = [
+                imported.stdout,
+                (root / "output" / "import_report.json").read_text(encoding="utf-8"),
+            ]
+            for args in (
+                ["reconcile", "--dry-run", "--json"],
+                ["report", "2026-05", "--no-open", "--json"],
+                ["duplicates", "--json"],
+            ):
+                result = self._run_cli(args, cwd=root)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                outputs.append(result.stdout)
+
+            overlap_manifest = json.loads(
+                (root / "output" / ".honeymoney-overlap-manifest.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertTrue(
+                any(
+                    membership.get("membership_digest")
+                    for group in overlap_manifest["groups"]
+                    for membership in group["memberships"]
+                )
+            )
+            for output in outputs:
+                self.assertNotIn("membership_digest", output)
+
+    def test_duplicates_cli_lists_and_resolves_same_event_idempotently(self) -> None:
+        repeated_row = "2026-05-04,SYNTHETIC COUNT MISMATCH,-12.00,HKD"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._setup_workspace(tmp)
+            statements = root / "statements"
+            statements.mkdir()
+            for name, count in (("a.csv", 3), ("b.csv", 2), ("c.csv", 1)):
+                self._write_statement(statements / name, [repeated_row] * count)
+            imported = self._run_cli(
+                ["import", str(statements), "--no-interactive"], cwd=root
+            )
+            self.assertEqual(imported.returncode, 0, imported.stderr)
+
+            listed = self._run_cli(["duplicates", "--json"], cwd=root)
+            self.assertEqual(listed.returncode, 0, listed.stderr)
+            listed_document = json.loads(listed.stdout)
+            self.assertEqual(listed_document["schema_version"], 1)
+            self.assertEqual(listed_document["command"], "duplicates")
+            [group] = listed_document["data"]["groups"]
+            self.assertEqual(group["keep_all_count"], 3)
+            self.assertEqual(group["same_event_count"], 2)
+            self.assertEqual(
+                {item["source_display"] for item in group["occurrences"]},
+                {"a.csv", "b.csv", "c.csv"},
+            )
+            self.assertNotIn("original_description", listed.stdout)
+            self.assertNotIn("source_id", listed.stdout)
+            self.assertNotIn(str(root.resolve()), listed.stdout)
+            text_listed = self._run_cli(["duplicates"], cwd=root)
+            self.assertEqual(text_listed.returncode, 0, text_listed.stderr)
+            self.assertIn(
+                "match=exact_normalized_financial_identity",
+                text_listed.stdout,
+            )
+            self.assertIn(
+                f"honeymoney duplicates resolve {group['group_id']} --as same-event",
+                text_listed.stdout,
+            )
+            self.assertIn(
+                f"honeymoney duplicates resolve {group['group_id']} --as keep-all",
+                text_listed.stdout,
+            )
+            before_report = (root / "output" / "import_report.json").read_bytes()
+
+            resolved = self._run_cli(
+                [
+                    "duplicates",
+                    "resolve",
+                    group["group_id"],
+                    "--as",
+                    "same-event",
+                    "--json",
+                ],
+                cwd=root,
+            )
+            self.assertEqual(resolved.returncode, 0, resolved.stderr or resolved.stdout)
+            resolved_document = json.loads(resolved.stdout)
+            self.assertTrue(resolved_document["data"]["changed"])
+            self.assertEqual(resolved_document["data"]["old_group_canonical_count"], 3)
+            self.assertEqual(resolved_document["data"]["new_group_canonical_count"], 2)
+            self.assertEqual(resolved_document["data"]["remaining_unresolved_count"], 0)
+            self.assertIn("review_needed_csv", resolved_document["artifacts"])
+            self.assertEqual(len(self._ledger_rows(root)), 2)
+            state = load_identity_state(root / "output" / "categorized.csv")
+            self.assertEqual(len(state.source_rows), 6)
+            self.assertEqual(
+                (root / "output" / "import_report.json").read_bytes(),
+                before_report,
+            )
+            empty = self._run_cli(["duplicates", "--json"], cwd=root)
+            self.assertEqual(
+                json.loads(empty.stdout)["data"],
+                {"group_count": 0, "groups": []},
+            )
+            retained_rows = self._ledger_rows(root)
+            corrected = self._run_cli(
+                ["correct", "--file", "-", "--json"],
+                cwd=root,
+                input_text=json.dumps(
+                    [
+                        {
+                            "transaction_id": row["transaction_id"],
+                            "category": "Dining",
+                            "needs_review": False,
+                        }
+                        for row in retained_rows
+                    ]
+                ),
+            )
+            self.assertEqual(corrected.returncode, 0, corrected.stderr)
+            reconciled = self._run_cli(["reconcile", "--json"], cwd=root)
+            self.assertEqual(reconciled.returncode, 0, reconciled.stderr)
+            reconciliation = json.loads(reconciled.stdout)["data"]
+            self.assertEqual(reconciliation["transaction_count"], 2)
+            self.assertEqual(
+                len(
+                    reconciliation["balance_reconciliation"]["starter_csv"][
+                        "statements"
+                    ]
+                ),
+                3,
+            )
+            reported = self._run_cli(
+                ["report", "2026-05", "--no-open", "--json"], cwd=root
+            )
+            self.assertEqual(reported.returncode, 0, reported.stderr)
+            report_html = (root / "output" / "report.html").read_text(encoding="utf-8")
+            self.assertIn('id="tile-spending">-24.00<', report_html)
+            unrelated = root / "unrelated.csv"
+            self._write_statement(
+                unrelated,
+                ["2026-05-05,SYNTHETIC UNRELATED,-5.00,HKD"],
+            )
+            imported_again = self._run_cli(
+                ["import", str(unrelated), "--no-interactive"], cwd=root
+            )
+            self.assertEqual(imported_again.returncode, 0, imported_again.stderr)
+            target_rows = [
+                row
+                for row in self._ledger_rows(root)
+                if row["merchant"] == "SYNTHETIC COUNT MISMATCH"
+            ]
+            self.assertEqual(len(target_rows), 2)
+            self.assertTrue(
+                all(
+                    "overlap_count_ambiguous" not in row["flags"].split(";")
+                    for row in target_rows
+                )
+            )
+            self.assertEqual(
+                json.loads(self._run_cli(["duplicates", "--json"], cwd=root).stdout)[
+                    "data"
+                ],
+                {"group_count": 0, "groups": []},
+            )
+            before_repeat = self._reset_state_bytes(root)
+
+            repeated = self._run_cli(
+                [
+                    "duplicates",
+                    "resolve",
+                    group["group_id"],
+                    "--as",
+                    "same-event",
+                    "--json",
+                ],
+                cwd=root,
+            )
+            self.assertEqual(repeated.returncode, 0, repeated.stderr)
+            self.assertFalse(json.loads(repeated.stdout)["data"]["changed"])
+            self.assertEqual(self._reset_state_bytes(root), before_repeat)
+
+            invalid = self._run_cli(
+                [
+                    "duplicates",
+                    "resolve",
+                    group["group_id"],
+                    "--as",
+                    "merge",
+                    "--json",
+                ],
+                cwd=root,
+            )
+            self.assertEqual(invalid.returncode, 2)
+            invalid_document = json.loads(invalid.stdout)
+            self.assertEqual(invalid_document["command"], "duplicates.resolve")
+            self.assertEqual(
+                invalid_document["errors"][0]["code"],
+                "duplicate_choice_invalid",
+            )
+            self.assertEqual(self._reset_state_bytes(root), before_repeat)
+
+            conflict = self._run_cli(
+                [
+                    "duplicates",
+                    "resolve",
+                    group["group_id"],
+                    "--as",
+                    "keep-all",
+                    "--json",
+                ],
+                cwd=root,
+            )
+            self.assertEqual(conflict.returncode, 2)
+            conflict_document = json.loads(conflict.stdout)
+            self.assertEqual(conflict_document["command"], "duplicates.resolve")
+            self.assertEqual(
+                conflict_document["errors"][0]["code"],
+                "duplicate_resolution_conflict",
+            )
+            self.assertEqual(self._reset_state_bytes(root), before_repeat)
+
+    def test_rule_categorized_count_mismatch_resolutions_leave_review_clear(
+        self,
+    ) -> None:
+        repeated_row = "2026-05-04,SYNTHETIC RULED COUNT MISMATCH,-12.00,HKD"
+        for choice, expected_count in (("same-event", 1), ("keep-all", 2)):
+            with self.subTest(choice=choice), tempfile.TemporaryDirectory() as tmp:
+                root = self._setup_workspace(tmp)
+                (root / "rules.json").write_text(
+                    json.dumps(
+                        {
+                            "version": 1,
+                            "rules": [
+                                {
+                                    "id": "synthetic-count-mismatch",
+                                    "enabled": True,
+                                    "priority": 100,
+                                    "conditions": [
+                                        {
+                                            "field": "original_description",
+                                            "match_type": "exact",
+                                            "patterns": [
+                                                "SYNTHETIC RULED COUNT MISMATCH"
+                                            ],
+                                        }
+                                    ],
+                                    "category": "Dining",
+                                    "flow_type": "expense",
+                                    "owner": "Household",
+                                    "confidence": 0.99,
+                                }
+                            ],
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                statements = root / "statements"
+                statements.mkdir()
+                self._write_statement(statements / "a.csv", [repeated_row] * 2)
+                self._write_statement(statements / "b.csv", [repeated_row])
+                imported = self._run_cli(
+                    ["import", str(statements), "--no-interactive"], cwd=root
+                )
+                self.assertEqual(imported.returncode, 0, imported.stderr)
+                listed = self._run_cli(["duplicates", "--json"], cwd=root)
+                self.assertEqual(listed.returncode, 0, listed.stderr)
+                [group] = json.loads(listed.stdout)["data"]["groups"]
+
+                resolved = self._run_cli(
+                    [
+                        "duplicates",
+                        "resolve",
+                        group["group_id"],
+                        "--as",
+                        choice,
+                        "--json",
+                    ],
+                    cwd=root,
+                )
+
+                self.assertEqual(
+                    resolved.returncode, 0, resolved.stderr or resolved.stdout
+                )
+                rows = self._ledger_rows(root)
+                self.assertEqual(len(rows), expected_count)
+                self.assertTrue(
+                    all(
+                        row["category"] == "Dining"
+                        and row["needs_review"] == "false"
+                        and row["reason"] == "Matched rule synthetic-count-mismatch"
+                        for row in rows
+                    )
+                )
+                with (root / "output" / "review_needed.csv").open(
+                    newline="", encoding="utf-8"
+                ) as fh:
+                    self.assertEqual(list(csv.DictReader(fh)), [])
+                pending = self._run_cli(["pending", "2026-05", "--json"], cwd=root)
+                self.assertEqual(pending.returncode, 0, pending.stderr)
+                self.assertEqual(json.loads(pending.stdout)["data"]["count"], 0)
+                self.assertEqual(json.loads(pending.stdout)["data"]["transactions"], [])
+
+    def test_reset_drift_gets_a_new_group_and_safe_warning(
+        self,
+    ) -> None:
+        repeated_row = "2026-05-04,SYNTHETIC DRIFT,-12.00,HKD"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._setup_workspace(tmp)
+            statements = root / "statements"
+            statements.mkdir()
+            for name, count in (("a.csv", 3), ("b.csv", 2), ("c.csv", 1)):
+                self._write_statement(statements / name, [repeated_row] * count)
+            first = self._run_cli(
+                ["import", str(statements), "--no-interactive"], cwd=root
+            )
+            self.assertEqual(first.returncode, 0, first.stderr)
+            listed = self._run_cli(["duplicates", "--json"], cwd=root)
+            [old_group] = json.loads(listed.stdout)["data"]["groups"]
+            resolved = self._run_cli(
+                [
+                    "duplicates",
+                    "resolve",
+                    old_group["group_id"],
+                    "--as",
+                    "same-event",
+                    "--json",
+                ],
+                cwd=root,
+            )
+            self.assertEqual(resolved.returncode, 0, resolved.stderr)
+
+            replaced = statements / "a.csv"
+            self._write_statement(replaced, [])
+            drifted = self._run_cli(
+                [
+                    "import",
+                    str(replaced),
+                    "--reset",
+                    "--no-interactive",
+                    "--json",
+                ],
+                cwd=root,
+            )
+            self.assertEqual(drifted.returncode, 0, drifted.stderr or drifted.stdout)
+            drifted_document = json.loads(drifted.stdout)
+            self.assertEqual(
+                drifted_document["warnings"],
+                [
+                    "duplicate_membership_changed: duplicate group membership "
+                    f"changed; review "
+                    f"{drifted_document['data']['overlap']['warnings'][0]['group_id']}"
+                ],
+            )
+            warning_text = json.dumps(drifted_document["warnings"])
+            self.assertNotIn("SYNTHETIC DRIFT", warning_text)
+            self.assertNotIn("-12.00", warning_text)
+            listed = self._run_cli(["duplicates", "--json"], cwd=root)
+            [new_group] = json.loads(listed.stdout)["data"]["groups"]
+            self.assertNotEqual(new_group["group_id"], old_group["group_id"])
+            self.assertEqual(len(self._ledger_rows(root)), 2)
+            self.assertTrue(
+                all(
+                    row["needs_review"] == "true"
+                    and "overlap_count_ambiguous" in row["flags"].split(";")
+                    for row in self._ledger_rows(root)
+                )
+            )
+            unrelated = root / "replacement-unrelated.csv"
+            self._write_statement(
+                unrelated,
+                ["2026-05-05,SYNTHETIC REPLACEMENT UNRELATED,-5.00,HKD"],
+            )
+            unchanged = self._run_cli(
+                ["import", str(unrelated), "--no-interactive", "--json"], cwd=root
+            )
+            self.assertEqual(unchanged.returncode, 0, unchanged.stderr)
+            self.assertFalse(
+                any(
+                    "duplicate_membership_changed" in warning
+                    for warning in json.loads(unchanged.stdout)["warnings"]
+                )
+            )
+
+            before = self._reset_state_bytes(root)
+            stale = self._run_cli(
+                [
+                    "duplicates",
+                    "resolve",
+                    old_group["group_id"],
+                    "--as",
+                    "same-event",
+                    "--json",
+                ],
+                cwd=root,
+            )
+            self.assertEqual(stale.returncode, 2)
+            stale_document = json.loads(stale.stdout)
+            self.assertEqual(stale_document["command"], "duplicates.resolve")
+            self.assertEqual(
+                stale_document["errors"][0]["code"], "duplicate_group_stale"
+            )
+            self.assertEqual(self._reset_state_bytes(root), before)
+
+    def test_strict_import_warns_for_mismatch_after_equal_count_transition(
+        self,
+    ) -> None:
+        repeated_row = "2026-05-04,SYNTHETIC EQUAL BRIDGE,-12.00,HKD"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._setup_workspace(tmp)
+            statements = root / "statements"
+            statements.mkdir()
+            first_source = statements / "a.csv"
+            second_source = statements / "b.csv"
+            third_source = statements / "c.csv"
+            self._write_statement(first_source, [repeated_row] * 3)
+            self._write_statement(second_source, [repeated_row] * 2)
+            self._write_statement(third_source, [repeated_row] * 2)
+            imported = self._run_cli(
+                ["import", str(statements), "--no-interactive"], cwd=root
+            )
+            self.assertEqual(imported.returncode, 0, imported.stderr)
+            [group] = json.loads(
+                self._run_cli(["duplicates", "--json"], cwd=root).stdout
+            )["data"]["groups"]
+            resolved = self._run_cli(
+                [
+                    "duplicates",
+                    "resolve",
+                    group["group_id"],
+                    "--as",
+                    "same-event",
+                    "--json",
+                ],
+                cwd=root,
+            )
+            self.assertEqual(resolved.returncode, 0, resolved.stderr)
+
+            self._write_statement(first_source, [])
+            equalized = self._run_cli(
+                [
+                    "import",
+                    str(first_source),
+                    "--reset",
+                    "--no-interactive",
+                    "--json",
+                ],
+                cwd=root,
+            )
+            self.assertEqual(
+                equalized.returncode, 0, equalized.stderr or equalized.stdout
+            )
+            self.assertEqual(json.loads(equalized.stdout)["warnings"], [])
+            self.assertEqual(
+                {row["provenance_status"] for row in self._ledger_rows(root)},
+                {"pooled_equal_count"},
+            )
+
+            new_source = statements / "d.csv"
+            self._write_statement(new_source, [repeated_row])
+            drifted = self._run_cli(
+                [
+                    "import",
+                    str(new_source),
+                    "--no-interactive",
+                    "--strict",
+                    "--json",
+                ],
+                cwd=root,
+            )
+
+            self.assertEqual(drifted.returncode, 1, drifted.stderr)
+            document = json.loads(drifted.stdout)
+            self.assertEqual(document["status"], "partial_success")
+            [warning] = document["data"]["overlap"]["warnings"]
+            self.assertEqual(warning["code"], "duplicate_membership_changed")
+            self.assertEqual(
+                document["warnings"],
+                [
+                    "duplicate_membership_changed: duplicate group membership "
+                    f"changed; review {warning['group_id']}"
+                ],
+            )
+
+    def test_keep_all_preserves_corrections_and_resolution_fault_rolls_back(
+        self,
+    ) -> None:
+        repeated_row = "2026-05-04,SYNTHETIC KEEP ALL,-12.00,HKD"
+        for fault in (None, "replace-before:categorized.csv"):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory() as tmp:
+                root = self._setup_workspace(tmp)
+                statements = root / "statements"
+                statements.mkdir()
+                for name, count in (("a.csv", 3), ("b.csv", 2)):
+                    self._write_statement(statements / name, [repeated_row] * count)
+                imported = self._run_cli(
+                    ["import", str(statements), "--no-interactive"], cwd=root
+                )
+                self.assertEqual(imported.returncode, 0, imported.stderr)
+                listed = self._run_cli(["duplicates", "--json"], cwd=root)
+                [group] = json.loads(listed.stdout)["data"]["groups"]
+                rows = sorted(
+                    self._ledger_rows(root),
+                    key=lambda row: int(row["canonical_slot"]),
+                )
+                tail_id = rows[-1]["transaction_id"]
+                corrected = self._run_cli(
+                    ["correct", "--file", "-", "--json"],
+                    cwd=root,
+                    input_text=json.dumps(
+                        [
+                            {
+                                "transaction_id": tail_id,
+                                "category": "Dining",
+                                "needs_review": False,
+                            }
+                        ]
+                    ),
+                )
+                self.assertEqual(corrected.returncode, 0, corrected.stderr)
+                correction_bytes = (root / "corrections.csv").read_bytes()
+                before = self._reset_state_bytes(root)
+
+                unsafe = self._run_cli(
+                    [
+                        "duplicates",
+                        "resolve",
+                        group["group_id"],
+                        "--as",
+                        "same-event",
+                        "--json",
+                    ],
+                    cwd=root,
+                )
+                self.assertEqual(unsafe.returncode, 2)
+                self.assertIn("duplicate_history_conflict", unsafe.stdout)
+                self.assertEqual(self._reset_state_bytes(root), before)
+
+                kept = self._run_cli(
+                    [
+                        "duplicates",
+                        "resolve",
+                        group["group_id"],
+                        "--as",
+                        "keep-all",
+                        "--json",
+                    ],
+                    cwd=root,
+                    filesystem_fault=fault,
+                )
+                if fault is not None:
+                    self.assertEqual(kept.returncode, 2)
+                    self.assertEqual(self._reset_state_bytes(root), before)
+                    continue
+                self.assertEqual(kept.returncode, 0, kept.stderr)
+                self.assertEqual(len(self._ledger_rows(root)), 3)
+                self.assertEqual(
+                    (root / "corrections.csv").read_bytes(), correction_bytes
+                )
+                self.assertEqual(
+                    json.loads(
+                        self._run_cli(["duplicates", "--json"], cwd=root).stdout
+                    )["data"],
+                    {"group_count": 0, "groups": []},
+                )
+                kept_rows = self._ledger_rows(root)
+                corrected_again = self._run_cli(
+                    ["correct", "--file", "-", "--json"],
+                    cwd=root,
+                    input_text=json.dumps(
+                        [
+                            {
+                                "transaction_id": kept_rows[0]["transaction_id"],
+                                "notes": "Synthetic keep-all note",
+                            }
+                        ]
+                    ),
+                )
+                self.assertEqual(corrected_again.returncode, 0, corrected_again.stderr)
+                reconciled = self._run_cli(["reconcile", "--json"], cwd=root)
+                self.assertEqual(reconciled.returncode, 0, reconciled.stderr)
+                unrelated = root / "unrelated.csv"
+                self._write_statement(
+                    unrelated,
+                    ["2026-05-05,SYNTHETIC KEEP UNRELATED,-5.00,HKD"],
+                )
+                imported_again = self._run_cli(
+                    ["import", str(unrelated), "--no-interactive"], cwd=root
+                )
+                self.assertEqual(imported_again.returncode, 0, imported_again.stderr)
+                kept_rows = [
+                    row
+                    for row in self._ledger_rows(root)
+                    if row["merchant"] == "SYNTHETIC KEEP ALL"
+                ]
+                self.assertEqual(len(kept_rows), 3)
+                self.assertTrue(
+                    all(
+                        "overlap_count_ambiguous" not in row["flags"].split(";")
+                        for row in kept_rows
+                    )
+                )
+                self.assertEqual(
+                    json.loads(
+                        self._run_cli(["duplicates", "--json"], cwd=root).stdout
+                    )["data"],
+                    {"group_count": 0, "groups": []},
+                )
+
+    def test_same_event_moves_the_only_tail_correction_to_the_retained_slot(
+        self,
+    ) -> None:
+        repeated_row = "2026-05-04,SYNTHETIC CORRECTION MOVE,-12.00,HKD"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._setup_workspace(tmp)
+            statements = root / "statements"
+            statements.mkdir()
+            self._write_statement(statements / "a.csv", [repeated_row] * 2)
+            self._write_statement(statements / "b.csv", [repeated_row])
+            imported = self._run_cli(
+                ["import", str(statements), "--no-interactive"], cwd=root
+            )
+            self.assertEqual(imported.returncode, 0, imported.stderr)
+            [group] = json.loads(
+                self._run_cli(["duplicates", "--json"], cwd=root).stdout
+            )["data"]["groups"]
+            rows = sorted(
+                self._ledger_rows(root),
+                key=lambda row: int(row["canonical_slot"]),
+            )
+            retained_id = rows[0]["transaction_id"]
+            tail_id = rows[1]["transaction_id"]
+            corrected = self._run_cli(
+                ["correct", "--file", "-", "--json"],
+                cwd=root,
+                input_text=json.dumps(
+                    [
+                        {
+                            "transaction_id": tail_id,
+                            "category": "Dining",
+                            "flow_type": "expense",
+                            "needs_review": False,
+                        }
+                    ]
+                ),
+            )
+            self.assertEqual(corrected.returncode, 0, corrected.stderr)
+
+            resolved = self._run_cli(
+                [
+                    "duplicates",
+                    "resolve",
+                    group["group_id"],
+                    "--as",
+                    "same-event",
+                    "--json",
+                ],
+                cwd=root,
+            )
+
+            self.assertEqual(resolved.returncode, 0, resolved.stderr or resolved.stdout)
+            [row] = self._ledger_rows(root)
+            self.assertEqual(row["transaction_id"], retained_id)
+            self.assertEqual(row["category"], "Dining")
+            self.assertEqual(row["needs_review"], "false")
+            with (root / "corrections.csv").open(newline="", encoding="utf-8") as fh:
+                [correction] = list(csv.DictReader(fh))
+            self.assertEqual(correction["transaction_id"], retained_id)
+            self.assertEqual(correction["category"], "Dining")
+            self.assertFalse(
+                tail_id in (root / "corrections.csv").read_text(encoding="utf-8")
+            )
+
+    def test_same_event_resolution_recovers_each_generation_boundary(self) -> None:
+        repeated_row = "2026-05-04,SYNTHETIC RESOLUTION FAULT,-12.00,HKD"
+        faults = (
+            "replace-before:review_needed.csv",
+            "replace-before:.honeymoney-overlap-manifest.json",
+            "replace-before:corrections.csv",
+            "replace-after:categorized.csv",
+        )
+        for fault in faults:
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory() as tmp:
+                root = self._setup_workspace(tmp)
+                statements = root / "statements"
+                statements.mkdir()
+                self._write_statement(statements / "a.csv", [repeated_row] * 2)
+                self._write_statement(statements / "b.csv", [repeated_row])
+                imported = self._run_cli(
+                    ["import", str(statements), "--no-interactive"], cwd=root
+                )
+                self.assertEqual(imported.returncode, 0, imported.stderr)
+                [group] = json.loads(
+                    self._run_cli(["duplicates", "--json"], cwd=root).stdout
+                )["data"]["groups"]
+                rows = sorted(
+                    self._ledger_rows(root),
+                    key=lambda row: int(row["canonical_slot"]),
+                )
+                retained_id = rows[0]["transaction_id"]
+                tail_id = rows[1]["transaction_id"]
+                corrected = self._run_cli(
+                    ["correct", "--file", "-", "--json"],
+                    cwd=root,
+                    input_text=json.dumps(
+                        [
+                            {
+                                "transaction_id": tail_id,
+                                "category": "Dining",
+                                "flow_type": "expense",
+                                "needs_review": False,
+                            }
+                        ]
+                    ),
+                )
+                self.assertEqual(corrected.returncode, 0, corrected.stderr)
+                before = self._reset_state_bytes(root)
+
+                interrupted = self._run_cli(
+                    [
+                        "duplicates",
+                        "resolve",
+                        group["group_id"],
+                        "--as",
+                        "same-event",
+                        "--json",
+                    ],
+                    cwd=root,
+                    filesystem_fault=fault,
+                )
+
+                committed = fault == "replace-after:categorized.csv"
+                self.assertEqual(interrupted.returncode, 75 if committed else 2)
+                duplicates = self._run_cli(["duplicates", "--json"], cwd=root)
+                status = self._run_cli(["status", "2026-05", "--json"], cwd=root)
+                self.assertEqual(duplicates.returncode, 0, duplicates.stderr)
+                self.assertEqual(status.returncode, 0, status.stderr)
+                after = self._reset_state_bytes(root)
+                if not committed:
+                    self.assertEqual(after, before)
+                    self.assertEqual(
+                        json.loads(duplicates.stdout)["data"]["group_count"], 1
+                    )
+                    continue
+
+                self.assertNotEqual(after, before)
+                self.assertEqual(
+                    json.loads(duplicates.stdout)["data"],
+                    {"group_count": 0, "groups": []},
+                )
+                [row] = self._ledger_rows(root)
+                self.assertEqual(row["transaction_id"], retained_id)
+                self.assertEqual(row["category"], "Dining")
+                with (root / "corrections.csv").open(
+                    newline="", encoding="utf-8"
+                ) as fh:
+                    [correction] = list(csv.DictReader(fh))
+                self.assertEqual(correction["transaction_id"], retained_id)
+                self.assertNotIn(
+                    tail_id,
+                    (root / "corrections.csv").read_text(encoding="utf-8"),
+                )
+                self.assertEqual(
+                    list((root / "output").glob(".*honeymoney-state.json")),
+                    [],
+                )
+
     def test_source_replacement_excludes_retired_rows_from_duplicate_checks(
         self,
     ) -> None:

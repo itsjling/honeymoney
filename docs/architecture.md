@@ -52,9 +52,12 @@ evidence for retired identity records. The identity manifest marks each record
 as active or retired. Only active rows enter canonicalization and statement
 balance checks.
 `.honeymoney-overlap-manifest.json` holds the hidden workspace namespace and
-canonical slot tombstones. `.honeymoney-identity-manifest.json` still owns
-source and record identity. `review_needed.csv` is regenerated from the public
-ledger whenever it changes, while
+canonical slot tombstones. Its versioned membership records hold keyed
+membership digests, membership-bound review group IDs, and explicit duplicate
+resolutions without source IDs or transaction values.
+`.honeymoney-identity-manifest.json` still owns source and record identity.
+`review_needed.csv` is regenerated from the public ledger whenever it changes,
+while
 `import_report.json` records the last import attempt and is replaced with its
 import generation. Corrections and remembered rules remain independent inputs,
 but operations that change them and the ledger publish them through the same
@@ -84,6 +87,16 @@ generation as the replacement ledger. Failed and skipped sources therefore
 retain their rows and corrections; a persistence failure restores both inputs
 to the prior generation. Import reports record the requested action and the
 ledger action actually committed for each source.
+
+`honeymoney duplicates` reads unresolved count-mismatch groups from the overlap
+module. `duplicates resolve` validates the current membership-bound group ID,
+then records `same-event` or `keep-all`. Same-event retains the second-largest
+per-source count; keep-all retains the maximum. A membership change ignores the
+old resolution, restores duplicate review, and emits a value-free warning.
+Resolution regenerates the canonical ledger, review queue, transfers, and
+reconciliation, uses active source evidence for statement balances, and
+publishes changed corrections in the same generation. It does not rewrite the
+last import report.
 
 The current import report describes the latest attempted import even when a
 source fails, while the authoritative ledger, its derived review rows, and saved
@@ -184,13 +197,14 @@ changing it.
 ## Source map
 
 - `honeymoney/cli.py`: command routing, workspace setup, identity resolution,
-  ledger generation, categorization, review filtering, and JSON output.
+  duplicate review, ledger generation, categorization, review filtering, and
+  JSON output.
 - `honeymoney/importers.py`: input discovery, profile validation and selection,
   CSV/PDF parsing, parser locators, and private source identity inputs.
 - `honeymoney/normalization.py`: pure row/date/amount/text normalization and
   compatibility helpers.
-- `honeymoney/overlap.py`: canonical multiset slots, hidden overlap-manifest
-  validation, correction projection, and privacy-safe provenance diagnostics.
+- `honeymoney/overlap.py`: canonical multiset slots, membership-bound duplicate
+  review, resolution safety, manifest validation, and privacy-safe evidence.
 - `honeymoney/identity.py`: identity-v2 digests, validation, source and record
   resolution, manifest ownership, and safe identity diagnostics.
 - `honeymoney/identity_state.py`: ledger and manifest loading, bootstrap rules,

@@ -20,6 +20,7 @@ from honeymoney.identity import (
     validate_ledger_manifest_agreement,
 )
 from honeymoney.overlap import (
+    canonicalize_overlaps,
     empty_overlap_manifest,
     overlap_manifest_document,
     overlap_manifest_path,
@@ -48,6 +49,7 @@ class IdentityState:
     overlap_manifest: dict[str, object] | None = None
     overlap_manifest_document: str = ""
     canonical_migration_required: bool = False
+    overlap_migration_required: bool = False
 
     def __post_init__(self) -> None:
         if self.source_rows is None:
@@ -130,6 +132,10 @@ def load_identity_state(categorized_path: Path) -> IdentityState:
         try:
             overlap_document = canonical_manifest_path.read_text(encoding="utf-8")
             overlap = parse_overlap_manifest(overlap_document)
+            overlap_migration_required = overlap["schema_version"] == 1
+            if overlap_migration_required:
+                overlap = canonicalize_overlaps(source_rows, rows, overlap).manifest
+                overlap_document = overlap_manifest_document(overlap)
             validate_overlap_agreement(rows, source_rows, overlap)
         except (OSError, UnicodeError, ValueError) as error:
             raise IdentityError("identity_manifest_invalid") from error
@@ -141,6 +147,7 @@ def load_identity_state(categorized_path: Path) -> IdentityState:
             source_evidence_rows=source_evidence_rows,
             overlap_manifest=overlap,
             overlap_manifest_document=overlap_document,
+            overlap_migration_required=overlap_migration_required,
         )
 
     if header == SOURCE_OCCURRENCE_COLUMNS:

@@ -58,6 +58,9 @@ honeymoney report 2026-05 --config ./money/config.json --json
 honeymoney config --config ./money/config.json --json
 honeymoney config edit ollama --config ./money/config.json --model qwen3.5:4b --json
 honeymoney review --transaction TRANSACTION_ID --as income --config ./money/config.json --json
+honeymoney duplicates --config ./money/config.json --json
+honeymoney duplicates resolve GROUP_ID --as same-event \
+  --config ./money/config.json --json
 honeymoney profile validate ./money/profiles/starter_csv.json \
   --config ./money/config.json --json
 ```
@@ -74,6 +77,12 @@ from canonical ledger occurrences. Read `source_occurrence_count`,
 occurrence ID pools, and structural counts. The old `duplicate_count`,
 `duplicate_group_count`, and `duplicate_candidates` keys remain for clients
 that have not moved to `overlap`.
+
+`honeymoney duplicates` lists only unresolved exact-overlap count mismatches.
+Its evidence stays local, bounded, and pooled. Resolve the current
+membership-bound group ID as `same-event` or `keep-all`. Repeating the same
+choice changes no files. A changed membership makes the old ID stale and puts
+the new group back in review.
 
 Validate a profile and preview one synthetic fixture without mutating the
 workspace:
