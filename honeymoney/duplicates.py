@@ -4,15 +4,25 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from types import MappingProxyType
-from typing import Any, Mapping
+from typing import Mapping, Sequence, TypedDict
 
 from honeymoney.identity import has_stable_v2_identity, record_fingerprint
+from honeymoney.identity_contracts import IdentityRow
 
 DUPLICATE_FLAG = "duplicate_suspected"
 DUPLICATE_REVIEW_PROMOTED_FLAG = "duplicate_review_promoted"
 DUPLICATE_MATCH_TYPE = "exact_same_account_event_v2"
 DUPLICATE_REASON_PREFIX = "Duplicate candidate ["
 LEGACY_DUPLICATE_REASON = "Possible duplicate transaction"
+
+
+class DuplicateGroupDiagnostic(TypedDict):
+    match_type: str
+    occurrence_ids: list[str]
+
+
+class DuplicateOccurrenceDiagnostic(DuplicateGroupDiagnostic):
+    counterpart_occurrence_ids: list[str]
 
 
 @dataclass(frozen=True)
@@ -22,7 +32,7 @@ class DuplicateCandidateGroup:
     match_type: str
     occurrence_ids: tuple[str, ...]
 
-    def as_diagnostic(self) -> dict[str, object]:
+    def as_diagnostic(self) -> DuplicateGroupDiagnostic:
         return {
             "match_type": self.match_type,
             "occurrence_ids": list(self.occurrence_ids),
@@ -63,7 +73,9 @@ class DuplicateEvaluation:
     def occurrence_count(self) -> int:
         return sum(len(group.occurrence_ids) for group in self.groups)
 
-    def diagnostic_for(self, occurrence_id: str) -> dict[str, object] | None:
+    def diagnostic_for(
+        self, occurrence_id: str
+    ) -> DuplicateOccurrenceDiagnostic | None:
         group = self._diagnostic_groups_by_occurrence_id.get(occurrence_id)
         if group is None:
             return None
@@ -95,12 +107,12 @@ class DuplicateEvaluation:
 
 
 def evaluate_duplicate_candidates(
-    rows: list[Mapping[str, Any]] | tuple[Mapping[str, Any], ...],
+    rows: Sequence[IdentityRow],
     *,
     operation_counts: dict[str, int] | None = None,
 ) -> DuplicateEvaluation:
     """Return groups proven by account, fingerprint, and distinct source identity."""
-    buckets: dict[str, list[Mapping[str, Any]]] = {}
+    buckets: dict[str, list[IdentityRow]] = {}
     fingerprints_calculated = 0
     for row in rows:
         if not has_stable_v2_identity(row):
@@ -204,7 +216,7 @@ def _clear_duplicate_state(row: dict[str, str]) -> None:
         row["needs_review"] = "false"
 
 
-def _duplicate_reason(diagnostic: Mapping[str, object]) -> str:
+def _duplicate_reason(diagnostic: DuplicateOccurrenceDiagnostic) -> str:
     occurrence_ids = ",".join(str(item) for item in diagnostic["occurrence_ids"])
     counterpart_ids = ",".join(
         str(item) for item in diagnostic["counterpart_occurrence_ids"]

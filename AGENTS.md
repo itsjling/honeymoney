@@ -17,6 +17,8 @@ endpoint.
 ## Commands
 
 - Full verification: `./scripts/check.sh`
+- Static types: `python3 -m mypy`
+- Branch coverage: `./scripts/check_coverage.sh`
 - Full tests: `python3 -m unittest discover`
 - Agent CLI tests: `python3 -m unittest tests.test_agent_cli`
 - Import-profile goldens: `python3 -m unittest tests.test_import_profiles`
@@ -25,9 +27,9 @@ endpoint.
 - Live Ollama smoke test: run only when explicitly requested, using the command
   in `docs/golden-datasets.md`.
 
-Ruff formatting, Ruff linting, the full unittest suite, and a package build are
-required before handoff. Prefer a focused test during implementation, followed
-by `./scripts/check.sh` once at the end.
+Ruff formatting, Ruff linting, static types, branch coverage, the full unittest
+suite, and a package build are required before handoff. Prefer a focused test
+during implementation, followed by `./scripts/check.sh` once at the end.
 
 ## Privacy and execution boundaries
 

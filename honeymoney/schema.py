@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from honeymoney.contracts import Config
+
 SOURCE_OCCURRENCE_COLUMNS = [
     "transaction_id",
     "source_id",
@@ -154,19 +156,22 @@ ALLOWED_FLOW_TYPES = {
 }
 
 
-def allowed_categories(config: dict | None = None) -> set[str]:
-    if config and config.get("categories"):
-        return {str(category) for category in config["categories"]}
+def allowed_categories(config: Config | None = None) -> set[str]:
+    categories = config.get("categories") if config else None
+    if isinstance(categories, (list, tuple, set)):
+        return {str(category) for category in categories}
     return set(ALLOWED_CATEGORIES)
 
 
-def allowed_owners(config: dict | None = None) -> set[str]:
-    if config and config.get("owners"):
-        return {str(owner) for owner in config["owners"]}
+def allowed_owners(config: Config | None = None) -> set[str]:
+    owners = config.get("owners") if config else None
+    if isinstance(owners, (list, tuple, set)):
+        return {str(owner) for owner in owners}
     return set(ALLOWED_OWNERS)
 
 
-def allowed_payment_methods(config: dict | None = None) -> set[str]:
-    if config and config.get("payment_methods"):
-        return {str(method) for method in config["payment_methods"]}
+def allowed_payment_methods(config: Config | None = None) -> set[str]:
+    payment_methods = config.get("payment_methods") if config else None
+    if isinstance(payment_methods, (list, tuple, set)):
+        return {str(method) for method in payment_methods}
     return set(ALLOWED_PAYMENT_METHODS)

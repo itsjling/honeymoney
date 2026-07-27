@@ -5,8 +5,9 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
-from typing import Any
+from typing import Mapping
 
+from honeymoney.contracts import Config
 from honeymoney.schema import allowed_categories
 
 PROTECTED_ACCOUNTING_CATEGORIES = frozenset(
@@ -54,7 +55,7 @@ class ModelSuggestion:
     reason: str = ""
 
 
-def validate_category_policies(config: dict[str, Any]) -> None:
+def validate_category_policies(config: Config) -> None:
     raw = config.get("category_policies")
     if raw is None:
         return
@@ -86,10 +87,11 @@ def validate_category_policies(config: dict[str, Any]) -> None:
             )
 
 
-def category_policies(config: dict[str, Any]) -> dict[str, CategoryPolicy]:
+def category_policies(config: Config) -> dict[str, CategoryPolicy]:
     """Return every configured category's resolved classification policy."""
     validate_category_policies(config)
-    configured = config.get("category_policies", {})
+    raw_configured = config.get("category_policies", {})
+    configured = raw_configured if isinstance(raw_configured, Mapping) else {}
     policies: dict[str, CategoryPolicy] = {}
     for category in allowed_categories(config):
         if category in PROTECTED_ACCOUNTING_CATEGORIES:
@@ -113,7 +115,7 @@ def category_policies(config: dict[str, Any]) -> dict[str, CategoryPolicy]:
     return policies
 
 
-def model_category_descriptions(config: dict[str, Any]) -> dict[str, str]:
+def model_category_descriptions(config: Config) -> dict[str, str]:
     return {
         category: policy.description
         for category, policy in sorted(category_policies(config).items())
@@ -152,7 +154,7 @@ def trusted_accounting_provenance(row: dict[str, str]) -> bool:
 
 
 def apply_structural_classification(
-    transactions: list[dict[str, str]], config: dict[str, Any]
+    transactions: list[dict[str, str]], config: Config
 ) -> int:
     """Classify unambiguous accounting rows before an untrusted model sees them."""
     del config  # Kept in the shared public interface for future policy settings.
@@ -217,7 +219,7 @@ def _set_structural(
 
 
 def evaluate_model_suggestion(
-    row: dict[str, str], category: str, confidence: Decimal, config: dict[str, Any]
+    row: dict[str, str], category: str, confidence: Decimal, config: Config
 ) -> ModelSuggestion:
     policy = category_policies(config).get(category)
     if policy is None:
@@ -226,10 +228,11 @@ def evaluate_model_suggestion(
         return ModelSuggestion(
             "rejected", f"Ollama policy rejected category {category}"
         )
+    amount = _amount(row)
     if (
-        _amount(row) is None
-        or _amount(row) == 0
-        or _amount(row) >= 0
+        amount is None
+        or amount == 0
+        or amount >= 0
         or row.get("owner") in {"", "Unknown"}
         or "duplicate_suspected" in set(filter(None, row.get("flags", "").split(";")))
         or confidence < _threshold(config)
@@ -238,7 +241,7 @@ def evaluate_model_suggestion(
     return ModelSuggestion("accepted")
 
 
-def _threshold(config: dict[str, Any]) -> Decimal:
+def _threshold(config: Config) -> Decimal:
     try:
         return Decimal(str(config.get("review_confidence_threshold", 0.8)))
     except InvalidOperation:

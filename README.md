@@ -453,11 +453,25 @@ PYTHON=python3.10 ./scripts/bootstrap.sh
 PYTHON=python3.10 ./scripts/check.sh
 ```
 
-The offline verification command runs formatting, linting, unit tests,
-`pip check`, a wheel/source build, and distribution-metadata checks. The test
-runner forbids in-process socket creation and DNS lookups; Ollama behavior is
-exercised through injected in-memory transports. Once the bootstrap install is
-available, the command does not query dependency indexes or advisory services.
+The offline verification command runs formatting, linting, static types,
+branch-covered unit tests, `pip check`, a wheel/source build, and
+distribution-metadata checks. The test runner forbids socket creation and
+non-local DNS lookup in both the main test process and child Python processes.
+Ollama behavior uses injected in-memory transports. Once the bootstrap install
+is available, the command does not query dependency indexes or advisory
+services.
+
+Run either gate on its own:
+
+```bash
+python3 -m mypy
+./scripts/check_coverage.sh
+```
+
+The coverage command runs the default synthetic unittest suite once, combines
+data from child CLI processes, and enforces the threshold in `pyproject.toml`.
+See [`docs/quality-gates.md`](docs/quality-gates.md) for the checked type scope,
+the expansion rule, and the reviewed coverage baseline.
 
 Refresh the reviewed resolution intentionally on Python 3.10:
 

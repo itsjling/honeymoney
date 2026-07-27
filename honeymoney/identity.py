@@ -19,6 +19,13 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
+from honeymoney.identity_contracts import (
+    IdentityManifest,
+    IdentityRecordState,
+    IdentityRow,
+    IdentitySourceManifest,
+)
+
 IDENTITY_MANIFEST_NAME = ".honeymoney-identity-manifest.json"
 MANIFEST_SCHEMA_VERSION = 1
 MAX_UINT64 = 2**64 - 1
@@ -155,7 +162,7 @@ class SourceResolutionResult:
 class IncomingRecordIdentity:
     """One normalized row and its immutable allocation locator."""
 
-    row: Mapping[str, Any]
+    row: IdentityRow
     locator: AllocationLocator
 
     def __post_init__(self) -> None:
@@ -180,7 +187,7 @@ class RecordResolutionDiagnostic:
 class ResolvedRecordIdentity:
     """A resolved incoming row with its persisted ownership identifiers."""
 
-    row: Mapping[str, Any]
+    row: IdentityRow
     locator: AllocationLocator
     source_record_id: str
     transaction_id: str
@@ -192,8 +199,8 @@ class RecordResolutionResult:
     """Pure result of resolving one assigned source's records."""
 
     resolved_rows: tuple[ResolvedRecordIdentity, ...]
-    source_ownership: Mapping[str, Any]
-    retained_legacy_rows: tuple[Mapping[str, Any], ...]
+    source_ownership: IdentitySourceManifest
+    retained_legacy_rows: tuple[IdentityRow, ...]
     retired_transaction_ids: tuple[str, ...]
     reset_transaction_ids: tuple[str, ...]
     diagnostics: tuple[RecordResolutionDiagnostic, ...] = ()
@@ -208,15 +215,15 @@ class RecordResolutionResult:
 class IdentityResolution:
     """Complete, pure identity work for one incoming source batch."""
 
-    resolved_rows: tuple[Mapping[str, Any], ...]
-    next_manifest: Mapping[str, Any]
-    retained_ledger_rows: tuple[Mapping[str, Any], ...]
+    resolved_rows: tuple[IdentityRow, ...]
+    next_manifest: IdentityManifest
+    retained_ledger_rows: tuple[IdentityRow, ...]
     replaced_source_ids: tuple[str, ...]
     reset_transaction_ids: tuple[str, ...]
     diagnostics: tuple[SourceResolutionDiagnostic | RecordResolutionDiagnostic, ...]
 
     @property
-    def incoming_rows(self) -> tuple[Mapping[str, Any], ...]:
+    def incoming_rows(self) -> tuple[IdentityRow, ...]:
         """Return rows ready to append to the retained ledger rows."""
         return self.resolved_rows
 
@@ -1582,7 +1589,7 @@ def ownership_record(
     source_id_value: str,
     fingerprint: str,
     origin: AllocationOrigin,
-    state: str = "active",
+    state: IdentityRecordState = "active",
     transaction_id_kind: str = "v2",
     preserved_transaction_id: str | None = None,
     current_locator: AllocationLocator | None = None,

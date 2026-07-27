@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -22,6 +23,7 @@ from honeymoney.identity import (
 )
 from honeymoney.identity_state import (
     LEGACY_CATEGORIZED_COLUMNS,
+    configured_generation_paths,
     identity_manifest_path,
     load_identity_state,
     validate_source_evidence_manifest_agreement,
@@ -172,26 +174,38 @@ class IdentityStateTest(unittest.TestCase):
         with self.assertRaisesRegex(IdentityError, "identity_manifest_invalid"):
             validate_source_evidence_manifest_agreement([], manifest)
 
-    def test_mutable_writes_preserve_manifest_bytes_and_publish_it(self) -> None:
+    def test_custom_output_generation_allows_exact_configured_corrections_and_rules(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            path = root / "categorized.csv"
+            output = root / "custom-output" / "nested"
+            output.mkdir(parents=True)
+            path = output / "ledger.csv"
             row, document = self._write_v2_state(path)
             row["category"] = "Dining"
             documents = ledger_output_documents(path, [row])
             self.assertEqual(documents[identity_manifest_path(path)], document)
 
-            corrections = root / "corrections.csv"
+            configured = root / "configured-artifacts"
+            configured.mkdir()
+            corrections = configured / "reviewed.csv"
             corrections.write_text("transaction_id,category\n", encoding="utf-8")
+            rules = configured / "local-rules.json"
+            rules.write_text('{"rules": []}\n', encoding="utf-8")
             result = apply_correction_operation(
-                {"corrections": str(corrections)},
+                {"corrections": str(corrections), "rules": str(rules)},
                 path,
                 {row["transaction_id"]: {"category": "Dining"}},
+                remembered_rules=[{"id": "synthetic-disabled", "enabled": False}],
             )
             self.assertEqual(result.applied_count, 1)
+            self.assertEqual(result.rules_added, 1)
             self.assertEqual(
                 identity_manifest_path(path).read_text(encoding="utf-8"), document
             )
+            self.assertTrue((output / "review_needed.csv").exists())
+            self.assertIn("synthetic-disabled", rules.read_text(encoding="utf-8"))
 
     def test_generation_rollback_and_recovery_include_manifest(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -234,6 +248,167 @@ class IdentityStateTest(unittest.TestCase):
                 overlap_manifest_path(path).read_text(encoding="utf-8"),
                 new_documents[overlap_manifest_path(path)],
             )
+
+    def test_configured_external_files_are_trusted_only_when_config_is_present(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            output = root / "custom-output"
+            output.mkdir()
+            path = output / "ledger.csv"
+            row, _ = self._write_v2_state(path)
+            row["category"] = "Dining"
+            documents = ledger_output_documents(path, [row])
+            configured = root / "configured-artifacts"
+            configured.mkdir()
+            corrections = configured / "reviewed.csv"
+            rules = configured / "local-rules.json"
+            documents[corrections] = "transaction_id,category\n"
+            documents[rules] = '{"rules": []}\n'
+            config = {"corrections": str(corrections), "rules": str(rules)}
+
+            import honeymoney.persistence as persistence
+
+            with patch.object(
+                persistence, "_finish_generation", side_effect=OSError("stop")
+            ):
+                with self.assertRaisesRegex(OSError, "stop"):
+                    persist_generation(path, documents)
+
+            with self.assertRaisesRegex(
+                OSError, "Unable to recover retained output generation"
+            ):
+                load_identity_state(path)
+
+            state = load_identity_state(
+                path,
+                allowed_generation_paths=configured_generation_paths(config),
+            )
+            self.assertEqual(state.rows[0]["category"], "Dining")
+            self.assertEqual(
+                corrections.read_text(encoding="utf-8"), documents[corrections]
+            )
+            self.assertEqual(rules.read_text(encoding="utf-8"), documents[rules])
+
+    def test_recovery_rejects_malformed_retained_generation_state(self) -> None:
+        def entry_with(
+            entry: dict[str, object], **changes: object
+        ) -> dict[str, object]:
+            return {**entry, **changes}
+
+        with tempfile.TemporaryDirectory() as temporary:
+            path = (Path(temporary) / "categorized.csv").resolve()
+            generation = "0" * 32
+            stem = f".{path.name}.honeymoney-{generation}"
+            entry: dict[str, object] = {
+                "target": str(path),
+                "staged": str(path.parent / f"{stem}.new"),
+                "backup": str(path.parent / f"{stem}.old"),
+                "install": str(path.parent / f"{stem}.install"),
+                "existed": False,
+                "mode": 0o600,
+                "old_sha256": None,
+                "new_sha256": "0" * 64,
+            }
+            valid_state: dict[str, object] = {
+                "schema_version": 1,
+                "generation": generation,
+                "phase": "prepared",
+                "authoritative_path": str(path),
+                "entries": [entry],
+            }
+            invalid_states: list[tuple[str, object]] = [
+                ("non_object", []),
+                ("unknown_phase", {**valid_state, "phase": "complete"}),
+                (
+                    "invalid_mode",
+                    {**valid_state, "entries": [entry_with(entry, mode="0600")]},
+                ),
+                (
+                    "invalid_hash",
+                    {**valid_state, "entries": [entry_with(entry, new_sha256="bad")]},
+                ),
+                (
+                    "inconsistent_path",
+                    {
+                        **valid_state,
+                        "entries": [
+                            entry_with(entry, staged=str(path.parent / "other.new"))
+                        ],
+                    },
+                ),
+                (
+                    "inconsistent_old_hash",
+                    {
+                        **valid_state,
+                        "entries": [entry_with(entry, old_sha256="0" * 64)],
+                    },
+                ),
+            ]
+
+            for name, state in invalid_states:
+                with self.subTest(name=name):
+                    state_path = path.parent / f".{path.name}.honeymoney-state.json"
+                    state_path.write_text(json.dumps(state), encoding="utf-8")
+                    with self.assertRaisesRegex(
+                        OSError, "Unable to recover retained output generation"
+                    ):
+                        recover_generation(path)
+                    self.assertTrue(state_path.exists())
+
+    def test_recovery_never_removes_an_untrusted_target(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            workspace = root / "workspace"
+            output = workspace / "output"
+            output.mkdir(parents=True)
+            path = (output / "categorized.csv").resolve()
+            outside = root / "outside"
+            outside.mkdir()
+            sentinel = (outside / "sentinel.csv").resolve()
+            sentinel.write_text("must remain\n", encoding="utf-8")
+            generation = "0" * 32
+
+            def entry(target: Path) -> dict[str, object]:
+                stem = f".{target.name}.honeymoney-{generation}"
+                return {
+                    "target": str(target),
+                    "staged": str(target.parent / f"{stem}.new"),
+                    "backup": str(target.parent / f"{stem}.old"),
+                    "install": str(target.parent / f"{stem}.install"),
+                    "existed": False,
+                    "mode": 0o600,
+                    "old_sha256": None,
+                    "new_sha256": "0" * 64,
+                }
+
+            for phase in ("staging", "prepared"):
+                with self.subTest(phase=phase):
+                    state_path = output / ".categorized.csv.honeymoney-state.json"
+                    state_path.write_text(
+                        json.dumps(
+                            {
+                                "schema_version": 1,
+                                "generation": generation,
+                                "phase": phase,
+                                "authoritative_path": str(path),
+                                "entries": [entry(path), entry(sentinel)],
+                            }
+                        ),
+                        encoding="utf-8",
+                    )
+
+                    with self.assertRaisesRegex(
+                        OSError, "Unable to recover retained output generation"
+                    ):
+                        recover_generation(path)
+                    self.assertEqual(
+                        sentinel.read_text(encoding="utf-8"), "must remain\n"
+                    )
+                    self.assertTrue(state_path.exists())
 
     def test_ambiguous_legacy_correction_and_reconciliation_leave_rows_intact(
         self,

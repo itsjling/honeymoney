@@ -10,7 +10,7 @@ import re
 import struct
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Mapping, Sequence, cast
 
 from honeymoney.identity import (
     IdentityError,
@@ -19,17 +19,31 @@ from honeymoney.identity import (
     normalized_record_identity,
     record_fingerprint,
 )
+from honeymoney.overlap_contracts import (
+    DuplicateGroupListing,
+    DuplicateOccurrenceEvidence,
+    LegacyOverlapManifest,
+    OverlapDecision,
+    OverlapDiagnostic,
+    OverlapGroup,
+    OverlapGroupDiagnostic,
+    OverlapManifest,
+    OverlapMembership,
+    OverlapProvenanceStatus,
+    OverlapSlot,
+    OverlapWarning,
+)
 from honeymoney.schema import CATEGORIZED_COLUMNS
 
 OVERLAP_MANIFEST_SCHEMA_VERSION = 2
 OVERLAP_MANIFEST_NAME = ".honeymoney-overlap-manifest.json"
 SOURCE_OCCURRENCES_NAME = ".honeymoney-source-occurrences.csv"
 
-SINGLE_SOURCE_STATUS = "single_source"
-EXACT_ONE_TO_ONE_STATUS = "exact_one_to_one"
-EQUAL_POOL_STATUS = "pooled_equal_count"
-AMBIGUOUS_COUNT_STATUS = "ambiguous_count_mismatch"
-PROVENANCE_STATUSES = {
+SINGLE_SOURCE_STATUS: OverlapProvenanceStatus = "single_source"
+EXACT_ONE_TO_ONE_STATUS: OverlapProvenanceStatus = "exact_one_to_one"
+EQUAL_POOL_STATUS: OverlapProvenanceStatus = "pooled_equal_count"
+AMBIGUOUS_COUNT_STATUS: OverlapProvenanceStatus = "ambiguous_count_mismatch"
+PROVENANCE_STATUSES: set[OverlapProvenanceStatus] = {
     SINGLE_SOURCE_STATUS,
     EXACT_ONE_TO_ONE_STATUS,
     EQUAL_POOL_STATUS,
@@ -113,8 +127,8 @@ class CanonicalizationResult:
     """Complete canonical ledger and overlap-manifest result."""
 
     rows: list[dict[str, str]]
-    manifest: dict[str, Any]
-    diagnostic: dict[str, Any]
+    manifest: OverlapManifest
+    diagnostic: OverlapDiagnostic
     source_occurrence_count: int
     canonical_occurrence_count: int
     consolidated_occurrence_count: int
@@ -150,7 +164,7 @@ class DuplicateResolutionError(ValueError):
         super().__init__(code)
 
 
-def empty_overlap_manifest(namespace_key: str) -> dict[str, Any]:
+def empty_overlap_manifest(namespace_key: str) -> OverlapManifest:
     """Return an empty manifest for one persisted workspace namespace."""
     if _NAMESPACE_RE.fullmatch(namespace_key) is None:
         raise ValueError("overlap_manifest_invalid")
@@ -169,7 +183,7 @@ def overlap_manifest_path(categorized_path: Path) -> Path:
     return Path(categorized_path).parent / OVERLAP_MANIFEST_NAME
 
 
-def overlap_manifest_document(manifest: Mapping[str, Any]) -> str:
+def overlap_manifest_document(manifest: Mapping[str, object]) -> str:
     copied = _validated_manifest_copy(manifest)
     return (
         json.dumps(copied, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
@@ -177,7 +191,7 @@ def overlap_manifest_document(manifest: Mapping[str, Any]) -> str:
     )
 
 
-def parse_overlap_manifest(document: str) -> dict[str, Any]:
+def parse_overlap_manifest(document: str) -> OverlapManifest | LegacyOverlapManifest:
     try:
         value = json.loads(document)
     except (TypeError, json.JSONDecodeError) as error:
@@ -200,13 +214,13 @@ def parse_overlap_manifest(document: str) -> dict[str, Any]:
         canonical = overlap_manifest_document(value)
     if canonical != document:
         raise ValueError("overlap_manifest_invalid")
-    return value
+    return cast(OverlapManifest | LegacyOverlapManifest, value)
 
 
 def validate_overlap_agreement(
-    canonical_rows: list[Mapping[str, Any]] | tuple[Mapping[str, Any], ...],
-    source_occurrences: list[Mapping[str, Any]] | tuple[Mapping[str, Any], ...],
-    manifest: Mapping[str, Any],
+    canonical_rows: Sequence[Mapping[str, object]],
+    source_occurrences: Sequence[Mapping[str, object]],
+    manifest: Mapping[str, object],
 ) -> None:
     """Require canonical rows to equal the manifest's active multiset slots."""
     expected = canonicalize_overlaps(source_occurrences, canonical_rows, manifest)
@@ -371,15 +385,15 @@ def release_overlap_review_ownership(rows: list[dict[str, str]]) -> None:
 
 def list_duplicate_groups(
     result: CanonicalizationResult,
-    source_occurrences: list[Mapping[str, Any]] | tuple[Mapping[str, Any], ...],
-) -> list[dict[str, Any]]:
+    source_occurrences: Sequence[Mapping[str, object]],
+) -> list[DuplicateGroupListing]:
     """Return bounded local evidence for unresolved count mismatches."""
     by_id = {
         str(row.get("transaction_id", "")): row
         for row in source_occurrences
         if row.get("transaction_id")
     }
-    groups: list[dict[str, Any]] = []
+    groups: list[DuplicateGroupListing] = []
     for diagnostic in result.diagnostic["groups"]:
         if (
             diagnostic["provenance_status"] != AMBIGUOUS_COUNT_STATUS
@@ -391,7 +405,7 @@ def list_duplicate_groups(
             for pool in diagnostic["source_occurrence_pools"]
             for identifier in pool
         )
-        occurrences = []
+        occurrences: list[DuplicateOccurrenceEvidence] = []
         for identifier in occurrence_ids:
             row = by_id[identifier]
             occurrences.append(
@@ -436,9 +450,9 @@ def list_duplicate_groups(
 
 
 def resolve_duplicate_group(
-    source_occurrences: list[Mapping[str, Any]] | tuple[Mapping[str, Any], ...],
-    prior_canonical_rows: list[Mapping[str, Any]] | tuple[Mapping[str, Any], ...],
-    prior_manifest: Mapping[str, Any],
+    source_occurrences: Sequence[Mapping[str, object]],
+    prior_canonical_rows: Sequence[Mapping[str, object]],
+    prior_manifest: Mapping[str, object],
     review_group_id: str,
     choice: str,
     corrections: Mapping[str, Mapping[str, str]],
@@ -446,6 +460,7 @@ def resolve_duplicate_group(
     """Apply one decision to the exact current membership or fail closed."""
     if choice not in {"same-event", "keep-all"}:
         raise DuplicateResolutionError("duplicate_choice_invalid")
+    decision = cast(OverlapDecision, choice)
     current = canonicalize_overlaps(
         source_occurrences, prior_canonical_rows, prior_manifest
     )
@@ -468,7 +483,7 @@ def resolve_duplicate_group(
         raise DuplicateResolutionError("duplicate_group_unknown")
     existing_resolution = diagnostic["decision"]
     if existing_resolution is not None:
-        if existing_resolution != choice:
+        if existing_resolution != decision:
             raise DuplicateResolutionError("duplicate_resolution_conflict")
         count = len(diagnostic["canonical_transaction_ids"])
         return DuplicateResolution(
@@ -483,7 +498,7 @@ def resolve_duplicate_group(
 
     removed_correction_ids: tuple[str, ...] = ()
     correction_updates: dict[str, dict[str, str]] = {}
-    if choice == "same-event":
+    if decision == "same-event":
         removed_correction_ids, correction_updates = _safe_tail_corrections(
             current, diagnostic, corrections
         )
@@ -497,7 +512,7 @@ def resolve_duplicate_group(
     membership = next(
         item for item in group["memberships"] if item["group_id"] == review_group_id
     )
-    membership["resolution"] = choice
+    membership["resolution"] = decision
     resolved = canonicalize_overlaps(source_occurrences, current.rows, manifest)
     for row in resolved.rows:
         correction = corrections.get(row["transaction_id"])
@@ -518,9 +533,9 @@ def resolve_duplicate_group(
 
 
 def canonicalize_overlaps(
-    source_occurrences: list[Mapping[str, Any]] | tuple[Mapping[str, Any], ...],
-    prior_canonical_rows: list[Mapping[str, Any]] | tuple[Mapping[str, Any], ...],
-    prior_manifest: Mapping[str, Any],
+    source_occurrences: Sequence[Mapping[str, object]],
+    prior_canonical_rows: Sequence[Mapping[str, object]],
+    prior_manifest: Mapping[str, object],
 ) -> CanonicalizationResult:
     """Return the canonical multiset without assigning repeated source rows."""
     occurrences = tuple(source_occurrences)
@@ -528,16 +543,19 @@ def canonicalize_overlaps(
     manifest = _validated_manifest_copy(prior_manifest)
     namespace_key = manifest["namespace_key"]
 
-    buckets: dict[str, list[Mapping[str, Any]]] = {}
+    buckets: dict[str, list[Mapping[str, object]]] = {}
     legacy_rows: list[dict[str, str]] = []
-    for row in occurrences:
-        if not has_stable_v2_identity(row):
+    for occurrence in occurrences:
+        if not has_stable_v2_identity(occurrence):
             legacy_rows.append(
-                {column: str(row.get(column, "")) for column in CATEGORIZED_COLUMNS}
+                {
+                    column: str(occurrence.get(column, ""))
+                    for column in CATEGORIZED_COLUMNS
+                }
             )
             continue
-        fingerprint = record_fingerprint(row)
-        buckets.setdefault(fingerprint, []).append(row)
+        fingerprint = record_fingerprint(occurrence)
+        buckets.setdefault(fingerprint, []).append(occurrence)
 
     prior_groups = {
         str(group["record_fingerprint"]): group for group in manifest["groups"]
@@ -549,9 +567,9 @@ def canonicalize_overlaps(
         if row.get("transaction_id")
     }
 
-    next_groups: list[dict[str, Any]] = []
+    next_groups: list[OverlapGroup] = []
     canonical_rows: list[dict[str, str]] = []
-    diagnostics: list[dict[str, Any]] = []
+    diagnostics: list[OverlapGroupDiagnostic] = []
     ambiguous_groups = 0
     changed_review_group_ids: set[str] = set()
     source_transaction_ids = {
@@ -583,7 +601,8 @@ def canonicalize_overlaps(
             else _group_id(namespace_key, fingerprint)
         )
         prior_slots = {
-            int(slot["slot"]): slot for slot in (prior_group or {}).get("slots", [])
+            int(slot["slot"]): slot
+            for slot in (prior_group["slots"] if prior_group is not None else [])
         }
         slot_count = max(keep_all_count, max(prior_slots, default=0))
         slot_identifiers = [
@@ -602,7 +621,9 @@ def canonicalize_overlaps(
             slot_identifiers[same_event_count:keep_all_count],
         )
         review_group_id = _review_group_id(namespace_key, group_id, membership_digest)
-        memberships = copy.deepcopy((prior_group or {}).get("memberships", []))
+        memberships: list[OverlapMembership] = copy.deepcopy(
+            prior_group["memberships"] if prior_group is not None else []
+        )
         status = _provenance_status(source_counts)
         matching_membership = next(
             (
@@ -633,16 +654,16 @@ def canonicalize_overlaps(
                 }
                 memberships.append(matching_membership)
                 memberships.sort(key=lambda item: item["membership_digest"])
-        decision_choice = (
-            str(matching_membership["resolution"])
-            if matching_membership is not None
+        decision_choice: OverlapDecision | None = None
+        if (
+            matching_membership is not None
             and matching_membership["resolution"] != "unresolved"
-            else None
-        )
+        ):
+            decision_choice = matching_membership["resolution"]
         active_count = (
             same_event_count if decision_choice == "same-event" else keep_all_count
         )
-        slots = []
+        slots: list[OverlapSlot] = []
         for slot_number, identifier in enumerate(slot_identifiers, start=1):
             slots.append(
                 {
@@ -664,7 +685,7 @@ def canonicalize_overlaps(
 
         if status == AMBIGUOUS_COUNT_STATUS and decision_choice is None:
             ambiguous_groups += 1
-        diagnostic = {
+        group_diagnostic: OverlapGroupDiagnostic = {
             "group_id": group_id,
             "canonical_group_id": group_id,
             "review_group_id": review_group_id,
@@ -685,7 +706,7 @@ def canonicalize_overlaps(
                 for pool in source_pools
             ],
         }
-        diagnostics.append(diagnostic)
+        diagnostics.append(group_diagnostic)
 
         agreed_template, history_ambiguous = _agreed_canonical_template(bucket)
         for slot in slots[:active_count]:
@@ -693,11 +714,11 @@ def canonicalize_overlaps(
             if identifier in source_transaction_ids:
                 raise ValueError("overlap_identity_hash_conflict")
             prior = prior_by_id.get(identifier)
-            row = copy.deepcopy(agreed_template)
+            canonical_row: dict[str, str] = copy.deepcopy(agreed_template)
             if prior is not None:
                 for field in _MUTABLE_FIELDS:
-                    row[field] = str(prior.get(field, ""))
-            row.update(
+                    canonical_row[field] = str(prior.get(field, ""))
+            canonical_row.update(
                 {
                     "transaction_id": identifier,
                     "canonical_group_id": group_id,
@@ -706,12 +727,14 @@ def canonicalize_overlaps(
                     "source_occurrence_count": str(len(bucket)),
                 }
             )
-            _clear_source_provenance(row)
-            _clear_duplicate_state(row)
-            _apply_overlap_review(row, status, resolved=decision_choice is not None)
+            _clear_source_provenance(canonical_row)
+            _clear_duplicate_state(canonical_row)
+            _apply_overlap_review(
+                canonical_row, status, resolved=decision_choice is not None
+            )
             if history_ambiguous and prior is None:
-                apply_history_ambiguity([row], {identifier})
-            canonical_rows.append(row)
+                apply_history_ambiguity([canonical_row], {identifier})
+            canonical_rows.append(canonical_row)
 
     next_groups.sort(key=lambda group: group["overlap_group_id"])
     canonical_rows.sort(
@@ -730,22 +753,23 @@ def canonicalize_overlaps(
     )
     canonical_rows.extend(legacy_rows)
     diagnostics.sort(key=lambda item: item["group_id"])
-    next_manifest = {
+    next_manifest: OverlapManifest = {
         "schema_version": OVERLAP_MANIFEST_SCHEMA_VERSION,
         "namespace_key": namespace_key,
         "groups": next_groups,
     }
     _validate_manifest(next_manifest)
-    diagnostic = {
+    warnings: list[OverlapWarning] = [
+        {
+            "code": "duplicate_membership_changed",
+            "group_id": review_group_id,
+        }
+        for review_group_id in sorted(changed_review_group_ids)
+    ]
+    overlap_diagnostic: OverlapDiagnostic = {
         "group_count": len(diagnostics),
         "ambiguous_group_count": ambiguous_groups,
-        "warnings": [
-            {
-                "code": "duplicate_membership_changed",
-                "group_id": review_group_id,
-            }
-            for review_group_id in sorted(changed_review_group_ids)
-        ],
+        "warnings": warnings,
         "source_occurrence_count": len(occurrences),
         "canonical_occurrence_count": len(canonical_rows),
         "consolidated_occurrence_count": len(occurrences) - len(canonical_rows),
@@ -760,7 +784,7 @@ def canonicalize_overlaps(
     return CanonicalizationResult(
         rows=canonical_rows,
         manifest=next_manifest,
-        diagnostic=diagnostic,
+        diagnostic=overlap_diagnostic,
         source_occurrence_count=len(occurrences),
         canonical_occurrence_count=len(canonical_rows),
         consolidated_occurrence_count=len(occurrences) - len(canonical_rows),
@@ -769,9 +793,9 @@ def canonicalize_overlaps(
 
 
 def _source_pools(
-    bucket: list[Mapping[str, Any]],
-) -> list[list[Mapping[str, Any]]]:
-    by_source: dict[str, list[Mapping[str, Any]]] = {}
+    bucket: list[Mapping[str, object]],
+) -> list[list[Mapping[str, object]]]:
+    by_source: dict[str, list[Mapping[str, object]]] = {}
     for row in bucket:
         by_source.setdefault(str(row["source_id"]), []).append(row)
     pools = [
@@ -783,8 +807,8 @@ def _source_pools(
 
 
 def _prior_group_has_resolved_review(
-    prior_slots: Mapping[int, Mapping[str, Any]],
-    prior_rows: Mapping[str, Mapping[str, Any]],
+    prior_slots: Mapping[int, Mapping[str, object]],
+    prior_rows: Mapping[str, Mapping[str, object]],
 ) -> bool:
     for slot in prior_slots.values():
         if slot.get("state") != "active":
@@ -799,15 +823,17 @@ def _prior_group_has_resolved_review(
 
 
 def _prior_group_has_resolved_membership(
-    prior_group: Mapping[str, Any] | None,
+    prior_group: OverlapGroup | None,
 ) -> bool:
+    if prior_group is None:
+        return False
     return any(
         membership.get("resolution") in {"same-event", "keep-all"}
-        for membership in (prior_group or {}).get("memberships", [])
+        for membership in prior_group["memberships"]
     )
 
 
-def _provenance_status(source_counts: list[int]) -> str:
+def _provenance_status(source_counts: list[int]) -> OverlapProvenanceStatus:
     if len(source_counts) == 1:
         return SINGLE_SOURCE_STATUS
     if source_counts == [1] * len(source_counts):
@@ -818,7 +844,7 @@ def _provenance_status(source_counts: list[int]) -> str:
 
 
 def _agreed_canonical_template(
-    bucket: list[Mapping[str, Any]],
+    bucket: list[Mapping[str, object]],
 ) -> tuple[dict[str, str], bool]:
     row = {column: "" for column in CATEGORIZED_COLUMNS}
     identities = [normalized_record_identity(item) for item in bucket]
@@ -867,7 +893,7 @@ def _agreed_canonical_template(
     return row, history_ambiguous
 
 
-def _has_processed_history(row: Mapping[str, Any]) -> bool:
+def _has_processed_history(row: Mapping[str, object]) -> bool:
     flags = str(row.get("flags", "")).split(";")
     return (
         str(row.get("category", "")) not in {"", "Unknown"}
@@ -878,7 +904,7 @@ def _has_processed_history(row: Mapping[str, Any]) -> bool:
     )
 
 
-def _source_mutable_value(row: Mapping[str, Any], field: str) -> str:
+def _source_mutable_value(row: Mapping[str, object], field: str) -> str:
     value = str(row.get(field, ""))
     if field == "flags":
         return ";".join(
@@ -895,7 +921,7 @@ def _source_mutable_value(row: Mapping[str, Any], field: str) -> str:
     return value
 
 
-def _agreed_value(bucket: list[Mapping[str, Any]], field: str, fallback: str) -> str:
+def _agreed_value(bucket: list[Mapping[str, object]], field: str, fallback: str) -> str:
     values = {str(item.get(field, "")) for item in bucket}
     return next(iter(values)) if len(values) == 1 else fallback
 
@@ -968,8 +994,8 @@ def _remove_reason(reasons: str, reason: str) -> str:
 
 
 def _validate_canonical_amount_hkd(
-    canonical_row: Mapping[str, Any],
-    source_occurrences: list[Mapping[str, Any]] | tuple[Mapping[str, Any], ...],
+    canonical_row: Mapping[str, object],
+    source_occurrences: Sequence[Mapping[str, object]],
     group_fingerprint: str,
 ) -> None:
     """Require each canonical total to match its active source evidence."""
@@ -1007,8 +1033,8 @@ def _canonical_transaction_id(namespace_key: str, group_id: str, slot: int) -> s
 
 def _membership_digest(
     namespace_key: str,
-    bucket: list[Mapping[str, Any]],
-    source_pools: list[list[Mapping[str, Any]]],
+    bucket: list[Mapping[str, object]],
+    source_pools: list[list[Mapping[str, object]]],
     canonical_slot_ids: list[str],
     ambiguous_tail_ids: list[str],
 ) -> str:
@@ -1072,14 +1098,14 @@ def _keyed_digest(namespace_key: str, domain: str, *components: bytes) -> str:
     return hmac.new(key, bytes(framed), hashlib.sha256).hexdigest()
 
 
-def _validated_manifest_copy(manifest: Mapping[str, Any]) -> dict[str, Any]:
+def _validated_manifest_copy(manifest: Mapping[str, object]) -> OverlapManifest:
     copied = copy.deepcopy(dict(manifest))
     if copied.get("schema_version") == 1:
         _validate_v1_manifest(copied)
-        namespace_key = copied["namespace_key"]
-        copied = {
+        legacy = cast(LegacyOverlapManifest, copied)
+        return {
             "schema_version": OVERLAP_MANIFEST_SCHEMA_VERSION,
-            "namespace_key": namespace_key,
+            "namespace_key": legacy["namespace_key"],
             "groups": [
                 {
                     "overlap_group_id": group["group_id"],
@@ -1087,14 +1113,14 @@ def _validated_manifest_copy(manifest: Mapping[str, Any]) -> dict[str, Any]:
                     "memberships": [],
                     "slots": group["slots"],
                 }
-                for group in copied["groups"]
+                for group in legacy["groups"]
             ],
         }
     _validate_manifest(copied)
-    return copied
+    return cast(OverlapManifest, copied)
 
 
-def _validate_manifest(manifest: Mapping[str, Any]) -> None:
+def _validate_manifest(manifest: Mapping[str, object]) -> None:
     if set(manifest) != {"schema_version", "namespace_key", "groups"}:
         raise ValueError("overlap_manifest_invalid")
     if manifest.get("schema_version") != OVERLAP_MANIFEST_SCHEMA_VERSION:
@@ -1192,21 +1218,22 @@ def _validate_manifest(manifest: Mapping[str, Any]) -> None:
             seen_transactions.add(identifier)
 
 
-def _validate_v1_manifest(manifest: Mapping[str, Any]) -> None:
+def _validate_v1_manifest(manifest: Mapping[str, object]) -> None:
     if set(manifest) != {"schema_version", "namespace_key", "groups"}:
         raise ValueError("overlap_manifest_invalid")
     namespace_key = manifest.get("namespace_key")
+    groups = manifest.get("groups")
     if (
         manifest.get("schema_version") != 1
         or not isinstance(namespace_key, str)
         or _NAMESPACE_RE.fullmatch(namespace_key) is None
-        or not isinstance(manifest.get("groups"), list)
+        or not isinstance(groups, list)
     ):
         raise ValueError("overlap_manifest_invalid")
     prior_group = ""
     seen_transactions: set[str] = set()
     seen_fingerprints: set[str] = set()
-    for group in manifest["groups"]:
+    for group in groups:
         if not isinstance(group, dict) or set(group) != {
             "group_id",
             "record_fingerprint",
@@ -1252,7 +1279,7 @@ def _validate_v1_manifest(manifest: Mapping[str, Any]) -> None:
 
 def _safe_tail_corrections(
     result: CanonicalizationResult,
-    diagnostic: Mapping[str, Any],
+    diagnostic: OverlapGroupDiagnostic,
     corrections: Mapping[str, Mapping[str, str]],
 ) -> tuple[tuple[str, ...], dict[str, dict[str, str]]]:
     rows = [
@@ -1302,7 +1329,7 @@ def _safe_tail_corrections(
 
 
 def _project_correction(
-    row: Mapping[str, Any], patch: Mapping[str, str]
+    row: Mapping[str, object], patch: Mapping[str, str]
 ) -> dict[str, str]:
     projected = {str(key): str(value) for key, value in row.items()}
     for field in (
@@ -1326,7 +1353,9 @@ def _project_correction(
     return projected
 
 
-def _protected_history(row: Mapping[str, Any]) -> tuple[tuple[str, str], ...]:
+def _protected_history(
+    row: Mapping[str, object], *, ignored_fields: set[str] | None = None
+) -> tuple[tuple[str, str], ...]:
     values = {field: str(row.get(field, "")) for field in _MUTABLE_FIELDS}
     values["flags"] = ";".join(
         item
@@ -1334,7 +1363,11 @@ def _protected_history(row: Mapping[str, Any]) -> tuple[tuple[str, str], ...]:
         if item and item not in {OVERLAP_AMBIGUITY_FLAG, OVERLAP_PRIOR_REVIEW_FLAG}
     )
     values["reason"] = _without_owned_reason(values["reason"], OVERLAP_AMBIGUITY_REASON)
-    return tuple((field, values[field]) for field in _MUTABLE_FIELDS)
+    return tuple(
+        (field, values[field])
+        for field in _MUTABLE_FIELDS
+        if field not in (ignored_fields or set())
+    )
 
 
 def _without_owned_reason(value: str, owned_reason: str) -> str:
@@ -1345,11 +1378,11 @@ def _without_owned_reason(value: str, owned_reason: str) -> str:
     )
 
 
-def _bounded(value: Any, limit: int = 120) -> str:
+def _bounded(value: object, limit: int = 120) -> str:
     text = str(value)
     return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
-def _safe_source_display(value: Any) -> str:
+def _safe_source_display(value: object) -> str:
     parts = re.split(r"[/\\\\]+", str(value))
     return _bounded(parts[-1] if parts else "")

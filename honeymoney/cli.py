@@ -49,7 +49,7 @@ from honeymoney.identity import (
     ambiguous_legacy_transaction_ids,
     resolve_batch,
 )
-from honeymoney.identity_state import load_identity_state
+from honeymoney.identity_state import load_configured_identity_state
 from honeymoney.ollama import (
     OllamaProgress,
     apply_ollama_fallback,
@@ -67,7 +67,11 @@ from honeymoney.overlap import (
     release_overlap_review_ownership,
     resolve_duplicate_group,
 )
-from honeymoney.persistence import persist_generation, recover_generation
+from honeymoney.persistence import (
+    configured_generation_paths,
+    persist_generation,
+    recover_generation,
+)
 from honeymoney.reconciliation import (
     reconcile_ledger,
     reconciliation_date_window,
@@ -245,7 +249,7 @@ def _run_pipeline(
     input_files = importers._discover_input_files(input_path)
     profiles = importers._load_profiles(config)
     profile_mappings = importers._load_profile_mappings(config)
-    identity_state = load_identity_state(categorized_path)
+    identity_state = load_configured_identity_state(categorized_path, config)
     transactions, import_warnings, file_reports, identity_sources = (
         importers._import_transactions(
             input_files,
@@ -585,7 +589,7 @@ def _duplicates_command(argv: list[str]) -> int:
 
     config = _load_config(args.config_path)
     categorized_path = Path(args.output_path or config["paths"]["output"])
-    state = load_identity_state(categorized_path)
+    state = load_configured_identity_state(categorized_path, config)
     if state.canonical_migration_required:
         raise DuplicateResolutionError("duplicate_canonical_migration_required")
     current = canonicalize_overlaps(
@@ -647,7 +651,7 @@ def _duplicates_resolve_command(argv: list[str]) -> int:
 
     config = _load_config(args.config_path)
     categorized_path = Path(args.output_path or config["paths"]["output"])
-    state = load_identity_state(categorized_path)
+    state = load_configured_identity_state(categorized_path, config)
     if state.canonical_migration_required:
         raise DuplicateResolutionError("duplicate_canonical_migration_required")
     corrections = load_corrections(config)
@@ -1398,7 +1402,7 @@ def _review_command(argv: list[str]) -> int:
             "Unsupported review category: " + ", ".join(unsupported_categories)
         )
     categorized_path = Path(args.output_path or config["paths"]["output"])
-    ledger_rows = read_ledger(categorized_path)
+    ledger_rows = read_ledger(categorized_path, config=config)
     _reject_ambiguous_legacy_transaction_ids(ledger_rows)
     if not ledger_rows:
         if args.transaction_id:
@@ -1955,7 +1959,7 @@ def _status_command(argv: list[str]) -> int:
     start, end = _resolve_period(args.month or args.period, args.start, args.end)
     config = _load_config(args.config_path)
     categorized_path = Path(config["paths"]["output"])
-    state = load_identity_state(categorized_path)
+    state = load_configured_identity_state(categorized_path, config)
     ledger_rows = _normalize_loaded_rows(state.rows)
     if not ledger_rows:
         if args.json:
@@ -2106,7 +2110,7 @@ def _report_command(argv: list[str]) -> int:
 
     config = _load_config(args.config_path)
     categorized_path = Path(config["paths"]["output"])
-    state = load_identity_state(categorized_path)
+    state = load_configured_identity_state(categorized_path, config)
     ledger_rows = _normalize_loaded_rows(state.rows)
     current_overlap = (
         None
@@ -2182,7 +2186,7 @@ def _reconcile_command(argv: list[str]) -> int:
     categorized_path = Path(args.output_path or config["paths"]["output"])
     corrections = load_corrections(config)
     final_review_ids = _final_review_ids(corrections)
-    state = load_identity_state(categorized_path)
+    state = load_configured_identity_state(categorized_path, config)
     if (
         state.canonical_migration_required
         and not state.bootstrap_required
@@ -2286,7 +2290,7 @@ def _pending_command(argv: list[str]) -> int:
     start, end = _resolve_period(args.month or args.period, args.start, args.end)
     config = _load_config(args.config_path)
     categorized_path = Path(config["paths"]["output"])
-    state = load_identity_state(categorized_path)
+    state = load_configured_identity_state(categorized_path, config)
     ledger_rows = _normalize_loaded_rows(state.rows)
     refresh_duplicate_candidates(
         ledger_rows,
@@ -2372,7 +2376,7 @@ def _correct_command(argv: list[str]) -> int:
 
     config = _load_config(args.config_path)
     categorized_path = Path(args.output_path or config["paths"]["output"])
-    ledger_rows = read_ledger(categorized_path)
+    ledger_rows = read_ledger(categorized_path, config=config)
     _reject_ambiguous_legacy_transaction_ids(ledger_rows)
     ledger_ids = {
         row["transaction_id"] for row in ledger_rows if row.get("transaction_id")
@@ -2963,7 +2967,10 @@ def _recover_config_generation(config: dict[str, Any]) -> None:
     paths = config.get("paths", {})
     output = paths.get("output") if isinstance(paths, dict) else None
     if isinstance(output, str) and output.strip():
-        recover_generation(Path(output))
+        recover_generation(
+            Path(output),
+            allowed_generation_paths=configured_generation_paths(config),
+        )
 
 
 def _identity_diagnostic_warning(diagnostic: Any) -> str:

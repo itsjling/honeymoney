@@ -3,9 +3,16 @@ from __future__ import annotations
 import hashlib
 from datetime import date
 from decimal import Decimal, InvalidOperation
-from typing import Any
+from typing import Mapping
 
 from honeymoney.classification_policy import trusted_accounting_provenance
+from honeymoney.contracts import (
+    AccountBalance,
+    BalanceReconciliation,
+    Config,
+    ReconciliationSummary,
+    StatementBalance,
+)
 from honeymoney.duplicates import (
     DUPLICATE_REVIEW_PROMOTED_FLAG,
     release_duplicate_review_ownership,
@@ -26,10 +33,10 @@ AMBIGUITY_REASON = "Ambiguous transfer candidates"
 
 def reconcile_ledger(
     rows: list[dict[str, str]],
-    config: dict[str, Any],
+    config: Config,
     *,
     statement_rows: list[dict[str, str]] | None = None,
-) -> dict[str, Any]:
+) -> ReconciliationSummary:
     """Derive cash-flow treatment and pair unique owned-account transfers."""
     window = reconciliation_date_window(config)
     ambiguous_legacy_ids = ambiguous_legacy_transaction_ids(rows)
@@ -138,8 +145,12 @@ def reconcile_ledger(
     }
 
 
-def reconciliation_date_window(config: dict[str, Any]) -> int:
-    value = config.get("reconciliation", {}).get("date_window_days", 3)
+def reconciliation_date_window(config: Config) -> int:
+    raw_reconciliation = config.get("reconciliation", {})
+    reconciliation = (
+        raw_reconciliation if isinstance(raw_reconciliation, Mapping) else {}
+    )
+    value = reconciliation.get("date_window_days", 3)
     if isinstance(value, bool) or not isinstance(value, int) or value < 0 or value > 31:
         raise ValueError(
             "Config field reconciliation.date_window_days must be an integer from 0 to 31"
@@ -318,7 +329,7 @@ def _row_date(row: dict[str, str]) -> date | None:
 
 def _balance_reconciliation(
     rows: list[dict[str, str]],
-) -> dict[str, dict[str, Any]]:
+) -> BalanceReconciliation:
     groups: dict[tuple[str, str, str, str], list[dict[str, str]]] = {}
     for row in rows:
         account_id = row.get("account_id", "")
@@ -332,7 +343,7 @@ def _balance_reconciliation(
             (account_id, source_kind, source_value, posted_currency), []
         ).append(row)
 
-    accounts: dict[str, dict[str, Any]] = {}
+    accounts: BalanceReconciliation = {}
     for (
         account_id,
         _source_kind,
@@ -346,7 +357,7 @@ def _balance_reconciliation(
                 if row.get("source_file", "")
             }
         )
-        statement: dict[str, Any] = {
+        statement: StatementBalance = {
             "source_file": source_files[0] if source_files else "",
             "posted_currency": posted_currency,
             "status": "unavailable",
@@ -401,7 +412,7 @@ def _balance_reconciliation(
                         "difference": _decimal_text(difference),
                     }
                 )
-        account = accounts.setdefault(
+        account: AccountBalance = accounts.setdefault(
             account_id,
             {
                 "status": "unavailable",
