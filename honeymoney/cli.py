@@ -2606,6 +2606,8 @@ def _reconcile_command(argv: list[str]) -> int:
     config = _load_config(args.config_path)
     categorized_path = Path(args.output_path or config["paths"]["output"])
     corrections = load_corrections(config)
+    effective_corrections = corrections
+    removed_correction_ids: set[str] = set()
     final_review_ids = _final_review_ids(corrections)
     state = load_configured_identity_state(categorized_path, config)
     if (
@@ -2617,9 +2619,14 @@ def _reconcile_command(argv: list[str]) -> int:
             state.source_rows, [], state.overlap_manifest
         )
         rows = _normalize_loaded_rows(overlap_result.rows, config)
-        correction_projection = project_corrections(
-            overlap_result, load_corrections(config)
-        )
+        correction_projection = project_corrections(overlap_result, corrections)
+        effective_corrections = correction_projection.corrections
+        removed_correction_ids = {
+            row.get("transaction_id", "")
+            for row in state.source_rows
+            if row.get("transaction_id", "") in corrections
+        }
+        final_review_ids = _final_review_ids(effective_corrections)
         apply_corrections(rows, correction_projection.corrections)
         apply_history_ambiguity(rows, correction_projection.ambiguous_transaction_ids)
     else:
@@ -2648,10 +2655,21 @@ def _reconcile_command(argv: list[str]) -> int:
     if not args.dry_run:
         correction_document: tuple[Path, str] | None = None
         if config.get("corrections"):
-            correction_updates = review_state_correction_updates(corrections, rows)
+            correction_updates = (
+                {
+                    transaction_id: dict(patch)
+                    for transaction_id, patch in effective_corrections.items()
+                }
+                if removed_correction_ids
+                else {}
+            )
+            correction_updates.update(
+                review_state_correction_updates(effective_corrections, rows)
+            )
             correction_path, correction_content, _ = prepare_corrections_document(
                 config,
                 correction_updates,
+                removed_transaction_ids=removed_correction_ids,
             )
             correction_document = (correction_path, correction_content)
         _write_ledger_outputs(

@@ -61,6 +61,12 @@ def review_reason_labels(value: str) -> list[str]:
     return [REVIEW_REASON_LABELS[item] for item in review_reason_tokens(value)]
 
 
+def has_identity_review_evidence(row: Mapping[str, str]) -> bool:
+    """Return whether current flags require an identity decision."""
+    flags = set(filter(None, str(row.get("flags", "")).split(";")))
+    return bool(flags & _IDENTITY_FLAGS)
+
+
 def set_review_reason(
     row: dict[str, str],
     reason: str,
@@ -126,7 +132,7 @@ def synchronize_review_state(
     else:
         reasons.discard(REVIEW_REASON_ACCOUNTING_FLOW)
 
-    if flags & _IDENTITY_FLAGS:
+    if has_identity_review_evidence(row):
         reasons.add(REVIEW_REASON_IDENTITY)
     else:
         reasons.discard(REVIEW_REASON_IDENTITY)

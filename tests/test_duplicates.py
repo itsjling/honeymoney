@@ -9,6 +9,7 @@ from honeymoney.duplicates import (
     apply_duplicate_candidates,
     evaluate_duplicate_candidates,
 )
+from honeymoney.review_state import REVIEW_REASON_IDENTITY
 
 
 def _id(prefix: str, character: str) -> str:
@@ -190,6 +191,31 @@ class DuplicateEvaluationTest(unittest.TestCase):
         self.assertIn("manual_correction", reviewed["flags"].split(";"))
         self.assertEqual(reviewed["reason"], "Independent synthetic review")
         self.assertEqual(other["needs_review"], "false")
+
+    def test_stale_duplicate_cleanup_keeps_other_identity_conflicts(self) -> None:
+        for identity_flag in (
+            "overlap_count_ambiguous",
+            "overlap_history_ambiguous",
+            "identity_migration_ambiguous",
+        ):
+            with self.subTest(identity_flag=identity_flag):
+                row = _row(
+                    "1",
+                    "a",
+                    flags=f"seed_flag;duplicate_suspected;{identity_flag}",
+                    needs_review="true",
+                )
+                row["review_reasons"] = REVIEW_REASON_IDENTITY
+
+                apply_duplicate_candidates(
+                    [row],
+                    evaluate_duplicate_candidates([row]),
+                )
+
+                self.assertEqual(row["needs_review"], "true")
+                self.assertEqual(row["review_reasons"], REVIEW_REASON_IDENTITY)
+                self.assertIn(identity_flag, row["flags"].split(";"))
+                self.assertNotIn(DUPLICATE_FLAG, row["flags"].split(";"))
 
 
 if __name__ == "__main__":

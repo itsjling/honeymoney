@@ -92,6 +92,8 @@ def apply_local_categorization_memory(
     if not local_categorization_memory_enabled(config) or not memory:
         return
 
+    threshold = _review_threshold(config)
+    confidence = Decimal(LOCAL_MEMORY_CONFIDENCE)
     policies = category_policies(dict(config))
     for transaction in transactions:
         if not _has_stable_memory_identity(transaction) or transaction.get(
@@ -111,7 +113,7 @@ def apply_local_categorization_memory(
         set_review_reason(
             transaction,
             REVIEW_REASON_CATEGORY_SUGGESTION,
-            False,
+            confidence < threshold,
         )
         transaction["reason"] = (
             "Matched local categorization memory from "

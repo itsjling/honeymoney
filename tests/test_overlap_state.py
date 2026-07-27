@@ -17,6 +17,7 @@ from honeymoney.corrections import (
     CORRECTION_COLUMNS,
     apply_correction_operation,
     ledger_output_documents,
+    load_corrections,
     read_ledger,
 )
 from honeymoney.csv_artifacts import csv_document
@@ -325,6 +326,17 @@ class OverlapWorkspaceStateTest(unittest.TestCase):
             [canonical] = load_identity_state(path).rows
             self.assertEqual(canonical["category"], "Groceries")
             self.assertEqual(canonical["needs_review"], "false")
+            saved = load_corrections({"corrections": str(corrections_path)})
+            self.assertEqual(set(saved), {canonical["transaction_id"]})
+            self.assertNotIn(source_transaction_id, saved)
+            self.assertEqual(
+                saved[canonical["transaction_id"]]["category"],
+                "Groceries",
+            )
+            first_corrections = corrections_path.read_bytes()
+
+            self.assertEqual(_reconcile_command(["--config", str(config_path)]), 0)
+            self.assertEqual(corrections_path.read_bytes(), first_corrections)
 
     def test_validated_canonical_account_type_conflict_stays_empty(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

@@ -8,7 +8,11 @@ from typing import Mapping, Sequence, TypedDict
 
 from honeymoney.identity import has_stable_v2_identity, record_fingerprint
 from honeymoney.identity_contracts import IdentityRow
-from honeymoney.review_state import REVIEW_REASON_IDENTITY, set_review_reason
+from honeymoney.review_state import (
+    REVIEW_REASON_IDENTITY,
+    has_identity_review_evidence,
+    set_review_reason,
+)
 
 DUPLICATE_FLAG = "duplicate_suspected"
 DUPLICATE_REVIEW_PROMOTED_FLAG = "duplicate_review_promoted"
@@ -212,7 +216,11 @@ def _clear_duplicate_state(row: dict[str, str]) -> None:
         and not item.startswith(DUPLICATE_REASON_PREFIX)
     ]
     row["reason"] = "; ".join(reasons)
-    set_review_reason(row, REVIEW_REASON_IDENTITY, False)
+    set_review_reason(
+        row,
+        REVIEW_REASON_IDENTITY,
+        has_identity_review_evidence(row),
+    )
 
 
 def _duplicate_reason(diagnostic: DuplicateOccurrenceDiagnostic) -> str:
