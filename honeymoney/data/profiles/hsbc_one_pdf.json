@@ -65,20 +65,20 @@
       {
         "section": "HKD Savings",
         "currency": "HKD",
-        "opening_regex": "^(?:\\d{1,2}\\s+[A-Za-z]{3}\\s+)?B/F BALANCE\\s+(?P<balance>[+-]?\\d[\\d,]*\\.\\d{2})$",
-        "closing_regex": "^(?:\\d{1,2}\\s+[A-Za-z]{3}\\s+)?C/F BALANCE\\s+(?P<balance>[+-]?\\d[\\d,]*\\.\\d{2})$"
+        "opening_regex": "^(?:\\d{1,2}\\s+[A-Za-z]{3}\\s+)?(?:B/F BALANCE|BALANCE B/F)\\s+(?P<balance>[+-]?\\d[\\d,]*\\.\\d{2})(?:\\s+(?P<balance_sign>CR|DR))?$",
+        "closing_regex": "^(?:\\d{1,2}\\s+[A-Za-z]{3}\\s+)?(?:C/F BALANCE|BALANCE C/F)\\s+(?P<balance>[+-]?\\d[\\d,]*\\.\\d{2})(?:\\s+(?P<balance_sign>CR|DR))?$"
       },
       {
         "section": "HKD Current",
         "currency": "HKD",
-        "opening_regex": "^(?:\\d{1,2}\\s+[A-Za-z]{3}\\s+)?B/F BALANCE\\s+(?P<balance>[+-]?\\d[\\d,]*\\.\\d{2})$",
-        "closing_regex": "^(?:\\d{1,2}\\s+[A-Za-z]{3}\\s+)?C/F BALANCE\\s+(?P<balance>[+-]?\\d[\\d,]*\\.\\d{2})$"
+        "opening_regex": "^(?:\\d{1,2}\\s+[A-Za-z]{3}\\s+)?(?:B/F BALANCE|BALANCE B/F)\\s+(?P<balance>[+-]?\\d[\\d,]*\\.\\d{2})(?:\\s+(?P<balance_sign>CR|DR))?$",
+        "closing_regex": "^(?:\\d{1,2}\\s+[A-Za-z]{3}\\s+)?(?:C/F BALANCE|BALANCE C/F)\\s+(?P<balance>[+-]?\\d[\\d,]*\\.\\d{2})(?:\\s+(?P<balance_sign>CR|DR))?$"
       },
       {
         "section": "Foreign Currency Savings",
         "currency_group": "currency",
-        "opening_regex": "^(?P<currency>[A-Z]{3})\\s+B/F BALANCE\\s+(?P<balance>[+-]?\\d[\\d,]*\\.\\d{2})$",
-        "closing_regex": "^(?P<currency>[A-Z]{3})\\s+C/F BALANCE\\s+(?P<balance>[+-]?\\d[\\d,]*\\.\\d{2})$"
+        "opening_regex": "^(?:\\d{1,2}\\s+[A-Za-z]{3}\\s+)?(?P<currency>[A-Z]{3})\\s+(?:B/F BALANCE|BALANCE B/F)\\s+(?P<balance>[+-]?\\d[\\d,]*\\.\\d{2})(?:\\s+(?P<balance_sign>CR|DR))?$",
+        "closing_regex": "^(?:\\d{1,2}\\s+[A-Za-z]{3}\\s+)?(?P<currency>[A-Z]{3})\\s+(?:C/F BALANCE|BALANCE C/F)\\s+(?P<balance>[+-]?\\d[\\d,]*\\.\\d{2})(?:\\s+(?P<balance_sign>CR|DR))?$"
       }
     ]
   },

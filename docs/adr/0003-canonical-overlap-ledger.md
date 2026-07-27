@@ -329,6 +329,13 @@ and canonical groups and slots, clears generated duplicate-candidate state,
 applies only proven mutable-state assignments, and publishes all new state
 together. Thus read-only commands never show temporary canonical IDs.
 
+If that first write replaces or resets a source, it builds the canonical
+baseline before source-record matching. Exact locator and fingerprint matches
+keep their source owners, followed by unique fingerprint matches. Repeated
+unmatched records retire and receive new source owners without pairing old and
+new occurrences. Compatible corrections and review history remain on the
+stable canonical slots.
+
 Any partial canonical state fails before persistence. Repeated migration,
 import, replacement, reset, correction, and reconciliation are idempotent.
 

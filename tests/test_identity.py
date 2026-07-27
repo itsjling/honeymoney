@@ -410,6 +410,34 @@ class RecordResolutionTest(unittest.TestCase):
             )
         self.assertEqual(raised.exception.code, "identity_exact_state_mismatch")
 
+    def test_canonical_migration_reallocates_unproved_exact_state_repeats(
+        self,
+    ) -> None:
+        original = self._first_result(self._incoming(2), self._incoming(3))
+
+        migrated = resolve_records(
+            self._assignment(),
+            [self._incoming(8), self._incoming(9)],
+            original.source_ownership,
+            [item.row for item in original.resolved_rows],
+            "replace",
+            allow_unmatched_reallocation=True,
+        )
+
+        old_ids = {item.transaction_id for item in original.resolved_rows}
+        new_ids = {item.transaction_id for item in migrated.resolved_rows}
+        self.assertTrue(old_ids.isdisjoint(new_ids))
+        states = {
+            record["transaction_id"]: record["state"]
+            for record in migrated.source_ownership["records"]
+        }
+        self.assertTrue(
+            all(states[transaction_id] == "retired" for transaction_id in old_ids)
+        )
+        self.assertTrue(
+            all(states[transaction_id] == "active" for transaction_id in new_ids)
+        )
+
     def test_changed_revision_reuses_unique_rows_and_retires_unmatched(self) -> None:
         original = self._first_result(
             self._incoming(2, "ONE"), self._incoming(3, "TWO")

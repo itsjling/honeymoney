@@ -18,14 +18,16 @@ from honeymoney.cli import (
     _starter_csv_profile,
     _StatusLine,
 )
-from honeymoney.corrections import ledger_output_documents
+from honeymoney.corrections import CORRECTION_COLUMNS, ledger_output_documents
+from honeymoney.csv_artifacts import csv_document
 from honeymoney.duplicates import DUPLICATE_MATCH_TYPE
+from honeymoney.identity import manifest_document
 from honeymoney.identity_state import (
     load_configured_identity_state,
     load_identity_state,
 )
 from honeymoney.ollama import OllamaHttpRequest, apply_ollama_fallback
-from honeymoney.schema import ALLOWED_CATEGORIES
+from honeymoney.schema import ALLOWED_CATEGORIES, SOURCE_OCCURRENCE_COLUMNS
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -791,6 +793,140 @@ def open(source_path):
             self.assertEqual(replacement.returncode, 2, replacement.stderr)
             self.assertIn("identity_record_match_ambiguous", replacement.stderr)
             self.assertEqual(self._import_artifact_bytes(root), before)
+
+    def test_identity_v2_replace_migrates_reviewed_repeated_rows_in_place(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root, fake_modules, statement, profile_path = (
+                self._seed_balance_contract_workspace(tmp, repeated=True)
+            )
+            categorized_path = root / "output" / "categorized.csv"
+            state = load_identity_state(categorized_path)
+            source_rows = [dict(row) for row in state.source_rows]
+            for row in source_rows:
+                row.update(
+                    {
+                        "category": "Dining",
+                        "flow_type": "expense",
+                        "flow_source": "correction",
+                        "confidence": "1.00",
+                        "needs_review": "false",
+                        "reason": "Synthetic legacy review",
+                    }
+                )
+            categorized_path.write_text(
+                csv_document(SOURCE_OCCURRENCE_COLUMNS, source_rows),
+                encoding="utf-8",
+            )
+            (root / "output" / ".honeymoney-source-occurrences.csv").unlink()
+            (root / "output" / ".honeymoney-overlap-manifest.json").unlink()
+
+            manifest_path = root / "output" / ".honeymoney-identity-manifest.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            for record in manifest["sources"][0]["records"]:
+                locator = record["current_locator"]
+                locator["components"][-1] += 10
+            manifest_path.write_text(
+                manifest_document(manifest),
+                encoding="utf-8",
+            )
+            source_ids = [row["transaction_id"] for row in source_rows]
+            (root / "corrections.csv").write_text(
+                csv_document(
+                    CORRECTION_COLUMNS,
+                    [
+                        {
+                            "transaction_id": transaction_id,
+                            "category": "Dining",
+                            "flow_type": "expense",
+                            "confidence": "1.00",
+                            "reason": "Synthetic legacy review",
+                            "needs_review": "false",
+                        }
+                        for transaction_id in source_ids
+                    ],
+                ),
+                encoding="utf-8",
+            )
+            self._add_balance_contract_mapping(profile_path)
+
+            replacement = self._run_cli(
+                [
+                    "import",
+                    str(statement),
+                    "--replace",
+                    "--no-interactive",
+                    "--json",
+                ],
+                cwd=root,
+                extra_pythonpath=fake_modules,
+            )
+
+            self.assertEqual(replacement.returncode, 0, replacement.stderr)
+            replacement_data = json.loads(replacement.stdout)["data"]
+            self.assertEqual(replacement_data["source_occurrence_count"], 2)
+            self.assertEqual(replacement_data["canonical_occurrence_count"], 2)
+            migrated = load_identity_state(categorized_path)
+            self.assertFalse(migrated.canonical_migration_required)
+            canonical_ids = [row["transaction_id"] for row in migrated.rows]
+            self.assertTrue(all(row["category"] == "Dining" for row in migrated.rows))
+            self.assertTrue(
+                all(row["needs_review"] == "false" for row in migrated.rows)
+            )
+            self.assertTrue(
+                all(
+                    not row["source_id"] and not row["source_file"]
+                    for row in migrated.rows
+                )
+            )
+            self.assertTrue(set(source_ids).isdisjoint(canonical_ids))
+            with (root / "corrections.csv").open(
+                newline="", encoding="utf-8"
+            ) as corrections_file:
+                correction_ids = {
+                    row["transaction_id"] for row in csv.DictReader(corrections_file)
+                }
+            self.assertTrue(set(canonical_ids) <= correction_ids)
+
+            repeated = self._run_cli(
+                [
+                    "import",
+                    str(statement),
+                    "--replace",
+                    "--no-interactive",
+                    "--json",
+                ],
+                cwd=root,
+                extra_pythonpath=fake_modules,
+            )
+
+            self.assertEqual(repeated.returncode, 0, repeated.stderr)
+            self.assertEqual(
+                [
+                    row["transaction_id"]
+                    for row in load_identity_state(categorized_path).rows
+                ],
+                canonical_ids,
+            )
+            html_path = root / "output" / "migration.html"
+            report = self._run_cli(
+                [
+                    "report",
+                    "2026-04",
+                    "--output",
+                    str(html_path),
+                    "--no-open",
+                    "--json",
+                ],
+                cwd=root,
+            )
+            self.assertEqual(report.returncode, 0, report.stderr)
+            self.assertEqual(json.loads(report.stdout)["data"]["transaction_count"], 2)
+            html = html_path.read_text(encoding="utf-8")
+            self.assertIn("Dining", html)
+            for transaction_id in canonical_ids:
+                self.assertIn(transaction_id, html)
 
     def test_import_loads_identity_state_once(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

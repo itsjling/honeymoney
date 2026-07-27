@@ -168,6 +168,13 @@ later similar transaction. Legacy IDs survive only when migration proves one
 owner; shared legacy IDs stay unowned and require review. The full contract is
 in [`ADR 0001`](adr/0001-stable-transaction-identity.md).
 
+The one-time move from an identity-v2 ledger to the canonical overlap ledger
+binds proven review history to canonical slots before a replacement or reset.
+Exact locator and fingerprint matches keep their source owners, followed by
+unique fingerprint matches. Repeated unmatched records retire and receive new
+source owners as a pool, without pairing old and new occurrences. Compatible
+corrections and review history stay on the canonical slots.
+
 ## Persistence authority and recovery
 
 `categorized.csv` is the authoritative canonical ledger. `review_needed.csv` is a

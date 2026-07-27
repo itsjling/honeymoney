@@ -104,6 +104,38 @@ class HsbcCreditCardPdfProfileTest(unittest.TestCase):
         self.assertEqual(preview_warnings, imported_warnings)
         self.assertEqual(preview_rows, imported_rows)
 
+    def test_generic_information_boundary_stops_import_and_preview(self) -> None:
+        profile = load_profile("hsbc_hk_credit_card_pdf.json")
+        words = [
+            {"text": "Post date", "x0": 50, "top": 10},
+            {"text": "Trans date", "x0": 95, "top": 10},
+            {"text": "Description", "x0": 135, "top": 10},
+            {"text": "Amount", "x0": 490, "top": 10},
+            {"text": "01JAN", "x0": 50, "top": 20},
+            {"text": "01JAN", "x0": 95, "top": 20},
+            {"text": "SYNTHETIC MERCHANT", "x0": 135, "top": 20},
+            {"text": "10.00", "x0": 490, "top": 20},
+            {"text": "For", "x0": 50, "top": 30},
+            {"text": "important information", "x0": 135, "top": 30},
+            {"text": "02JAN", "x0": 50, "top": 40},
+            {"text": "02JAN", "x0": 95, "top": 40},
+            {"text": "AFTER BOUNDARY", "x0": 135, "top": 40},
+            {"text": "20.00", "x0": 490, "top": 40},
+        ]
+
+        imported_rows, imported_warnings, _ = _import_fake_pdf(profile, words=words)
+        preview_rows, preview_warnings = _import_fake_pdf(
+            profile, words=words, preview=True
+        )
+
+        self.assertEqual(imported_warnings, [])
+        self.assertEqual(preview_warnings, [])
+        self.assertEqual(
+            [row["merchant"] for row in imported_rows],
+            ["SYNTHETIC MERCHANT"],
+        )
+        self.assertEqual(preview_rows, imported_rows)
+
 
 class MoxBankPdfProfileTest(unittest.TestCase):
     def test_accepted_statement(self) -> None:
@@ -317,6 +349,200 @@ class PdfBalanceMappingValidationTest(unittest.TestCase):
 
 
 class PdfBalanceReconciliationTest(unittest.TestCase):
+    def test_multi_page_balance_rollovers_keep_statement_endpoints(self) -> None:
+        cases = (
+            (
+                "mox_bank_pdf",
+                "mox_bank_main",
+                "Opening Balance 100.00",
+                "Closing Balance 110.00",
+                "Opening Balance 110.00",
+                "Closing Balance 120.00",
+                Decimal("100.00"),
+                Decimal("120.00"),
+            ),
+            (
+                "mox_credit_card_pdf",
+                "mox_credit_card",
+                "Opening Balance 100.00 DR",
+                "Closing Balance 110.00 DR",
+                "Opening Balance 110.00 DR",
+                "Statement Balance 120.00 DR",
+                Decimal("-100.00"),
+                Decimal("-120.00"),
+            ),
+            (
+                "hsbc_hk_credit_card_pdf",
+                "hsbc_hk_credit_card",
+                "Previous Balance 100.00",
+                "Closing Balance 110.00",
+                "Opening Balance 110.00",
+                "Statement Balance 120.00",
+                Decimal("100.00"),
+                Decimal("120.00"),
+            ),
+        )
+        for (
+            profile_id,
+            account_id,
+            first_open,
+            first_close,
+            second_open,
+            second_close,
+            expected_open,
+            expected_close,
+        ) in cases:
+            with self.subTest(profile=profile_id):
+                observations = _balance_observations_from_table_pages(
+                    load_profile(f"{profile_id}.json"),
+                    [
+                        [first_open, first_close],
+                        [second_open, second_close],
+                    ],
+                )
+                self.assertEqual(
+                    observations[(account_id, "HKD")],
+                    {
+                        "opening": [expected_open],
+                        "closing": [expected_close],
+                    },
+                )
+
+    def test_multi_page_import_attaches_one_opening_and_closing_balance(self) -> None:
+        profile = load_profile("mox_bank_pdf.json")
+        rows, warnings, _ = _import_fake_pdf(
+            profile,
+            page_tables=[
+                [
+                    [
+                        ["Opening Balance 100.00"],
+                        ["01 Apr 01 Apr SYNTHETIC CREDIT +10.00"],
+                        ["Closing Balance 110.00"],
+                    ]
+                ],
+                [
+                    [
+                        ["Opening Balance 110.00"],
+                        ["02 Apr 02 Apr SYNTHETIC CREDIT +10.00"],
+                        ["Closing Balance 120.00"],
+                    ]
+                ],
+            ],
+        )
+
+        self.assertEqual(warnings, [])
+        self.assertEqual(rows[0]["statement_opening_balance"], "100.00")
+        self.assertEqual(rows[0]["statement_closing_balance"], "")
+        self.assertEqual(rows[-1]["statement_opening_balance"], "")
+        self.assertEqual(rows[-1]["statement_closing_balance"], "120.00")
+        statement = reconcile_ledger(rows, {})["balance_reconciliation"][
+            "mox_bank_main"
+        ]["statements"][0]
+        self.assertEqual(statement["result"], "matched")
+
+    def test_broken_rollover_and_missing_final_close_remain_unavailable(self) -> None:
+        profile = load_profile("mox_bank_pdf.json")
+        broken = _balance_observations_from_table_pages(
+            profile,
+            [
+                ["Opening Balance 100.00", "Closing Balance 110.00"],
+                ["Opening Balance 111.00", "Closing Balance 120.00"],
+            ],
+        )
+        missing_close = _balance_observations_from_table_pages(
+            profile,
+            [
+                ["Opening Balance 100.00", "Closing Balance 110.00"],
+                ["Opening Balance 110.00"],
+            ],
+        )
+
+        self.assertEqual(
+            broken[("mox_bank_main", "HKD")]["opening"],
+            [Decimal("100.00"), Decimal("111.00")],
+        )
+        self.assertEqual(
+            missing_close[("mox_bank_main", "HKD")]["opening"],
+            [Decimal("100.00"), Decimal("110.00")],
+        )
+        self.assertEqual(
+            missing_close[("mox_bank_main", "HKD")]["closing"],
+            [Decimal("110.00")],
+        )
+
+    def test_hsbc_one_accepts_balance_first_multi_currency_labels(self) -> None:
+        observations = _balance_observations_from_table_pages(
+            load_profile("hsbc_one_pdf.json"),
+            [
+                [
+                    "Foreign Currency Savings",
+                    "AUD Balance B/F 100.00",
+                    "AUD Balance C/F 110.00",
+                    "EUR B/F Balance 50.00",
+                    "EUR C/F Balance 55.00",
+                ]
+            ],
+        )
+
+        self.assertEqual(
+            observations,
+            {
+                ("hsbc_one_fcy_savings", "AUD"): {
+                    "opening": [Decimal("100.00")],
+                    "closing": [Decimal("110.00")],
+                },
+                ("hsbc_one_fcy_savings", "EUR"): {
+                    "opening": [Decimal("50.00")],
+                    "closing": [Decimal("55.00")],
+                },
+            },
+        )
+
+    def test_table_section_context_does_not_leak_across_pages(self) -> None:
+        observations = _hsbc_one_split_word_table_observations()
+
+        self.assertEqual(
+            observations,
+            {
+                ("hsbc_one_hkd_savings", "HKD"): {
+                    "opening": [Decimal("100.00")],
+                    "closing": [Decimal("110.00")],
+                },
+                ("hsbc_one_hkd_current", "HKD"): {
+                    "opening": [Decimal("200.00")],
+                    "closing": [Decimal("210.00")],
+                },
+            },
+        )
+
+    def test_exact_section_heading_recovers_after_missing_prior_close(self) -> None:
+        observations = _balance_observations_from_table_pages(
+            load_profile("hsbc_one_pdf.json"),
+            [
+                [
+                    "HKD Savings",
+                    "BALANCE B/F 100.00",
+                    "HKD Current",
+                    "BALANCE B/F 200.00",
+                    "BALANCE C/F 210.00",
+                ]
+            ],
+        )
+
+        self.assertEqual(
+            observations,
+            {
+                ("hsbc_one_hkd_savings", "HKD"): {
+                    "opening": [Decimal("100.00")],
+                    "closing": [],
+                },
+                ("hsbc_one_hkd_current", "HKD"): {
+                    "opening": [Decimal("200.00")],
+                    "closing": [Decimal("210.00")],
+                },
+            },
+        )
+
     def test_supported_synthetic_statements_reconcile_by_account_and_currency(
         self,
     ) -> None:
@@ -1423,6 +1649,78 @@ def _identity_config(root: Path) -> dict:
     return _load_config_document(str(config_path), recover=False)
 
 
+def _balance_observations_from_table_pages(
+    profile: dict,
+    pages: list[list[str]],
+) -> dict[tuple[str, str], dict[str, list[Decimal]]]:
+    class Page:
+        def __init__(self, lines: list[str]):
+            self.lines = lines
+
+        def extract_words(self, **kwargs):
+            return []
+
+        def extract_tables(self):
+            return [[[line] for line in self.lines]]
+
+    class Pdf:
+        def __init__(self):
+            self.pages = [Page(lines) for lines in pages]
+
+    return _pdf_balance_observations(Pdf(), profile["pdf"])
+
+
+def _hsbc_one_split_word_table_observations() -> dict[
+    tuple[str, str], dict[str, list[Decimal]]
+]:
+    def words(lines: list[str]) -> list[dict[str, object]]:
+        return [
+            {"text": line, "x0": 20, "top": index * 20}
+            for index, line in enumerate(lines, start=1)
+        ]
+
+    class Page:
+        def __init__(self, word_lines: list[str], table_lines: list[str]):
+            self.word_lines = word_lines
+            self.table_lines = table_lines
+
+        def extract_words(self, **kwargs):
+            return words(self.word_lines)
+
+        def extract_tables(self):
+            return [[[line] for line in self.table_lines]]
+
+    class Pdf:
+        pages = [
+            Page(
+                [
+                    "HKD Savings",
+                    "B/F Balance 100.00",
+                    "C/F Balance 110.00",
+                ],
+                [
+                    "HKD Savings",
+                    "B/F Balance 100.00",
+                    "C/F Balance 110.00",
+                ],
+            ),
+            Page(
+                [
+                    "HKD Current",
+                    "B/F Balance 200.00",
+                    "C/F Balance 210.00",
+                ],
+                [
+                    "B/F Balance 200.00",
+                    "C/F Balance 210.00",
+                ],
+            ),
+        ]
+
+    profile = load_profile("hsbc_one_pdf.json")
+    return _pdf_balance_observations(Pdf(), profile["pdf"])
+
+
 def _pdf_byte_fixtures(generator: Path) -> dict[str, Path]:
     namespace = runpy.run_path(str(generator))
     return {
@@ -1435,20 +1733,37 @@ def _import_fake_pdf(
     *,
     tables: list | None = None,
     words: list | None = None,
+    page_tables: list[list] | None = None,
     preview: bool = False,
 ):
     class Page:
+        def __init__(
+            self,
+            page_tables_value: list | None = None,
+            page_words_value: list | None = None,
+        ):
+            self.page_tables = page_tables_value
+            self.page_words = page_words_value
+
         def extract_tables(self):
-            return tables or []
+            return self.page_tables if self.page_tables is not None else tables or []
 
         def extract_table(self):
-            return (tables or [None])[0]
+            extracted = self.extract_tables()
+            return (extracted or [None])[0]
 
         def extract_words(self, **kwargs):
-            return words or []
+            return self.page_words if self.page_words is not None else words or []
 
     class Pdf:
-        pages = [Page()]
+        pages = (
+            [
+                Page(page_tables_value=value, page_words_value=[])
+                for value in page_tables
+            ]
+            if page_tables is not None
+            else [Page()]
+        )
 
         def __enter__(self):
             return self

@@ -250,6 +250,35 @@ def _run_pipeline(
     profiles = importers._load_profiles(config)
     profile_mappings = importers._load_profile_mappings(config)
     identity_state = load_configured_identity_state(categorized_path, config)
+    corrections = load_corrections(config)
+    migration_correction_updates: dict[str, dict[str, str]] = {}
+    prior_canonical_rows = identity_state.rows
+    prior_overlap_manifest = identity_state.overlap_manifest
+    if (
+        identity_state.canonical_migration_required
+        and not identity_state.bootstrap_required
+    ):
+        migration_baseline = canonicalize_overlaps(
+            identity_state.source_rows,
+            [],
+            identity_state.overlap_manifest,
+        )
+        migration_projection = project_corrections(
+            migration_baseline,
+            corrections,
+        )
+        migration_correction_updates = migration_projection.corrections
+        corrections = {
+            **corrections,
+            **migration_correction_updates,
+        }
+        apply_corrections(migration_baseline.rows, migration_projection.corrections)
+        apply_history_ambiguity(
+            migration_baseline.rows,
+            migration_projection.ambiguous_transaction_ids,
+        )
+        prior_canonical_rows = migration_baseline.rows
+        prior_overlap_manifest = migration_baseline.manifest
     transactions, import_warnings, file_reports, identity_sources = (
         importers._import_transactions(
             input_files,
@@ -294,6 +323,10 @@ def _run_pipeline(
         manifest=identity_state.manifest,
         sources=identity_sources,
         intent=requested_action,
+        allow_unmatched_reallocation=(
+            identity_state.canonical_migration_required
+            and requested_action in {"replace", "reset"}
+        ),
     )
     source_transactions = [dict(row) for row in resolution.resolved_rows]
     resolved_source_ids = {
@@ -310,21 +343,19 @@ def _run_pipeline(
     )
     reset_ids = set(resolution.reset_transaction_ids)
     removed_correction_ids = set(reset_ids)
-    corrections = load_corrections(config)
-    correction_documents: dict[Path, str] = {}
     retained_source_rows = [dict(row) for row in resolution.retained_ledger_rows]
     source_rows = [*retained_source_rows, *source_transactions]
     overlap_result = canonicalize_overlaps(
         source_rows,
-        identity_state.rows,
-        identity_state.overlap_manifest,
+        prior_canonical_rows,
+        prior_overlap_manifest,
     )
     ledger_rows = overlap_result.rows
     if args.reset and config.get("corrections"):
         prior_overlap = canonicalize_overlaps(
             identity_state.source_rows,
-            identity_state.rows,
-            identity_state.overlap_manifest,
+            prior_canonical_rows,
+            prior_overlap_manifest,
         )
         prior_source_by_transaction = {
             row["transaction_id"]: row["source_id"]
@@ -358,20 +389,17 @@ def _run_pipeline(
                 removed_correction_ids.update(
                     slot["transaction_id"] for slot in group["slots"]
                 )
-        corrections_path, corrections_content, corrections = (
-            prepare_corrections_document(
-                config, removed_transaction_ids=removed_correction_ids
-            )
-        )
-        correction_documents[corrections_path] = corrections_content
+        for transaction_id in removed_correction_ids:
+            corrections.pop(transaction_id, None)
+            migration_correction_updates.pop(transaction_id, None)
         overlap_result = canonicalize_overlaps(
             source_rows,
             [
                 row
-                for row in identity_state.rows
+                for row in prior_canonical_rows
                 if row.get("transaction_id") not in removed_correction_ids
             ],
-            identity_state.overlap_manifest,
+            prior_overlap_manifest,
         )
         ledger_rows = overlap_result.rows
     if not has_processed_source:
@@ -496,14 +524,25 @@ def _run_pipeline(
         overlap_manifest=overlap_result.manifest,
     )
     files[import_report_path] = json.dumps(report, indent=2, sort_keys=True) + "\n"
-    files.update(correction_documents)
-    files.update(
-        _interactive_correction_documents(
-            categorized_interactively,
+    correction_updates = dict(migration_correction_updates)
+    correction_updates.update(
+        {
+            transaction["transaction_id"]: {
+                "category": transaction["category"],
+                "confidence": "1.00",
+                "reason": "Categorized interactively",
+                "needs_review": "false",
+            }
+            for transaction in categorized_interactively
+        }
+    )
+    if config.get("corrections") and (correction_updates or removed_correction_ids):
+        corrections_path, corrections_content, _ = prepare_corrections_document(
             config,
+            correction_updates,
             removed_transaction_ids=removed_correction_ids,
         )
-    )
+        files[corrections_path] = corrections_content
     persist_generation(categorized_path, files)
     _status.clear()
 

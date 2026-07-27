@@ -63,7 +63,7 @@ def reconcile_ledger(
         if id(row) in protected:
             continue
         _reset_reconciliation(row)
-        _derive_flow_type(row)
+        derive_flow_type(row)
 
     candidates: list[tuple[int, str, str, str]] = []
     eligible = [row for row in rows if id(row) not in protected and _eligible(row)]
@@ -187,7 +187,7 @@ def _reset_reconciliation(row: dict[str, str]) -> None:
         row["flow_source"] = ""
 
 
-def _derive_flow_type(row: dict[str, str]) -> None:
+def derive_flow_type(row: dict[str, str]) -> None:
     existing = row.get("flow_type", "")
     if existing in ALLOWED_FLOW_TYPES and row.get("flow_source") in {
         "rule",

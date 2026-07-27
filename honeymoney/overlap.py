@@ -33,6 +33,7 @@ from honeymoney.overlap_contracts import (
     OverlapSlot,
     OverlapWarning,
 )
+from honeymoney.reconciliation import derive_flow_type
 from honeymoney.schema import CATEGORIZED_COLUMNS
 
 OVERLAP_MANIFEST_SCHEMA_VERSION = 2
@@ -1346,6 +1347,11 @@ def _project_correction(
             projected[field] = str(patch[field])
     if "flow_type" in patch:
         projected["flow_source"] = "correction"
+    elif "category" in patch and projected.get("flow_source", "") in {
+        "",
+        "deterministic",
+    }:
+        derive_flow_type(projected)
     flags = [item for item in projected.get("flags", "").split(";") if item]
     if "manual_correction" not in flags:
         flags.append("manual_correction")
@@ -1353,9 +1359,7 @@ def _project_correction(
     return projected
 
 
-def _protected_history(
-    row: Mapping[str, object], *, ignored_fields: set[str] | None = None
-) -> tuple[tuple[str, str], ...]:
+def _protected_history(row: Mapping[str, object]) -> tuple[tuple[str, str], ...]:
     values = {field: str(row.get(field, "")) for field in _MUTABLE_FIELDS}
     values["flags"] = ";".join(
         item
@@ -1363,11 +1367,7 @@ def _protected_history(
         if item and item not in {OVERLAP_AMBIGUITY_FLAG, OVERLAP_PRIOR_REVIEW_FLAG}
     )
     values["reason"] = _without_owned_reason(values["reason"], OVERLAP_AMBIGUITY_REASON)
-    return tuple(
-        (field, values[field])
-        for field in _MUTABLE_FIELDS
-        if field not in (ignored_fields or set())
-    )
+    return tuple((field, values[field]) for field in _MUTABLE_FIELDS)
 
 
 def _without_owned_reason(value: str, owned_reason: str) -> str:
