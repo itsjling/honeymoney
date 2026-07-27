@@ -72,6 +72,7 @@ Creates a starter local workspace with:
 - `config.json`
 - `rules.json`
 - `corrections.csv`
+- `rates.json`
 - `profile_mappings.json`
 - `profiles/` with `starter_csv.json` plus the bundled HSBC One, HSBC credit-card, and Mox bank/card profiles, all linked in `config.json`
 - `input/`
@@ -243,29 +244,53 @@ honeymoney config edit ollama --disable
 ```
 
 Configuration is validated completely when it is loaded, before statements are
-processed. Path fields and profile/rule/correction references must be non-empty
-strings; category, owner, and payment-method vocabularies must be arrays of
-unique non-empty strings; exchange rates and Ollama timeouts must be finite and
-positive; `review_confidence_threshold` must be from `0` to `1`; and Ollama
-batch size must be a positive integer. Invalid fields are reported by their
-full config path. Import profiles likewise require stable account metadata,
-exactly one CSV or PDF parser definition, usable date and amount mappings, and
-valid parser-specific settings. A selected CSV profile must map only headers
-present in the statement.
+processed. Path fields and profile, rule, correction, and rate-cache references
+must be non-empty strings. Category, owner, and payment-method vocabularies must
+be arrays of unique non-empty strings. Exchange rates and Ollama timeouts must
+be finite and positive; `review_confidence_threshold` must be from `0` to `1`;
+and Ollama batch size must be a positive integer. Invalid fields are reported
+by their full config path. Import profiles likewise require stable account
+metadata, exactly one CSV or PDF parser definition, usable date and amount
+mappings, and valid parser-specific settings. A selected CSV profile must map
+only headers present in the statement.
 
 `exchange_rates` holds fixed fallbacks. `dated_exchange_rates` maps a currency
 to exact ISO dates and rates, for example
 `{"EUR": {"2026-07-02": 8.90}}`. A same-row posted HKD amount wins, followed by
-a matched exchange leg, an exact-date rate, and a fixed fallback. A missing
-rate leaves `amount_hkd` empty and adds a valuation-completeness item, not a
-category-review item.
+a matched exchange leg, an exact-date configured rate, an imported HKMA rate,
+and a fixed fallback. A missing rate leaves `amount_hkd` empty and adds a
+valuation-completeness item, not a category-review item.
+
+Import a downloaded official HKMA daily-rate JSON file without network access:
+
+```bash
+honeymoney rates import ./er-eeri-daily.json
+honeymoney rates import ./er-eeri-daily.json --json
+```
+
+The command checks the whole provider document before it writes. It stores
+HKD-per-unit-of-foreign-currency observations in the versioned local
+`rates.json` cache. An exact date wins. For a weekend or holiday, the latest
+prior observation may serve a transaction for up to seven calendar days. A
+future or older rate cannot fill the value. The cache records the requested
+transaction date, observation date, raw rate, provider, currencies, and a
+document digest. Provider fields already use one foreign-currency unit,
+including JPY, KRW, and IDR. Later statement imports add their requested-date
+resolutions. The cache stores no statement text or input path.
+
+Imported HKMA values use `valuation_source=hkma_daily_reference_rate` and
+`valuation_status=estimated`. `valuation_rate_date` and `valuation_provider`
+show the evidence. This is an HKD reference estimate, not a claim about a
+bank's conversion cost. Repeating the import gives the same cache and ledger
+bytes. The cache and affected ledger files publish as one recoverable
+generation.
 
 Prints or edits the active `config.json`; pass `--config PATH` to target another file. `config edit` validates a temporary editor copy before replacing the original and uses `$VISUAL`, then `$EDITOR`, then `vi`. With no Ollama edit option, the guided editor lists models installed at the configured local endpoint. Selecting or passing a model also enables the Ollama fallback; `--enable` verifies that the configured model is installed before enabling it. Direct `--model`, `--enable`, and `--disable` edits can use `--json`.
 
 ## Structured agent commands
 
 `setup`, `run`, `import`, `status`, `report`, `config`, `profile validate`,
-`evaluate`, `learn`, `valuation missing`,
+`evaluate`, `learn`, `valuation missing`, `rates import`,
 and fully specified one-shot `review` accept `--json`. JSON mode prints exactly
 one versioned document to stdout, never prompts, and never opens a browser.
 Exit code `0` is success, `1` is strict partial success, and `2` is an input,
@@ -349,8 +374,8 @@ includes only confirmed `income`; spending includes confirmed `expense` net of
 `refund`. Transfers, card payments, and investment movements are excluded.
 Rows without HKD valuation stay out of totals and trigger a visible warning.
 Each row shows the original amount and currency, HKD reporting value, valuation
-source, and actual, estimated, or missing status. The page loads nothing from
-the network.
+source, rate date and provider when present, and actual, estimated, or missing
+status. The page loads nothing from the network.
 
 ```bash
 honeymoney reconcile
@@ -386,7 +411,7 @@ Each run writes three public files next to the configured categorized CSV:
 - `categorized.csv`: canonical transactions with `canonical_group_id`,
   `canonical_slot`, `provenance_status`, and `source_occurrence_count`, plus
   categories, flow treatment, transfer links, owners, confidence, typed review
-  reasons, and HKD valuation source and status.
+  reasons, and HKD valuation source, status, rate date, and provider.
   Source identity, display, and statement-balance cells are empty here.
 - `review_needed.csv`: only ledger rows that need review, with typed reasons,
   plain reason labels, and editable correction columns.
@@ -404,6 +429,9 @@ Three hidden files join each recoverable ledger generation:
 - `.honeymoney-overlap-manifest.json`: the private canonical-ID namespace and
   active or retired multiset slots, keyed membership history, and explicit
   duplicate resolutions.
+
+`rates.json` is a versioned local input cache named by `config.rate_cache`. Rate
+imports publish it with the ledger generation when a ledger exists.
 
 An exact issue #31 ledger keeps its old source IDs during read-only commands.
 Its first write publishes the canonical CSV and both new hidden files together.

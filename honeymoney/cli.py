@@ -88,6 +88,18 @@ from honeymoney.persistence import (
     persist_generation,
     recover_generation,
 )
+from honeymoney.rates import (
+    HKMA_MAX_RATE_AGE_DAYS,
+    HKMA_PROVIDER,
+    RateCache,
+    RateImportError,
+    empty_rate_cache,
+    load_rate_cache,
+    merge_rate_cache,
+    parse_hkma_daily_document,
+    rate_cache_document,
+    validate_rate_cache,
+)
 from honeymoney.reconciliation import (
     reconcile_ledger,
     transaction_direction,
@@ -116,6 +128,7 @@ from honeymoney.schema import (
     allowed_categories,
 )
 from honeymoney.valuation import (
+    VALUATION_SOURCE_HKMA_RATE,
     validate_dated_rates,
     valuation_summary,
     value_transactions,
@@ -289,6 +302,8 @@ def main(argv: list[str] | None = None) -> int:
         return _learn_command(argv[1:])
     if argv and argv[0] == "valuation":
         return _valuation_command(argv[1:])
+    if argv and argv[0] == "rates":
+        return _rates_command(argv[1:])
     if argv and argv[0] == "status":
         return _status_command(argv[1:])
     if argv and argv[0] == "pending":
@@ -755,6 +770,19 @@ def _run_pipeline(
             removed_transaction_ids=removed_correction_ids,
         )
         files[corrections_path] = corrections_content
+    if has_processed_source and isinstance(config.get("rate_cache"), str):
+        rate_cache_path = _configured_rate_cache_path(config)
+        next_rate_cache = merge_rate_cache(
+            _loaded_rate_cache(config),
+            [],
+            _requested_rate_pairs(
+                source_rows,
+                base_currency=str(config.get("base_currency", "HKD")),
+            ),
+        )
+        rate_cache_content = rate_cache_document(next_rate_cache)
+        if not _document_matches(rate_cache_path, rate_cache_content):
+            files[rate_cache_path] = rate_cache_content
     persist_generation(categorized_path, files)
     _status.clear()
 
@@ -900,6 +928,7 @@ Commands:
                                    Report category coverage and exact accuracy
   honeymoney learn [--yes]          Build exact rules from active reviews
   honeymoney valuation missing      Trace missing values to source evidence
+  honeymoney rates import FILE      Import downloaded official HKMA daily rates
   honeymoney status [MONTH]        Show processed/categorized counts for a period
   honeymoney pending [MONTH]       List transactions that need review
   honeymoney duplicates            List unresolved exact-overlap count groups
@@ -1103,6 +1132,226 @@ def _valuation_command(argv: list[str]) -> int:
             )
         if item["source_data_flags"]:
             print("  Source-data flags: " + ", ".join(item["source_data_flags"]))
+    return 0
+
+
+def _rates_command(argv: list[str]) -> int:
+    if not argv or argv[0] != "import":
+        raise ValueError("honeymoney rates requires the `import` subcommand")
+    command_argv = argv[1:]
+    parser = _command_parser(
+        command_argv,
+        prog="honeymoney rates import",
+        description="Import a downloaded official HKMA daily-rate JSON document.",
+    )
+    parser.add_argument("file")
+    parser.add_argument("--config", dest="config_path")
+    parser.add_argument("--json", action="store_true")
+    args = parser.parse_args(command_argv)
+
+    config = _load_config(args.config_path)
+    rate_cache_path = _configured_rate_cache_path(config)
+    observations = parse_hkma_daily_document(
+        Path(args.file).read_bytes(),
+        base_currency=str(config.get("base_currency", "HKD")),
+    )
+    categorized_path = Path(config["paths"]["output"])
+    if not categorized_path.exists():
+        cache = merge_rate_cache(
+            _loaded_rate_cache(config),
+            observations,
+            [],
+        )
+        cache_content = rate_cache_document(cache)
+        changed = not _document_matches(rate_cache_path, cache_content)
+        if changed:
+            persist_generation(
+                rate_cache_path,
+                {rate_cache_path: cache_content},
+            )
+        return _emit_rate_import_result(
+            args.json,
+            rate_cache_path,
+            imported_count=len(observations),
+            cached_count=len(cache["observations"]),
+            requested_count=0,
+            resolved_count=0,
+            valued_count=0,
+            changed=changed,
+        )
+
+    state = load_configured_identity_state(categorized_path, config)
+    if state.source_rows is None or state.overlap_manifest is None:
+        raise IdentityError("identity_manifest_invalid")
+    source_rows = [dict(row) for row in state.source_rows]
+    requested_pairs = _requested_rate_pairs(
+        source_rows,
+        base_currency=str(config.get("base_currency", "HKD")),
+    )
+    cache = merge_rate_cache(
+        _loaded_rate_cache(config),
+        observations,
+        requested_pairs,
+    )
+    valued_config = {**config, "_rate_cache": cache}
+    value_transactions(source_rows, valued_config, preserve_matched=False)
+    corrections = load_corrections(config)
+    effective_corrections = corrections
+    removed_correction_ids: set[str] = set()
+    prior_rows = [] if state.canonical_migration_required else state.rows
+    overlap_result = canonicalize_overlaps(
+        source_rows,
+        prior_rows,
+        state.overlap_manifest,
+    )
+    rows = overlap_result.rows
+    if state.canonical_migration_required and not state.bootstrap_required:
+        correction_projection = project_corrections(overlap_result, corrections)
+        effective_corrections = correction_projection.corrections
+        removed_correction_ids = {
+            row.get("transaction_id", "")
+            for row in state.source_rows
+            if row.get("transaction_id", "") in corrections
+        }
+        apply_corrections(rows, effective_corrections)
+        apply_history_ambiguity(
+            rows,
+            correction_projection.ambiguous_transaction_ids,
+        )
+    refresh_duplicate_candidates(
+        rows,
+        final_review_ids=_final_review_ids(effective_corrections),
+    )
+    reconcile_ledger(rows, valued_config, statement_rows=source_rows)
+    enforce_overlap_review(rows, overlap_result)
+    overlap_result = canonicalize_overlaps(
+        source_rows,
+        rows,
+        overlap_result.manifest,
+    )
+    rows = overlap_result.rows
+    reconcile_ledger(rows, valued_config, statement_rows=source_rows)
+    enforce_overlap_review(rows, overlap_result)
+    documents = ledger_output_documents(
+        categorized_path,
+        rows,
+        identity_manifest_document=state.manifest_document,
+        source_occurrences=source_rows,
+        source_evidence=state.source_evidence_rows,
+        overlap_manifest=overlap_result.manifest,
+    )
+    documents[rate_cache_path] = rate_cache_document(cache)
+    if config.get("corrections"):
+        correction_updates = (
+            {
+                transaction_id: dict(patch)
+                for transaction_id, patch in effective_corrections.items()
+            }
+            if removed_correction_ids
+            else {}
+        )
+        correction_updates.update(
+            review_state_correction_updates(effective_corrections, rows)
+        )
+        if correction_updates or removed_correction_ids:
+            correction_path, correction_content, _ = prepare_corrections_document(
+                config,
+                correction_updates,
+                removed_transaction_ids=removed_correction_ids,
+            )
+            documents[correction_path] = correction_content
+    changed = _documents_changed(documents)
+    if changed:
+        persist_generation(categorized_path, documents)
+    requested_keys = set(requested_pairs)
+    resolved_count = sum(
+        (
+            str(item["quote_currency"]),
+            str(item["requested_transaction_date"]),
+        )
+        in requested_keys
+        for item in cache["resolutions"]
+    )
+    valued_count = sum(
+        row.get("valuation_source") == VALUATION_SOURCE_HKMA_RATE for row in rows
+    )
+    return _emit_rate_import_result(
+        args.json,
+        rate_cache_path,
+        imported_count=len(observations),
+        cached_count=len(cache["observations"]),
+        requested_count=len(requested_keys),
+        resolved_count=resolved_count,
+        valued_count=valued_count,
+        changed=changed,
+    )
+
+
+def _documents_changed(documents: Mapping[Path, str]) -> bool:
+    return any(
+        not _document_matches(path, content) for path, content in documents.items()
+    )
+
+
+def _document_matches(path: Path, content: str) -> bool:
+    if not path.exists():
+        return False
+    with path.open(encoding="utf-8", newline="") as existing:
+        return existing.read() == content
+
+
+def _requested_rate_pairs(
+    rows: list[dict[str, str]],
+    *,
+    base_currency: str,
+) -> list[tuple[str, str]]:
+    base = base_currency.strip().upper()
+    return sorted(
+        {
+            (row.get("posted_currency", "").strip().upper(), row.get("date", ""))
+            for row in rows
+            if row.get("posted_currency", "").strip().upper()
+            and row.get("posted_currency", "").strip().upper() != base
+            and _parse_iso_date(row.get("date", "")) is not None
+        }
+    )
+
+
+def _emit_rate_import_result(
+    json_output: bool,
+    rate_cache_path: Path,
+    *,
+    imported_count: int,
+    cached_count: int,
+    requested_count: int,
+    resolved_count: int,
+    valued_count: int,
+    changed: bool,
+) -> int:
+    data = {
+        "provider": HKMA_PROVIDER,
+        "imported_observation_count": imported_count,
+        "cached_observation_count": cached_count,
+        "requested_transaction_date_count": requested_count,
+        "resolved_transaction_date_count": resolved_count,
+        "valued_transaction_count": valued_count,
+        "max_prior_age_days": HKMA_MAX_RATE_AGE_DAYS,
+        "changed": changed,
+    }
+    if json_output:
+        _emit_json(
+            "rates.import",
+            "success",
+            data=data,
+            artifacts={"rate_cache_json": str(rate_cache_path.resolve())},
+        )
+        return 0
+    print(
+        f"Imported {imported_count} HKMA observations; "
+        f"{resolved_count}/{requested_count} transaction dates resolved; "
+        f"{valued_count} transaction(s) valued."
+    )
+    print(f"Rate cache: {rate_cache_path}")
     return 0
 
 
@@ -1528,7 +1777,7 @@ def _validate_config_document(config: dict[str, Any]) -> None:
     if profiles is not None:
         _validate_non_empty_string_array("profiles", profiles)
 
-    for field in ("profile_mappings", "rules", "corrections"):
+    for field in ("profile_mappings", "rules", "corrections", "rate_cache"):
         if field in config and (
             not isinstance(config[field], str) or not config[field].strip()
         ):
@@ -1777,6 +2026,7 @@ def _setup_command(argv: list[str]) -> int:
             artifacts={
                 "config_json": str(root / "config.json"),
                 "corrections_csv": str(root / "corrections.csv"),
+                "rate_cache_json": str(root / "rates.json"),
                 "input_directory": str(root / "input"),
                 "output_directory": str(root / "output"),
             },
@@ -3983,6 +4233,7 @@ def _write_starter_workspace(root: Path, force: bool) -> None:
     profile_path = profiles_dir / "starter_csv.json"
     rules_path = root / "rules.json"
     corrections_path = root / "corrections.csv"
+    rate_cache_path = root / "rates.json"
     profile_mappings_path = root / "profile_mappings.json"
     config_path = root / "config.json"
 
@@ -3999,6 +4250,11 @@ def _write_starter_workspace(root: Path, force: bool) -> None:
         ",".join(CORRECTION_COLUMNS) + "\n",
         force,
     )
+    _write_text_file(
+        rate_cache_path,
+        rate_cache_document(empty_rate_cache()),
+        force,
+    )
     _write_json_file(
         config_path,
         {
@@ -4012,6 +4268,7 @@ def _write_starter_workspace(root: Path, force: bool) -> None:
             "profile_mappings": str(profile_mappings_path),
             "rules": str(rules_path),
             "corrections": str(corrections_path),
+            "rate_cache": str(rate_cache_path),
             "pdf": {"enabled": True, "parser": "pdfplumber"},
             "ollama": {
                 "enabled": False,
@@ -4126,6 +4383,7 @@ def _load_config_document(config_path: str | None, *, recover: bool) -> dict[str
             resolved_config_path = default_config.resolve()
             return {
                 "paths": {"input": "./input", "output": "./output/categorized.csv"},
+                "_rate_cache": empty_rate_cache(),
                 "_identity_config_path": resolved_config_path,
                 "_identity_workspace_root": resolved_config_path.parent,
             }
@@ -4140,7 +4398,29 @@ def _load_config_document(config_path: str | None, *, recover: bool) -> dict[str
     config["_identity_workspace_root"] = resolved_config_path.parent
     if recover:
         _recover_config_generation(config)
+    rate_cache_value = config.get("rate_cache")
+    if recover and isinstance(rate_cache_value, str) and rate_cache_value.strip():
+        recover_generation(Path(rate_cache_value))
+    config["_rate_cache"] = (
+        load_rate_cache(Path(rate_cache_value))
+        if isinstance(rate_cache_value, str) and rate_cache_value.strip()
+        else empty_rate_cache()
+    )
     return config
+
+
+def _configured_rate_cache_path(config: Mapping[str, object]) -> Path:
+    value = config.get("rate_cache")
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError("Config must define a rate_cache JSON path")
+    return Path(value)
+
+
+def _loaded_rate_cache(config: Mapping[str, object]) -> RateCache:
+    value = config.get("_rate_cache")
+    if not isinstance(value, Mapping):
+        raise ValueError("The loaded rate cache is invalid")
+    return validate_rate_cache(value)
 
 
 def _recover_config_generation(config: dict[str, Any]) -> None:
@@ -4259,6 +4539,15 @@ def run() -> int:
             if isinstance(error, ValuationInspectionError)
             else None
         )
+        rate_import_details = (
+            {
+                "type": "RateImportError",
+                "code": error.code,
+                "message": str(error),
+            }
+            if isinstance(error, RateImportError)
+            else None
+        )
         if "--json" in argv:
             command = _json_error_command(argv)
             error_items = (
@@ -4269,6 +4558,7 @@ def run() -> int:
                     or duplicate_details
                     or manual_pair_details
                     or valuation_inspection_details
+                    or rate_import_details
                     or {
                         "type": type(error).__name__,
                         "message": str(error),
@@ -4327,6 +4617,8 @@ def _json_error_command(argv: list[str]) -> str:
         return "review.pair"
     if len(argv) > 1 and argv[:2] == ["valuation", "missing"]:
         return "valuation.missing"
+    if len(argv) > 1 and argv[:2] == ["rates", "import"]:
+        return "rates.import"
     return argv[0] if argv and not argv[0].startswith("-") else "run"
 
 

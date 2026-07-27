@@ -91,6 +91,8 @@ def _normalized_row(
         "amount_hkd": "",
         "valuation_source": "",
         "valuation_status": "",
+        "valuation_rate_date": "",
+        "valuation_provider": "",
         "statement_opening_balance": statement_opening_balance,
         "statement_closing_balance": statement_closing_balance,
         "statement_section": statement_section,

@@ -27,6 +27,10 @@ to active source occurrences. It checks overlap membership and occurrence
 counts before returning workspace-relative file, page, and row evidence. The
 CLI loads identity state without recovery for this command.
 
+`rates.py` owns official HKMA document checks, cache checks, cache merging, and
+date resolution. It performs no network or ledger I/O. The CLI owns local file
+reads and recoverable publication.
+
 These boundaries preserve the identity rule: display source fields never choose
 identity ownership. The identity resolver remains the only owner of source and
 record resolution.

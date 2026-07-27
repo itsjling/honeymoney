@@ -7,7 +7,7 @@ artifacts come out. There is no database or cloud service.
 ## Data flow
 
 ```text
-config + profiles + statement files
+config + profiles + statement files + local official-rate cache
                  |
                  v
 profile detection and CSV/PDF parsing
@@ -67,6 +67,9 @@ while
 import generation. Corrections and remembered rules remain independent inputs,
 but operations that change them and the ledger publish them through the same
 recoverable persistence boundary.
+The versioned `rates.json` cache is also an input. A local HKMA document import
+checks and normalizes every observation before it publishes the cache and
+revalued ledger through that boundary.
 
 Each operation writes and flushes complete staged files and prior-file backups
 before replacing any public path. Non-ledger artifacts are replaced first and
@@ -129,7 +132,9 @@ remain true with no current human decision. The free-text `reason` field keeps
 categorization and processing provenance. HKD valuation completeness stays
 separate from transaction review. `valuation_source` and `valuation_status`
 distinguish statement amounts, matched exchange legs, dated or fixed rate
-estimates, and missing values. See
+estimates, imported HKMA reference estimates, and missing values.
+`valuation_rate_date` and `valuation_provider` keep the rate evidence on each
+valued row. See
 [`ADR 0004`](adr/0004-review-state-and-hkd-valuation.md).
 
 `category` is the merchant/budget classification. `flow_type` is the accounting
@@ -174,6 +179,17 @@ Direction uses the base-currency amount when present. If conversion is missing,
 it may use a valid non-zero posted amount for direction only. Transfer matching
 and report totals still require base-currency amounts. Reports count rows omitted
 from totals and show that count without transaction text.
+
+Official HKMA daily observations use HKD per unit of foreign currency. A local
+import stores the raw observation and a resolution for each requested
+transaction date. Resolution uses the exact date or the latest prior date
+within seven calendar days. It never uses a future observation. Valuation order
+is statement-posted value, matched exchange leg, configured exact-date rate,
+HKMA cache, configured fixed rate, then missing. See
+[`ADR 0005`](adr/0005-local-hkma-rate-cache.md).
+The provider fields already use one foreign-currency unit, including JPY, KRW,
+and IDR. Normal statement imports add new requested-date resolutions when the
+cache already holds a matching observation.
 
 ## Transaction identity
 
@@ -294,11 +310,13 @@ changing it.
   following them.
 - `honeymoney/schema.py`: public ledger/review columns and allowed values.
 - `honeymoney/report.py`: offline HTML report generation.
+- `honeymoney/rates.py`: official HKMA document checks, versioned cache, and
+  safe prior-date resolution.
 - `honeymoney/reconciliation.py`: deterministic flow derivation, transfer pairing,
   and optional statement balance checks.
 - `honeymoney/review_state.py`: review-reason tokens, plain labels, and the
   boolean invariant.
-- `honeymoney/valuation.py`: HKD value source, dated and fixed rates, and
+- `honeymoney/valuation.py`: HKD value source, configured and cached rates, and
   completeness counts.
 - `honeymoney/valuation_inspection.py`: read-only canonical-to-active-source
   joins for missing valuation diagnosis.

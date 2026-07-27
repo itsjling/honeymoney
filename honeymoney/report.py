@@ -580,7 +580,11 @@ _PAGE_TEMPLATE = """<!doctype html>
 
         var valuationCell = tr.insertCell();
         valuationCell.textContent = row.valuation_label;
-        valuationCell.title = row.valuation_source;
+        valuationCell.title = [
+          row.valuation_source,
+          row.valuation_provider,
+          row.valuation_rate_date ? "rate date " + row.valuation_rate_date : ""
+        ].filter(Boolean).join(" · ");
 
         cell(tr, "account col-account", row.account, row.account);
         cell(tr, "owner col-owner", row.owner, row.owner);
@@ -661,6 +665,8 @@ def _report_row(row: dict[str, str]) -> dict[str, object]:
         or row.get("posted_currency", ""),
         "valuation_source": row.get("valuation_source", ""),
         "valuation_status": row.get("valuation_status", ""),
+        "valuation_rate_date": row.get("valuation_rate_date", ""),
+        "valuation_provider": row.get("valuation_provider", ""),
         "valuation_label": _valuation_label(row),
         "account": row.get("account", ""),
         "owner": row.get("owner", ""),
@@ -684,10 +690,17 @@ def _valuation_label(row: dict[str, str]) -> str:
         "statement_posted": "Statement-posted",
         "matched_exchange_leg": "Matched exchange leg",
         "configured_dated_rate": "Dated rate estimate",
+        "hkma_daily_reference_rate": "HKMA reference estimate",
         "configured_fixed_rate": "Fixed rate estimate",
         "missing": "Missing",
     }
-    return f"{labels.get(source, source)} ({status})"
+    label = f"{labels.get(source, source)} ({status})"
+    details = [
+        row.get("valuation_rate_date", ""),
+        row.get("valuation_provider", ""),
+    ]
+    details = [detail for detail in details if detail]
+    return f"{label} · {' · '.join(details)}" if details else label
 
 
 def _review_labels(value: str) -> list[str]:

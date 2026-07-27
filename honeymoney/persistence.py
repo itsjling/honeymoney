@@ -59,7 +59,7 @@ class GenerationConflictError(OSError):
 def configured_generation_paths(config: Config) -> frozenset[Path]:
     """Return the exact configured files that may join a ledger generation."""
     paths: set[Path] = set()
-    for field in ("corrections", "rules"):
+    for field in ("corrections", "rules", "rate_cache"):
         value = config.get(field)
         if isinstance(value, str) and value.strip():
             paths.add(Path(value).resolve())
