@@ -1985,6 +1985,7 @@ def open(source_path):
                         {
                             "transaction_id": tail_id,
                             "category": "Dining",
+                            "flow_type": "expense",
                             "needs_review": False,
                         }
                     ]
