@@ -120,6 +120,10 @@ from honeymoney.valuation import (
     valuation_summary,
     value_transactions,
 )
+from honeymoney.valuation_inspection import (
+    ValuationInspectionError,
+    inspect_missing_valuations,
+)
 
 JSON_SCHEMA_VERSION = 2
 IDENTITY_MIGRATION_AMBIGUITY_FLAG = "identity_migration_ambiguous"
@@ -283,6 +287,8 @@ def main(argv: list[str] | None = None) -> int:
         return _evaluate_command(argv[1:])
     if argv and argv[0] == "learn":
         return _learn_command(argv[1:])
+    if argv and argv[0] == "valuation":
+        return _valuation_command(argv[1:])
     if argv and argv[0] == "status":
         return _status_command(argv[1:])
     if argv and argv[0] == "pending":
@@ -893,6 +899,7 @@ Commands:
   honeymoney evaluate LEDGER --reference CORRECTIONS
                                    Report category coverage and exact accuracy
   honeymoney learn [--yes]          Build exact rules from active reviews
+  honeymoney valuation missing      Trace missing values to source evidence
   honeymoney status [MONTH]        Show processed/categorized counts for a period
   honeymoney pending [MONTH]       List transactions that need review
   honeymoney duplicates            List unresolved exact-overlap count groups
@@ -998,6 +1005,104 @@ def _learn_command(argv: list[str]) -> int:
     )
     if not args.yes:
         print("Run again with --yes to update managed rules.")
+    return 0
+
+
+def _valuation_command(argv: list[str]) -> int:
+    if not argv or argv[0] != "missing":
+        raise ValueError("honeymoney valuation requires the `missing` subcommand")
+    command_argv = argv[1:]
+    parser = _command_parser(
+        command_argv,
+        prog="honeymoney valuation missing",
+        description="List missing base-currency values with active source evidence.",
+    )
+    parser.add_argument("period", nargs="?", help="Month name or YYYY-MM")
+    parser.add_argument("--month")
+    parser.add_argument("--start")
+    parser.add_argument("--end")
+    parser.add_argument("--transaction", dest="transaction_id")
+    parser.add_argument("--config", dest="config_path")
+    parser.add_argument("--json", action="store_true")
+    args = parser.parse_args(command_argv)
+
+    has_period = bool(args.period or args.month or args.start or args.end)
+    if has_period:
+        start_date, end_date = _resolve_period(
+            args.month or args.period,
+            args.start,
+            args.end,
+        )
+        start = start_date.isoformat()
+        end = end_date.isoformat()
+    else:
+        start = None
+        end = None
+    config = _load_config_read_only(args.config_path)
+    categorized_path = Path(config["paths"]["output"])
+    state = load_configured_identity_state(
+        categorized_path,
+        config,
+        recover=False,
+    )
+    if args.transaction_id and not any(
+        row.get("transaction_id") == args.transaction_id for row in state.rows
+    ):
+        raise ValueError("Unknown transaction_id")
+    workspace_root = Path(config["_identity_workspace_root"])
+    missing = inspect_missing_valuations(
+        state,
+        workspace_root=workspace_root,
+        source_root=Path(config["paths"]["input"]),
+        transaction_id=args.transaction_id,
+        start=start,
+        end=end,
+    )
+    period = (
+        {"start": start, "end": end}
+        if start is not None and end is not None
+        else {"all_dates": True}
+    )
+    if args.json:
+        _emit_json(
+            "valuation.missing",
+            "success",
+            data={
+                "count": len(missing),
+                "period": period,
+                "transactions": missing,
+            },
+        )
+        return 0
+
+    label = f"{start} to {end}" if start and end else "all dates"
+    print(f"Missing valuations for {label}: {len(missing)}")
+    for item in missing:
+        print(
+            f"\n{item['transaction_id']}  {item['date']}  "
+            f"flow={item['flow_type'] or '(none)'}"
+        )
+        print(
+            "  Original: "
+            f"{item['original_amount'] or '(missing)'} "
+            f"{item['original_currency'] or '(missing)'}"
+        )
+        print(
+            "  Posted:   "
+            f"{item['posted_amount'] or '(missing)'} "
+            f"{item['posted_currency'] or '(missing)'}"
+        )
+        print(f"  Valuation: {item['valuation_status']} via {item['valuation_source']}")
+        print(f"  Active source occurrences: {item['source_occurrence_count']}")
+        for source in item["source_evidence"]:
+            print(
+                "    "
+                f"{source['source_file'] or source['source_display'] or '(file unavailable)'} "
+                f"page={source['source_page'] or '-'} "
+                f"row={source['source_row'] or '-'}"
+            )
+        if item["source_data_flags"]:
+            print("  Source-data flags: " + ", ".join(item["source_data_flags"]))
     return 0
 
 
@@ -4145,6 +4250,15 @@ def run() -> int:
             if isinstance(error, ManualPairError)
             else None
         )
+        valuation_inspection_details = (
+            {
+                "type": "ValuationInspectionError",
+                "code": error.code,
+                "message": str(error),
+            }
+            if isinstance(error, ValuationInspectionError)
+            else None
+        )
         if "--json" in argv:
             command = _json_error_command(argv)
             error_items = (
@@ -4154,6 +4268,7 @@ def run() -> int:
                     identity_details
                     or duplicate_details
                     or manual_pair_details
+                    or valuation_inspection_details
                     or {
                         "type": type(error).__name__,
                         "message": str(error),
@@ -4210,6 +4325,8 @@ def _json_error_command(argv: list[str]) -> str:
         return "duplicates.resolve"
     if len(argv) > 1 and argv[:2] == ["review", "pair"]:
         return "review.pair"
+    if len(argv) > 1 and argv[:2] == ["valuation", "missing"]:
+        return "valuation.missing"
     return argv[0] if argv and not argv[0].startswith("-") else "run"
 
 
