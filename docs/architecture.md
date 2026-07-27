@@ -177,8 +177,8 @@ force review. JSON keeps the old duplicate count fields as derived compatibility
 data, while `overlap` is the full provenance contract.
 Direction uses the base-currency amount when present. If conversion is missing,
 it may use a valid non-zero posted amount for direction only. Transfer matching
-and report totals still require base-currency amounts. Reports count rows omitted
-from totals and show that count without transaction text.
+and report totals still require base-currency amounts. Reports split missing
+values by cash-flow impact without transaction text.
 
 Official HKMA daily observations use HKD per unit of foreign currency. A local
 import stores the raw observation and a resolution for each requested
@@ -190,6 +190,15 @@ HKMA cache, configured fixed rate, then missing. See
 The provider fields already use one foreign-currency unit, including JPY, KRW,
 and IDR. Normal statement imports add new requested-date resolutions when the
 cache already holds a matching observation.
+
+Valuation summaries group missing values by accounting impact. Missing income,
+expense, and refund values block confirmed cash-flow totals unless the posted
+amount is exactly zero. Missing transfer, card-payment, and investment-transfer
+values do not block those totals. Missing unresolved flows stay separate.
+Summaries also split income, spending, refunds, and net cash flow into actual,
+estimated, and combined-estimate HKD values. Source counts keep each estimate
+kind distinct. See
+[`ADR 0006`](adr/0006-valuation-impact-reporting.md).
 
 ## Transaction identity
 

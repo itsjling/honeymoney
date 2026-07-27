@@ -3382,6 +3382,18 @@ def _status_command(argv: list[str]) -> int:
 
     rows = _rows_in_period(ledger_rows, start, end)
     source_rows = _rows_in_period(state.source_rows, start, end)
+    current_overlap = (
+        None
+        if state.canonical_migration_required
+        else canonicalize_overlaps(
+            state.source_rows,
+            ledger_rows,
+            state.overlap_manifest,
+        )
+    )
+    reconcile_ledger(ledger_rows, config, statement_rows=state.source_rows)
+    enforce_overlap_review(ledger_rows, current_overlap)
+    rows = _rows_in_period(ledger_rows, start, end)
     categorized = [row for row in rows if _is_categorized(row)]
     statements = {
         row.get("source_file", "") for row in source_rows if row.get("source_file")
@@ -3391,7 +3403,9 @@ def _status_command(argv: list[str]) -> int:
         overlap = _unmigrated_overlap(rows)
     else:
         overlap_result = canonicalize_overlaps(
-            state.source_rows, state.rows, state.overlap_manifest
+            state.source_rows,
+            ledger_rows,
+            state.overlap_manifest,
         )
         overlap = _overlap_diagnostic_for_rows(overlap_result, rows, source_rows)
     duplicate_count, duplicate_group_count, duplicate_candidates = (
@@ -3413,6 +3427,7 @@ def _status_command(argv: list[str]) -> int:
         1 for row in ledger_rows if _parse_iso_date(row.get("date", "")) is None
     )
     outside = len(ledger_rows) - len(rows) - undated
+    period_valuation = valuation_summary(rows)
 
     if args.json:
         _emit_json(
@@ -3429,7 +3444,7 @@ def _status_command(argv: list[str]) -> int:
                 "uncategorized": len(rows) - len(categorized),
                 "needs_review": len(review),
                 "review_reason_counts": review_summary(rows),
-                "valuation": valuation_summary(rows),
+                "valuation": period_valuation,
                 "overlap": overlap,
                 "duplicate_count": duplicate_count,
                 "duplicate_group_count": duplicate_group_count,
@@ -3453,8 +3468,26 @@ def _status_command(argv: list[str]) -> int:
     print(f"  Categorized:          {len(categorized)}")
     print(f"  Uncategorized:        {len(rows) - len(categorized)}")
     print(f"  Needs review:         {len(review)}")
-    missing_valuation = valuation_summary(rows)["missing_count"]
-    print(f"  Missing HKD values:   {missing_valuation}")
+    print(f"  Missing HKD values:   {period_valuation['missing_count']}")
+    print(
+        "    Cash-flow blockers: "
+        f"{period_valuation['cash_flow_blocking_missing_count']}"
+    )
+    print(f"    Excluded flows:     {period_valuation['excluded_flow_missing_count']}")
+    print(
+        f"    Unresolved flows:   {period_valuation['unresolved_flow_missing_count']}"
+    )
+    print(f"    Zero cash-flow rows:{period_valuation['zero_amount_missing_count']:>2}")
+    print(f"    Other flows:        {period_valuation['other_flow_missing_count']}")
+    cash_flow = period_valuation["cash_flow"]
+    print(_valuation_cash_flow_line("Actual", cash_flow["actual"]))
+    print(_valuation_cash_flow_line("Estimated", cash_flow["estimated"]))
+    print(
+        _valuation_cash_flow_line(
+            "Combined estimate",
+            cash_flow["combined_estimate"],
+        )
+    )
     print(f"  Consolidated overlap: {len(source_rows) - len(rows)}")
     print(f"  Ambiguous groups:     {overlap['ambiguous_group_count']}")
     print(f"  Unresolved inflows:   {unresolved_inflows}")
@@ -3467,6 +3500,16 @@ def _status_command(argv: list[str]) -> int:
         f"({outside} outside this period, {undated} with unparseable dates)"
     )
     return 0
+
+
+def _valuation_cash_flow_line(label: str, totals: Mapping[str, str]) -> str:
+    return (
+        f"  {label} HKD: "
+        f"income={totals['income']}, "
+        f"spending={totals['spending']}, "
+        f"refunds={totals['refunds']}, "
+        f"net={totals['net_cash_flow']}"
+    )
 
 
 def _report_command(argv: list[str]) -> int:

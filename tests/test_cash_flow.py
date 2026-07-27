@@ -226,8 +226,7 @@ class CashFlowWorkflowTest(unittest.TestCase):
             )
             report = (root / "output" / "report.html").read_text(encoding="utf-8")
             self.assertIn(
-                "2 rows are omitted from period totals because HKD valuation "
-                "is missing.",
+                "2 rows have no HKD valuation.",
                 report,
             )
 

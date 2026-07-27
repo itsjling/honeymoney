@@ -4,6 +4,8 @@ import html
 import json
 from decimal import Decimal, InvalidOperation
 
+from honeymoney.valuation import valuation_summary
+
 _PAGE_TEMPLATE = """<!doctype html>
 <html lang="en">
 <head>
@@ -262,11 +264,34 @@ _PAGE_TEMPLATE = """<!doctype html>
     padding: 0.85rem 1rem;
     margin: -1rem 0 2rem;
   }
+  .valuation-table { width: 100%; border-collapse: collapse; }
+  .valuation-table th, .valuation-table td {
+    padding: 0.65rem 0.5rem;
+    border-bottom: 1px solid var(--line);
+  }
+  .valuation-table th { color: var(--ink-faint); font-weight: 600; text-align: right; }
+  .valuation-table th:first-child, .valuation-table td:first-child { text-align: left; }
+  .valuation-table td { text-align: right; }
+  .valuation-table tr:last-child td { border-bottom: 0; font-weight: 620; }
+  .valuation-note { color: var(--ink-muted); font-size: 0.82rem; margin: 0.8rem 0 0; }
+  .completeness-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 1rem;
+  }
+  .completeness-item .label {
+    color: var(--ink-faint);
+    font-size: 0.72rem;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+  }
+  .completeness-item .value { font-size: 1.25rem; margin-top: 0.25rem; }
 
   @media (max-width: 860px) {
     .stats { grid-template-columns: repeat(2, 1fr); }
     .stat:nth-child(3) { border-left: 0; }
     .stat:nth-child(n+3) { border-top: 1px solid var(--line); }
+    .completeness-grid { grid-template-columns: repeat(2, 1fr); }
   }
   @media (max-width: 720px) {
     .chart-row { grid-template-columns: 1fr; }
@@ -296,15 +321,43 @@ _PAGE_TEMPLATE = """<!doctype html>
   </header>
 
   <section class="stats rise d1" aria-label="Summary">
-    <div class="stat"><div class="label">Spending, net of refunds</div><div class="value neg num" id="tile-spending">__SPENDING__</div></div>
-    <div class="stat"><div class="label">Confirmed income</div><div class="value pos num" id="tile-income">__INCOME__</div></div>
-    <div class="stat"><div class="label">Confirmed net</div><div class="value num" id="tile-net">__NET__</div></div>
+    <div class="stat"><div class="label">Spending, net of refunds · combined estimate</div><div class="value neg num" id="tile-spending">__SPENDING__</div></div>
+    <div class="stat"><div class="label">Income · combined estimate</div><div class="value pos num" id="tile-income">__INCOME__</div></div>
+    <div class="stat"><div class="label">Net cash flow · combined estimate</div><div class="value num" id="tile-net">__NET__</div></div>
     <div class="stat"><div class="label">Unresolved inflow</div><div class="value pos num" id="tile-unresolved-inflow">__UNRESOLVED_INFLOW__</div></div>
     <div class="stat"><div class="label">Unresolved outflow</div><div class="value neg num" id="tile-unresolved-outflow">__UNRESOLVED_OUTFLOW__</div></div>
     <div class="stat"><div class="label">Uncategorized</div><div class="value num" id="tile-uncategorized">__UNCATEGORIZED__</div></div>
   </section>
 
   __COMPLETENESS_WARNING__
+
+  <section class="panel rise d2" aria-label="Valuation completeness">
+    <div class="panel-head"><h2>Valuation completeness</h2><span class="hint">Canonical transactions in this period</span></div>
+    <div class="panel-body completeness-grid">
+      <div class="completeness-item"><div class="label">Total missing</div><div class="value num">__MISSING_TOTAL__</div></div>
+      <div class="completeness-item"><div class="label">Cash-flow blockers</div><div class="value num">__MISSING_BLOCKING__</div></div>
+      <div class="completeness-item"><div class="label">Excluded flows</div><div class="value num">__MISSING_EXCLUDED__</div></div>
+      <div class="completeness-item"><div class="label">Unresolved flows</div><div class="value num">__MISSING_UNRESOLVED__</div></div>
+      <div class="completeness-item"><div class="label">Zero cash-flow rows</div><div class="value num">__MISSING_ZERO__</div></div>
+      <div class="completeness-item"><div class="label">Other flows</div><div class="value num">__MISSING_OTHER__</div></div>
+    </div>
+  </section>
+
+  <section class="panel rise d2" aria-label="Cash-flow valuation">
+    <div class="panel-head"><h2>Cash-flow valuation</h2><span class="hint">HKD</span></div>
+    <div class="panel-body">
+      <table class="valuation-table">
+        <thead><tr><th>Flow</th><th>Actual</th><th>Estimated</th><th>Combined estimate</th></tr></thead>
+        <tbody>
+          <tr><td>Income</td><td class="num">__ACTUAL_INCOME__</td><td class="num">__ESTIMATED_INCOME__</td><td class="num">__COMBINED_INCOME__</td></tr>
+          <tr><td>Spending</td><td class="num">__ACTUAL_SPENDING__</td><td class="num">__ESTIMATED_SPENDING__</td><td class="num">__COMBINED_SPENDING__</td></tr>
+          <tr><td>Refunds</td><td class="num">__ACTUAL_REFUNDS__</td><td class="num">__ESTIMATED_REFUNDS__</td><td class="num">__COMBINED_REFUNDS__</td></tr>
+          <tr><td>Net cash flow</td><td class="num">__ACTUAL_NET__</td><td class="num">__ESTIMATED_NET__</td><td class="num">__COMBINED_NET__</td></tr>
+        </tbody>
+      </table>
+      <p class="valuation-note">Combined estimates include statement and matched actual values plus configured or provider reference estimates. They are not exact bank conversion costs or tax valuations.</p>
+    </div>
+  </section>
 
   <section class="panel rise d2">
     <div class="panel-head">
@@ -622,15 +675,23 @@ def build_report_html(
         sort_keys=True,
     ).replace("</", "<\\/")
     summary = _flow_summary(rows)
-    missing_count = missing_base_currency_count(rows)
+    valuation = valuation_summary(rows)
+    missing_count = valuation["missing_count"]
+    blocking_count = valuation["cash_flow_blocking_missing_count"]
     warning = (
         '<p class="warning" role="alert">'
         f"{missing_count} "
-        f"{'row is' if missing_count == 1 else 'rows are'} omitted from period "
-        "totals because HKD valuation is missing.</p>"
+        f"{'row has' if missing_count == 1 else 'rows have'} no HKD valuation. "
+        f"{blocking_count} "
+        f"{'row blocks' if blocking_count == 1 else 'rows block'} confirmed "
+        "cash-flow totals.</p>"
         if missing_count
         else ""
     )
+    cash_flow = valuation["cash_flow"]
+    actual = cash_flow["actual"]
+    estimated = cash_flow["estimated"]
+    combined = cash_flow["combined_estimate"]
     replacements = {
         "__PERIOD__": html.escape(period_label),
         "__SOURCE_COUNT__": str(
@@ -645,6 +706,24 @@ def build_report_html(
         "__UNRESOLVED_OUTFLOW__": _format_amount(summary["unresolved_outflow"]),
         "__UNCATEGORIZED__": str(summary["uncategorized"]),
         "__COMPLETENESS_WARNING__": warning,
+        "__MISSING_TOTAL__": str(missing_count),
+        "__MISSING_BLOCKING__": str(blocking_count),
+        "__MISSING_EXCLUDED__": str(valuation["excluded_flow_missing_count"]),
+        "__MISSING_UNRESOLVED__": str(valuation["unresolved_flow_missing_count"]),
+        "__MISSING_ZERO__": str(valuation["zero_amount_missing_count"]),
+        "__MISSING_OTHER__": str(valuation["other_flow_missing_count"]),
+        "__ACTUAL_INCOME__": _format_total(actual["income"]),
+        "__ACTUAL_SPENDING__": _format_total(actual["spending"]),
+        "__ACTUAL_REFUNDS__": _format_total(actual["refunds"]),
+        "__ACTUAL_NET__": _format_total(actual["net_cash_flow"]),
+        "__ESTIMATED_INCOME__": _format_total(estimated["income"]),
+        "__ESTIMATED_SPENDING__": _format_total(estimated["spending"]),
+        "__ESTIMATED_REFUNDS__": _format_total(estimated["refunds"]),
+        "__ESTIMATED_NET__": _format_total(estimated["net_cash_flow"]),
+        "__COMBINED_INCOME__": _format_total(combined["income"]),
+        "__COMBINED_SPENDING__": _format_total(combined["spending"]),
+        "__COMBINED_REFUNDS__": _format_total(combined["refunds"]),
+        "__COMBINED_NET__": _format_total(combined["net_cash_flow"]),
     }
     document = _PAGE_TEMPLATE
     for placeholder, value in replacements.items():
@@ -763,4 +842,8 @@ def _flow_summary(rows: list[dict[str, str]]) -> dict[str, Decimal | int]:
 
 
 def _format_amount(value: Decimal | int) -> str:
+    return f"{Decimal(value):,.2f}"
+
+
+def _format_total(value: str) -> str:
     return f"{Decimal(value):,.2f}"
