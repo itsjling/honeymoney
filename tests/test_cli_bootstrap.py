@@ -2907,7 +2907,7 @@ class CliBootstrapTest(unittest.TestCase):
                     self.assertEqual(result.returncode, 2)
                     self.assertIn("Unsupported confidence in correction", result.stderr)
 
-    def test_duplicate_detection_flags_near_date_matches(self) -> None:
+    def test_duplicate_detection_does_not_flag_near_date_matches(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             input_dir = root / "input"
@@ -2993,10 +2993,10 @@ class CliBootstrapTest(unittest.TestCase):
 
             self.assertEqual(len(rows), 2)
             for row in rows:
-                self.assertIn("duplicate_suspected", row["flags"])
+                self.assertNotIn("duplicate_suspected", row["flags"])
                 self.assertEqual(row["needs_review"], "true")
 
-    def test_duplicate_detection_flags_cross_account_matches(self) -> None:
+    def test_duplicate_detection_does_not_flag_cross_account_matches(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             input_dir = root / "input"
@@ -3100,7 +3100,7 @@ class CliBootstrapTest(unittest.TestCase):
             )
             self.assertNotEqual(rows[0]["transaction_id"], rows[1]["transaction_id"])
             for row in rows:
-                self.assertIn("duplicate_suspected", row["flags"])
+                self.assertNotIn("duplicate_suspected", row["flags"])
                 self.assertNotIn("duplicate_identity_collision", row["flags"])
 
     def test_unavailable_ollama_does_not_fail_run(self) -> None:

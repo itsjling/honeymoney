@@ -318,110 +318,11 @@ def _format_decimal(value: Decimal) -> str:
     return str(value.quantize(Decimal("0.01")))
 
 
-def _annotate_duplicate_suspicions(
-    transactions: list[dict[str, str]],
-    retained_ledger_rows: tuple[dict[str, str], ...]
-    | list[dict[str, str]]
-    | None = None,
-    *,
-    operation_counts: dict[str, int] | None = None,
-) -> None:
-    """Flag only incoming rows that match an incoming or retained row."""
-    comparison_rows = [*(retained_ledger_rows or ()), *transactions]
-    current_row_ids = {id(transaction) for transaction in transactions}
-    if operation_counts is not None:
-        operation_counts["date_parses"] = 0
-        operation_counts["window_checks"] = 0
-
-    row_records: list[
-        tuple[dict[str, str], date | None, tuple[str, ...], tuple[str, ...], bool]
-    ] = []
-    duplicate_keys: dict[tuple[str, ...], int] = {}
-    for transaction in comparison_rows:
-        key = _duplicate_key(transaction)
-        duplicate_keys[key] = duplicate_keys.get(key, 0) + 1
-        transaction_date = _parse_iso_date(transaction.get("date", ""))
-        if operation_counts is not None:
-            operation_counts["date_parses"] += 1
-        row_records.append(
-            (
-                transaction,
-                transaction_date,
-                key,
-                _duplicate_key_without_date(transaction),
-                id(transaction) in current_row_ids,
-            )
-        )
-
-    for transaction, _date, key, _near_key, is_current in row_records:
-        if is_current and duplicate_keys[key] > 1:
-            _mark_duplicate(transaction)
-
-    near_date_groups: dict[
-        tuple[str, ...], list[tuple[date, int, dict[str, str], bool]]
-    ] = {}
-    for index, (transaction, transaction_date, _key, near_key, is_current) in enumerate(
-        row_records
-    ):
-        if transaction_date is not None:
-            near_date_groups.setdefault(near_key, []).append(
-                (transaction_date, index, transaction, is_current)
-            )
-
-    for group in near_date_groups.values():
-        group.sort(key=lambda item: (item[0], item[1]))
-        for index, (transaction_date, _order, transaction, is_current) in enumerate(
-            group
-        ):
-            if not is_current:
-                continue
-            for neighbor_index in (index - 1, index + 1):
-                if not 0 <= neighbor_index < len(group):
-                    continue
-                if operation_counts is not None:
-                    operation_counts["window_checks"] += 1
-                other_date = group[neighbor_index][0]
-                if abs((transaction_date - other_date).days) <= 1:
-                    _mark_duplicate(transaction)
-                    break
-
-
-def _duplicate_key(transaction: dict[str, str]) -> tuple[str, ...]:
-    fields = [
-        "date",
-        "amount_hkd",
-        "original_amount",
-        "original_currency",
-        "merchant",
-        "original_description",
-    ]
-    return tuple(_normalized_match_text(transaction.get(field, "")) for field in fields)
-
-
-def _duplicate_key_without_date(transaction: dict[str, str]) -> tuple[str, ...]:
-    fields = [
-        "amount_hkd",
-        "original_amount",
-        "original_currency",
-        "merchant",
-        "original_description",
-    ]
-    return tuple(_normalized_match_text(transaction.get(field, "")) for field in fields)
-
-
 def _parse_iso_date(value: str) -> date | None:
     try:
         return date.fromisoformat(value)
     except ValueError:
         return None
-
-
-def _mark_duplicate(transaction: dict[str, str]) -> None:
-    transaction["needs_review"] = "true"
-    transaction["flags"] = _append_flag(transaction["flags"], "duplicate_suspected")
-    transaction["reason"] = _append_reason(
-        transaction["reason"], "Possible duplicate transaction"
-    )
 
 
 def _append_reason(existing: str, reason: str) -> str:

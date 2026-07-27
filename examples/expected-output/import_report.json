@@ -2,7 +2,13 @@
   "categorization": {
     "structural_count": 0
   },
+  "duplicate_candidates": {
+    "group_count": 0,
+    "groups": [],
+    "occurrence_count": 0
+  },
   "duplicate_count": 0,
+  "duplicate_group_count": 0,
   "errors": [],
   "files": [
     {

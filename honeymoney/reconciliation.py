@@ -6,6 +6,10 @@ from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from honeymoney.classification_policy import trusted_accounting_provenance
+from honeymoney.duplicates import (
+    DUPLICATE_REVIEW_PROMOTED_FLAG,
+    release_duplicate_review_ownership,
+)
 from honeymoney.identity import ambiguous_legacy_transaction_ids
 from honeymoney.schema import ALLOWED_ACCOUNT_TYPES, ALLOWED_FLOW_TYPES
 
@@ -96,10 +100,15 @@ def reconcile_ledger(
         if transaction_id in choices:
             row["reconciliation_status"] = "ambiguous"
             row["reconciliation_confidence"] = "0.00"
-            if row.get("needs_review") == "true":
+            if row.get(
+                "needs_review"
+            ) == "true" and DUPLICATE_REVIEW_PROMOTED_FLAG not in _tokens(
+                row.get("flags", "")
+            ):
                 row["flags"] = _append_token(
                     row.get("flags", ""), AMBIGUITY_PRIOR_REVIEW_FLAG
                 )
+            release_duplicate_review_ownership(row)
             row["needs_review"] = "true"
             row["flags"] = _append_token(row.get("flags", ""), AMBIGUITY_FLAG)
             row["reason"] = _append_reason(row.get("reason", ""), AMBIGUITY_REASON)
@@ -150,6 +159,8 @@ def _reset_reconciliation(row: dict[str, str]) -> None:
         )
         row["reason"] = _remove_reason(row.get("reason", ""), AMBIGUITY_REASON)
         if current_review != "false":
+            if prior_review:
+                release_duplicate_review_ownership(row)
             row["needs_review"] = "true" if prior_review else "false"
     row["transfer_group_id"] = ""
     row["paired_transaction_id"] = ""

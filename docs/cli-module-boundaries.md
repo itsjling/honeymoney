@@ -15,8 +15,12 @@ status callback and never import `cli.py`.
 
 `normalization.py` is pure. It receives source text, profile settings, config,
 and an already-computed display `source_file`; it performs no path, directory,
-or filesystem work. It also checks duplicate candidates against supplied
-retained and incoming rows, and only marks incoming rows.
+or filesystem work.
+
+`duplicates.py` owns duplicate-candidate evaluation and annotations across the
+complete prospective ledger. The CLI uses read-only evaluation for reports
+when no source was processed; otherwise it applies the result before it
+publishes the ledger.
 
 These boundaries preserve the identity rule: display source fields never choose
 identity ownership. The identity resolver remains the only owner of source and
