@@ -1,6 +1,7 @@
 import hashlib
 import json
 import os
+import runpy
 import subprocess
 import sys
 import tempfile
@@ -12,7 +13,7 @@ from unittest.mock import patch
 
 import pdfplumber
 
-from honeymoney.cli import _load_config_document
+from honeymoney.cli import _load_config_document, _preview_profile_input, main
 from honeymoney.identity import (
     IdentityError,
     empty_manifest,
@@ -61,6 +62,37 @@ class HsbcCreditCardPdfProfileTest(unittest.TestCase):
             load_profile("hsbc_hk_credit_card_pdf.json"),
             "accepted_statement",
         )
+
+    def test_footer_boundary(self) -> None:
+        assert_pdf_byte_import_case(
+            self,
+            load_profile("hsbc_hk_credit_card_pdf.json"),
+            "footer_boundary",
+        )
+
+    def test_preview_and_import_share_footer_boundary(self) -> None:
+        profile = load_profile("hsbc_hk_credit_card_pdf.json")
+        fixture = (
+            FIXTURE_DIR
+            / "import_profiles"
+            / "hsbc_hk_credit_card_pdf"
+            / "footer_boundary"
+            / "input.pdf"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            statement = root / "statement.pdf"
+            statement.write_bytes(fixture.read_bytes())
+            config = {"base_currency": "HKD", "exchange_rates": {"HKD": 1}}
+            imported_rows, imported_warnings = _import_pdf(
+                statement, profile, config, root
+            )
+            preview_rows, preview_warnings = _preview_profile_input(
+                profile, str(profile["id"]), statement, config
+            )
+
+        self.assertEqual(preview_warnings, imported_warnings)
+        self.assertEqual(preview_rows, imported_rows)
 
 
 class MoxBankPdfProfileTest(unittest.TestCase):
@@ -113,15 +145,8 @@ class PdfByteFixtureReviewTest(unittest.TestCase):
         review_path = fixture_root / "pdf_byte_privacy_review.json"
         self.assertTrue(review_path.is_file(), f"Missing review: {review_path}")
         review = load_json(review_path)
-        self.assertEqual(
-            set(review["fixtures"]),
-            {
-                "hsbc_one_pdf",
-                "hsbc_hk_credit_card_pdf",
-                "mox_bank_pdf",
-                "mox_credit_card_pdf",
-            },
-        )
+        fixtures = _pdf_byte_fixtures(generator)
+        self.assertEqual(set(review["fixtures"]), set(fixtures))
         prohibited_objects = [
             b"/EmbeddedFile",
             b"/EmbeddedFiles",
@@ -137,11 +162,9 @@ class PdfByteFixtureReviewTest(unittest.TestCase):
             b"/Subtype /Image",
             b"/Encrypt",
         ]
-        for profile_id, expected in review["fixtures"].items():
-            with self.subTest(profile=profile_id):
-                fixture_path = (
-                    fixture_root / profile_id / "accepted_statement/input.pdf"
-                )
+        for fixture_id, expected in review["fixtures"].items():
+            with self.subTest(fixture=fixture_id):
+                fixture_path = fixtures[fixture_id]
                 fixture_bytes = fixture_path.read_bytes()
                 self.assertEqual(
                     hashlib.sha256(fixture_bytes).hexdigest(), expected["sha256"]
@@ -444,6 +467,348 @@ class IdentityParserInputsTest(unittest.TestCase):
 
         self.assertEqual(records[0].locator.components, (1, 3))
 
+    def test_pdf_word_rows_reject_invalid_required_dates_before_identity(self) -> None:
+        profile = {
+            "id": "word",
+            "account_id": "word",
+            "account_currency": "HKD",
+            "date_formats": ["%Y-%m-%d"],
+            "pdf": {
+                "word_rows": True,
+                "word_header_markers": ["Post date", "Description", "Amount"],
+                "word_columns": {
+                    "Post date": [0, 90],
+                    "Description": [90, 200],
+                    "Amount": [200, 300],
+                },
+                "columns": {
+                    "transaction_date": "Post date",
+                    "description": "Description",
+                    "amount": "Amount",
+                },
+            },
+        }
+        words = [
+            {"text": "Post date", "x0": 0, "top": 10},
+            {"text": "Description", "x0": 100, "top": 10},
+            {"text": "Amount", "x0": 210, "top": 10},
+            {"text": "not-a-date", "x0": 0, "top": 20},
+            {"text": "Synthetic footer", "x0": 100, "top": 20},
+            {"text": "1.00", "x0": 210, "top": 20},
+        ]
+
+        with self.assertRaisesRegex(
+            ValueError,
+            r"pdf_word_row_invalid_date: source=statement\.pdf; "
+            r"page=1; row=2; field=transaction_date",
+        ) as raised:
+            _import_fake_pdf(profile, words=words)
+        self.assertNotIn("profile=", str(raised.exception))
+        self.assertNotIn("Post date", str(raised.exception))
+
+    def test_pdf_word_rows_skip_footer_and_balance_before_date_validation(
+        self,
+    ) -> None:
+        profile = {
+            "id": "word",
+            "account_id": "word",
+            "account_currency": "HKD",
+            "date_formats": ["%Y-%m-%d"],
+            "skip_descriptions": ["Synthetic footer"],
+            "pdf": {
+                "word_rows": True,
+                "word_header_markers": ["Post date", "Description", "Amount"],
+                "word_columns": {
+                    "Post date": [0, 90],
+                    "Description": [90, 200],
+                    "Amount": [200, 300],
+                },
+                "columns": {
+                    "transaction_date": "Post date",
+                    "description": "Description",
+                    "amount": "Amount",
+                },
+            },
+        }
+        words = [
+            {"text": "Post date", "x0": 0, "top": 10},
+            {"text": "Description", "x0": 100, "top": 10},
+            {"text": "Amount", "x0": 210, "top": 10},
+            {"text": "2026-01-01", "x0": 0, "top": 20},
+            {"text": "Coffee", "x0": 100, "top": 20},
+            {"text": "-1.00", "x0": 210, "top": 20},
+            {"text": "not-a-date", "x0": 0, "top": 30},
+            {"text": "Synthetic footer", "x0": 100, "top": 30},
+            {"text": "1.00", "x0": 210, "top": 30},
+            {"text": "not-a-date", "x0": 0, "top": 40},
+            {"text": "Closing balance", "x0": 100, "top": 40},
+            {"text": "1.00", "x0": 210, "top": 40},
+        ]
+
+        rows, _, _ = _import_fake_pdf(profile, words=words)
+
+        self.assertEqual([row["merchant"] for row in rows], ["Coffee"])
+
+    def test_pdf_word_end_marker_does_not_end_dated_transaction_row(self) -> None:
+        legal_name = "The Hongkong and Shanghai Banking Corporation Limited"
+        profile = {
+            "id": "word",
+            "account_id": "word",
+            "account_currency": "HKD",
+            "date_formats": ["%Y-%m-%d"],
+            "pdf": {
+                "word_rows": True,
+                "word_header_markers": ["Post date", "Description", "Amount"],
+                "word_table_end_markers": [legal_name, "Note:"],
+                "word_columns": {
+                    "Post date": [0, 90],
+                    "Description": [90, 500],
+                    "Amount": [500, 600],
+                },
+                "columns": {
+                    "transaction_date": "Post date",
+                    "description": "Description",
+                    "amount": "Amount",
+                },
+            },
+        }
+        words = [
+            {"text": "Post date", "x0": 0, "top": 10},
+            {"text": "Description", "x0": 100, "top": 10},
+            {"text": "Amount", "x0": 510, "top": 10},
+            {"text": "2026-01-01", "x0": 0, "top": 20},
+            {"text": legal_name, "x0": 100, "top": 20},
+            {"text": "-1.00", "x0": 510, "top": 20},
+        ]
+
+        rows, _, _ = _import_fake_pdf(profile, words=words)
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["merchant"], legal_name)
+
+    def test_pdf_word_end_marker_matches_within_longer_footer_line(self) -> None:
+        profile = {
+            "id": "word",
+            "account_id": "word",
+            "account_currency": "HKD",
+            "date_formats": ["%Y-%m-%d"],
+            "pdf": {
+                "word_rows": True,
+                "word_header_markers": ["Post date", "Description", "Amount"],
+                "word_table_end_markers": ["REWARDCASH"],
+                "word_columns": {
+                    "Post date": [0, 90],
+                    "Description": [90, 200],
+                    "Amount": [200, 300],
+                },
+                "columns": {
+                    "transaction_date": "Post date",
+                    "description": "Description",
+                    "amount": "Amount",
+                },
+            },
+        }
+        words = [
+            {"text": "Post date", "x0": 0, "top": 10},
+            {"text": "Description", "x0": 100, "top": 10},
+            {"text": "Amount", "x0": 210, "top": 10},
+            {"text": "2026-01-01", "x0": 0, "top": 20},
+            {"text": "Coffee", "x0": 100, "top": 20},
+            {"text": "-1.00", "x0": 210, "top": 20},
+            {"text": "REWARDCASH", "x0": 0, "top": 30},
+            {"text": "SUMMARY", "x0": 100, "top": 30},
+            {"text": "not-a-date", "x0": 0, "top": 40},
+            {"text": "After footer", "x0": 100, "top": 40},
+            {"text": "-2.00", "x0": 210, "top": 40},
+        ]
+
+        rows, _, _ = _import_fake_pdf(profile, words=words)
+
+        self.assertEqual([row["merchant"] for row in rows], ["Coffee"])
+
+    def test_pdf_word_marker_description_with_malformed_date_is_rejected(
+        self,
+    ) -> None:
+        profile = {
+            "id": "word",
+            "account_id": "word",
+            "account_currency": "HKD",
+            "date_formats": ["%Y-%m-%d"],
+            "pdf": {
+                "word_rows": True,
+                "word_header_markers": ["Post date", "Description", "Amount"],
+                "word_table_end_markers": ["REWARDCASH"],
+                "word_columns": {
+                    "Post date": [0, 90],
+                    "Description": [90, 200],
+                    "Amount": [200, 300],
+                },
+                "columns": {
+                    "transaction_date": "Post date",
+                    "description": "Description",
+                    "amount": "Amount",
+                },
+            },
+        }
+        words = [
+            {"text": "Post date", "x0": 0, "top": 10},
+            {"text": "Description", "x0": 100, "top": 10},
+            {"text": "Amount", "x0": 210, "top": 10},
+            {"text": "not-a-date", "x0": 0, "top": 20},
+            {"text": "REWARDCASH PURCHASE", "x0": 100, "top": 20},
+            {"text": "-1.00", "x0": 210, "top": 20},
+        ]
+
+        with self.assertRaisesRegex(
+            ValueError,
+            r"pdf_word_row_invalid_date: source=statement\.pdf; "
+            r"page=1; row=2; field=transaction_date",
+        ):
+            _import_fake_pdf(profile, words=words)
+
+    def test_pdf_word_rows_allow_one_blank_mapped_date(self) -> None:
+        profile = {
+            "id": "word",
+            "account_id": "word",
+            "account_currency": "HKD",
+            "date_formats": ["%Y-%m-%d"],
+            "pdf": {
+                "word_rows": True,
+                "word_header_markers": [
+                    "Post date",
+                    "Trans date",
+                    "Description",
+                    "Amount",
+                ],
+                "word_columns": {
+                    "Post date": [0, 90],
+                    "Trans date": [90, 180],
+                    "Description": [180, 290],
+                    "Amount": [290, 380],
+                },
+                "columns": {
+                    "transaction_date": "Trans date",
+                    "posting_date": "Post date",
+                    "description": "Description",
+                    "amount": "Amount",
+                },
+            },
+        }
+        words = [
+            {"text": "Post date", "x0": 0, "top": 10},
+            {"text": "Trans date", "x0": 100, "top": 10},
+            {"text": "Description", "x0": 190, "top": 10},
+            {"text": "Amount", "x0": 300, "top": 10},
+            {"text": "2026-01-01", "x0": 100, "top": 20},
+            {"text": "Coffee", "x0": 190, "top": 20},
+            {"text": "-1.00", "x0": 300, "top": 20},
+        ]
+
+        rows, _, _ = _import_fake_pdf(profile, words=words)
+
+        self.assertEqual(rows[0]["transaction_date"], "2026-01-01")
+        self.assertEqual(rows[0]["posting_date"], "")
+
+    def test_pdf_word_rows_reject_nonempty_malformed_date_when_other_is_valid(
+        self,
+    ) -> None:
+        profile = {
+            "id": "word",
+            "account_id": "word",
+            "account_currency": "HKD",
+            "date_formats": ["%Y-%m-%d"],
+            "pdf": {
+                "word_rows": True,
+                "word_header_markers": [
+                    "Post date",
+                    "Trans date",
+                    "Description",
+                    "Amount",
+                ],
+                "word_columns": {
+                    "Post date": [0, 90],
+                    "Trans date": [90, 180],
+                    "Description": [180, 290],
+                    "Amount": [290, 380],
+                },
+                "columns": {
+                    "transaction_date": "Trans date",
+                    "posting_date": "Post date",
+                    "description": "Description",
+                    "amount": "Amount",
+                },
+            },
+        }
+        words = [
+            {"text": "Post date", "x0": 0, "top": 10},
+            {"text": "Trans date", "x0": 100, "top": 10},
+            {"text": "Description", "x0": 190, "top": 10},
+            {"text": "Amount", "x0": 300, "top": 10},
+            {"text": "2026-01-02", "x0": 0, "top": 20},
+            {"text": "not-a-date", "x0": 100, "top": 20},
+            {"text": "Coffee", "x0": 190, "top": 20},
+            {"text": "-1.00", "x0": 300, "top": 20},
+        ]
+
+        with self.assertRaisesRegex(
+            ValueError,
+            r"pdf_word_row_invalid_date: source=statement\.pdf; "
+            r"page=1; row=2; field=transaction_date",
+        ):
+            _import_fake_pdf(profile, words=words)
+
+    def test_malformed_pdf_word_date_surfaces_parser_code_before_identity_persistence(
+        self,
+    ) -> None:
+        profile = load_profile("hsbc_hk_credit_card_pdf.json")
+        profile["id"] = "synthetic_word_profile"
+        profile["pdf"] = dict(profile["pdf"])
+        profile["pdf"]["word_table_end_markers"] = []
+        fixture = (
+            FIXTURE_DIR
+            / "import_profiles"
+            / "hsbc_hk_credit_card_pdf"
+            / "footer_boundary"
+            / "input.pdf"
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            statement = root / "statement.pdf"
+            statement.write_bytes(fixture.read_bytes())
+            profile_path = root / "profile.json"
+            profile_path.write_text(json.dumps(profile), encoding="utf-8")
+            output = root / "output" / "categorized.csv"
+            config_path = root / "config.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "profiles": [str(profile_path)],
+                        "exchange_rates": {"HKD": 1.0},
+                        "paths": {"input": str(statement), "output": str(output)},
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            self.assertEqual(
+                main(["--config", str(config_path), "--no-interactive"]), 0
+            )
+            report = json.loads(
+                (root / "output" / "import_report.json").read_text(encoding="utf-8")
+            )
+            manifest = json.loads(
+                (root / "output" / ".honeymoney-identity-manifest.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+
+        warning = report["warnings"][0]
+        self.assertIn("pdf_word_row_invalid_date", warning)
+        self.assertNotIn("identity_manifest_invalid", warning)
+        self.assertEqual(report["files"][0]["status"], "failed")
+        self.assertEqual(manifest["sources"], [])
+
     def test_pdf_sectioned_identity_uses_physical_line(self) -> None:
         profile = load_profile("hsbc_one_pdf.json")
         fixture = (
@@ -468,11 +833,19 @@ def _identity_config(root: Path) -> dict:
     return _load_config_document(str(config_path), recover=False)
 
 
+def _pdf_byte_fixtures(generator: Path) -> dict[str, Path]:
+    namespace = runpy.run_path(str(generator))
+    return {
+        fixture.review_key: fixture.output_path for fixture in namespace["FIXTURES"]
+    }
+
+
 def _import_fake_pdf(
     profile: dict,
     *,
     tables: list | None = None,
     words: list | None = None,
+    preview: bool = False,
 ):
     class Page:
         def extract_tables(self):
@@ -499,10 +872,15 @@ def _import_fake_pdf(
         statement.write_bytes(b"%PDF-1.4 synthetic")
         fake_pdfplumber = types.SimpleNamespace(open=lambda path: Pdf())
         with patch.dict(sys.modules, {"pdfplumber": fake_pdfplumber}):
+            config = {"base_currency": "HKD", "exchange_rates": {"HKD": 1}}
+            if preview:
+                return _preview_profile_input(
+                    profile, str(profile["id"]), statement, config
+                )
             return _import_pdf(
                 statement,
                 profile,
-                {"base_currency": "HKD", "exchange_rates": {"HKD": 1}},
+                config,
                 root,
                 include_identity_records=True,
             )

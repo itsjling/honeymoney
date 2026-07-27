@@ -19,6 +19,10 @@ class HsbcCreditCardPdfProfileConsistencyTest(unittest.TestCase):
             with self.subTest(profile=profile_path):
                 profile = json.loads(profile_path.read_text(encoding="utf-8"))
                 self.assertIs(profile["pdf"]["word_rows_only"], True)
+                self.assertIn(
+                    "The Hongkong and Shanghai Banking Corporation Limited",
+                    profile["pdf"]["word_table_end_markers"],
+                )
 
 
 class HsbcOnePdfProfileConsistencyTest(unittest.TestCase):

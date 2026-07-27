@@ -24,26 +24,32 @@ class Fixture:
     profile_id: str
     source_name: str
     layout: str
+    case_name: str = "accepted_statement"
 
     @property
     def case_dir(self) -> Path:
-        return ROOT / self.profile_id / "accepted_statement"
+        return ROOT / self.profile_id / self.case_name
 
     @property
     def output_path(self) -> Path:
         return self.case_dir / "input.pdf"
 
+    @property
+    def review_key(self) -> str:
+        return f"{self.profile_id}/{self.case_name}"
+
 
 FIXTURES = (
     Fixture("hsbc_one_pdf", "words.json", "words"),
     Fixture("hsbc_hk_credit_card_pdf", "words.json", "words"),
+    Fixture("hsbc_hk_credit_card_pdf", "words.json", "words", "footer_boundary"),
     Fixture("mox_bank_pdf", "tables.json", "tables"),
     Fixture("mox_credit_card_pdf", "tables.json", "tables"),
 )
 
 
 def generated_fixtures() -> dict[str, bytes]:
-    return {fixture.profile_id: _generate_fixture(fixture) for fixture in FIXTURES}
+    return {fixture.review_key: _generate_fixture(fixture) for fixture in FIXTURES}
 
 
 def _generate_fixture(fixture: Fixture) -> bytes:

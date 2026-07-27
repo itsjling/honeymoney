@@ -1041,14 +1041,24 @@ def _import_pdf(
 
             for page_number, page in enumerate(pdf.pages, start=1):
                 word_rows = _pdf_word_source_rows(
-                    page, pdf_settings, include_physical_lines=include_identity_records
+                    page,
+                    pdf_settings,
+                    include_physical_lines=True,
                 )
                 if word_rows is not None:
-                    for row_number, item in enumerate(word_rows, start=1):
-                        if include_identity_records:
-                            source_row, physical_line = item
-                        else:
-                            source_row = item
+                    for row_number, (source_row, physical_line) in enumerate(
+                        word_rows, start=1
+                    ):
+                        if _word_row_is_skipped(source_row, columns, skip_patterns):
+                            continue
+                        _validate_pdf_word_row_dates(
+                            source_row,
+                            profile,
+                            columns,
+                            source_display=_relative_source(pdf_path, input_root),
+                            page_number=page_number,
+                            physical_line=physical_line,
+                        )
                         normalized = _normalized_row(
                             source_row=source_row,
                             row_number=row_number,
@@ -1433,22 +1443,88 @@ def _pdf_word_source_rows(
         if not in_table:
             in_table = _pdf_word_header_seen(text, pdf_settings)
             continue
-        if _pdf_word_table_end_seen(text, pdf_settings):
-            break
-
         source_row = _pdf_word_row(line, word_columns)
+        has_date_value = _pdf_word_row_has_date_value(source_row, pdf_settings)
+        marker_end_seen = _pdf_word_table_end_seen(text, pdf_settings)
+        if marker_end_seen and not _pdf_word_row_has_marker_transaction_shape(
+            source_row, pdf_settings
+        ):
+            break
         if not any(source_row.values()):
             continue
-        if not (
-            source_row.get("Post date", "").strip()
-            or source_row.get("Trans date", "").strip()
-        ):
+        if not has_date_value:
             continue
         if include_physical_lines:
             rows.append((source_row, physical_line))
         else:
             rows.append(source_row)
     return rows if in_table else None
+
+
+def _validate_pdf_word_row_dates(
+    source_row: dict[str, str],
+    profile: dict[str, Any],
+    columns: dict[str, Any],
+    *,
+    source_display: str,
+    page_number: int,
+    physical_line: int,
+) -> None:
+    """Reject malformed word rows before they can become identity inputs."""
+    date_formats = profile.get("date_formats", ["%Y-%m-%d"])
+    statement_year = profile.get("statement_year")
+    seen_columns: set[str] = set()
+    first_field: str | None = None
+    has_valid_date = False
+
+    for field in ("transaction_date", "posting_date"):
+        column = columns.get(field)
+        if column in (None, ""):
+            continue
+        if first_field is None:
+            first_field = field
+        column_name = str(column)
+        if column_name in seen_columns:
+            continue
+        seen_columns.add(column_name)
+        value = _clean_text(source_row.get(column_name, ""))
+        if not value:
+            continue
+        if _date_matches_profile(value, date_formats, statement_year):
+            has_valid_date = True
+            continue
+        raise ValueError(
+            "pdf_word_row_invalid_date: "
+            f"source={source_display}; page={page_number}; row={physical_line}; "
+            f"field={field}"
+        )
+
+    if has_valid_date:
+        return
+    raise ValueError(
+        "pdf_word_row_invalid_date: "
+        f"source={source_display}; page={page_number}; row={physical_line}; "
+        f"field={first_field or 'transaction_date'}"
+    )
+
+
+def _date_matches_profile(value: str, date_formats: Any, statement_year: Any) -> bool:
+    if not isinstance(date_formats, list):
+        return False
+    for date_format in date_formats:
+        if not isinstance(date_format, str):
+            continue
+        try:
+            fallback_year = (
+                int(statement_year)
+                if not _date_format_has_year(date_format) and statement_year is not None
+                else None
+            )
+            _parse_profile_date(value, date_format, fallback_year=fallback_year)
+        except (TypeError, ValueError):
+            continue
+        return True
+    return False
 
 
 def _pdf_word_lines(
@@ -1477,8 +1553,57 @@ def _pdf_word_header_seen(text: str, pdf_settings: dict[str, Any]) -> bool:
 
 def _pdf_word_table_end_seen(text: str, pdf_settings: dict[str, Any]) -> bool:
     markers = pdf_settings.get("word_table_end_markers", [])
-    folded = text.casefold()
-    return any(str(marker).casefold() in folded for marker in markers)
+    folded = " ".join(text.casefold().split())
+    folded_markers = (" ".join(str(marker).casefold().split()) for marker in markers)
+    return any(marker and marker in folded for marker in folded_markers)
+
+
+def _pdf_word_row_has_date_value(
+    source_row: dict[str, str], pdf_settings: dict[str, Any]
+) -> bool:
+    """Return whether a word row occupies a mapped transaction date column."""
+    columns = pdf_settings.get("columns", {})
+    if not isinstance(columns, dict):
+        return False
+    date_columns = {
+        str(columns[field])
+        for field in ("transaction_date", "posting_date")
+        if columns.get(field) not in (None, "")
+    }
+    return any(_clean_text(source_row.get(column, "")) for column in date_columns)
+
+
+def _pdf_word_row_has_marker_transaction_shape(
+    source_row: dict[str, str], pdf_settings: dict[str, Any]
+) -> bool:
+    """Keep marker text in a date-bearing transaction description."""
+    if not _pdf_word_row_has_date_value(source_row, pdf_settings):
+        return False
+    columns = pdf_settings.get("columns", {})
+    if not isinstance(columns, dict):
+        return False
+    description_columns = {
+        str(columns[field])
+        for field in ("description", "merchant")
+        if columns.get(field) not in (None, "")
+    }
+    return any(
+        _pdf_word_table_end_seen(source_row.get(column, ""), pdf_settings)
+        for column in description_columns
+    )
+
+
+def _word_row_is_skipped(
+    source_row: dict[str, str], columns: dict[str, Any], skip_patterns: list[str]
+) -> bool:
+    """Apply descriptive skip rules before date validation of a word row."""
+    description_column = str(columns.get("description", ""))
+    merchant_column = str(columns.get("merchant", ""))
+    description = _clean_text(source_row.get(description_column, ""))
+    merchant = _clean_text(source_row.get(merchant_column, "")) or description
+    return _row_is_skipped(
+        {"original_description": description, "merchant": merchant}, skip_patterns
+    )
 
 
 def _pdf_word_row(
