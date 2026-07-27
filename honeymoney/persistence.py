@@ -52,6 +52,10 @@ _ENTRY_FIELDS = frozenset(
 )
 
 
+class GenerationConflictError(OSError):
+    """Raised when files change after an operation reads its input generation."""
+
+
 def configured_generation_paths(config: Config) -> frozenset[Path]:
     """Return the exact configured files that may join a ledger generation."""
     paths: set[Path] = set()
@@ -62,7 +66,13 @@ def configured_generation_paths(config: Config) -> frozenset[Path]:
     return frozenset(paths)
 
 
-def persist_generation(authoritative_path: Path, files: GenerationDocuments) -> None:
+def persist_generation(
+    authoritative_path: Path,
+    files: GenerationDocuments,
+    *,
+    expected_authoritative_hash: str | None = None,
+    expected_generation_hashes: Mapping[Path, str | None] | None = None,
+) -> None:
     """Durably publish files using the ledger replacement as the commit point."""
     authoritative_path = authoritative_path.resolve()
     normalized = {path.resolve(): content for path, content in files.items()}
@@ -75,6 +85,17 @@ def persist_generation(authoritative_path: Path, files: GenerationDocuments) -> 
     )
     lock_path = _lock_path(authoritative_path)
     _acquire_lock(lock_path)
+    expected_hashes = {
+        Path(path).resolve(): digest
+        for path, digest in (expected_generation_hashes or {}).items()
+    }
+    if expected_authoritative_hash is not None:
+        expected_hashes[authoritative_path] = expected_authoritative_hash
+    if any(generation_hash(path) != digest for path, digest in expected_hashes.items()):
+        _release_lock(lock_path)
+        raise GenerationConflictError(
+            "The ledger generation changed before this operation could be saved"
+        )
     generation = uuid.uuid4().hex
     state_path = _state_path(authoritative_path)
     entries = [
@@ -457,6 +478,31 @@ def _path_hash(path: Path) -> str | None:
         while chunk := handle.read(1024 * 1024):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def generation_hash(path: Path) -> str | None:
+    """Return a stable hash for one generation's authoritative file."""
+    return _path_hash(path.resolve())
+
+
+def generation_hashes(paths: Iterable[Path]) -> dict[Path, str | None]:
+    """Return stable hashes for every named generation member."""
+    hashes: dict[Path, str | None] = {}
+    for path in paths:
+        resolved = Path(path).resolve()
+        hashes[resolved] = generation_hash(resolved)
+    return hashes
+
+
+def generation_member_paths(
+    authoritative_path: Path,
+    additional_paths: Iterable[Path] = (),
+) -> frozenset[Path]:
+    """Return every standard and configured member of a ledger generation."""
+    return _allowed_generation_paths(
+        Path(authoritative_path).resolve(),
+        additional_paths,
+    )
 
 
 def _content_hash(content: str) -> str:

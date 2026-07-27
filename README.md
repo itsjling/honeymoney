@@ -162,13 +162,25 @@ unresolved, skip, and quit decisions. An empty selection skips one row without
 writing it; quit cancels the filtered review without writing any decisions.
 
 `--transaction ID --as DECISION` is the non-interactive human seam. Add `--json`
-for the versioned JSON envelope. A confirmed income sets `category=Income`,
+for the versioned JSON envelope. Use `--file decisions.json` or
+`--file decisions.csv` to apply a decision batch. JSON entries contain only
+`transaction_id` and `decision`; CSV files use those exact two columns. The
+command checks every ID and decision before it writes. It reports applied,
+unchanged, and rejected counts without transaction or statement text. A
+confirmed income sets `category=Income`,
 `flow_type=income`, full confidence, and clears review. Refunds remain refunds;
 owned transfers, card payments, and investment transfers stay excluded from
 income. All review forms merge corrections by transaction ID, reconcile the
 cumulative ledger, and publish `corrections.csv`, `categorized.csv`, and
 `review_needed.csv` through the recoverable ledger-generation protocol.
 Repeating a review does not append duplicate correction rows.
+
+```json
+[
+  {"transaction_id": "txn_example", "decision": "expense"},
+  {"transaction_id": "txn_example_2", "decision": "income"}
+]
+```
 
 After interactive income confirmation, review can remember matching future
 inflows. For a fully explicit one-shot operation use `--remember --yes`. The

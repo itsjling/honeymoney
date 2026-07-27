@@ -300,11 +300,12 @@ usage, configuration, or validation failure.
 `pending` exposes review rows. `correct` remains the structured machine/agent
 seam. `review` is the human seam: period/category/flow/direction filters feed
 interactive accounting decisions, while `--transaction ID --as DECISION` is a
-fully specified one-shot form. Both call the same correction operation, which
-validates the complete patch/rule set, merges saved corrections by transaction
-ID, reconciles the cumulative ledger, and replaces all derived files through
-temporary files. JSON review is accepted only for the non-prompting one-shot
-form.
+fully specified one-shot form and `--file FILE` accepts a decision-only CSV or
+JSON batch. Batch review checks all entries and current review state before it
+calls the correction operation. Each form merges saved corrections by
+transaction ID, reconciles the cumulative ledger, and replaces all derived
+files through temporary files. JSON review is accepted only for non-prompting
+one-shot and batch forms.
 
 Remembered income rules are deterministic exact matches on institution,
 account identity, normalized description, and the virtual inflow direction.

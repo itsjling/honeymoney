@@ -14,6 +14,7 @@ import subprocess
 import sys
 import tempfile
 import webbrowser
+from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
 from importlib import resources
@@ -75,6 +76,7 @@ from honeymoney.overlap import (
     resolve_duplicate_group,
 )
 from honeymoney.persistence import (
+    GenerationConflictError,
     configured_generation_paths,
     persist_generation,
     recover_generation,
@@ -128,6 +130,51 @@ PROFILE_PREVIEW_FIELDS = [
     "valuation_source",
     "valuation_status",
 ]
+_BATCH_REVIEW_REASON = "Accounting flow confirmed by batch review"
+_ACCOUNTING_DECISION_FIELDS = {
+    "income": {"category": "Income", "flow_type": "income"},
+    "refund": {"flow_type": "refund"},
+    "internal-transfer": {
+        "category": "Internal Transfer",
+        "flow_type": "internal_transfer",
+    },
+    "credit-card-payment": {
+        "category": "Credit Card Payment",
+        "flow_type": "credit_card_payment",
+    },
+    "investment-transfer": {
+        "category": "Investments",
+        "flow_type": "investment_transfer",
+    },
+    "expense": {"flow_type": "expense"},
+    "unresolved": {"flow_type": "unresolved"},
+}
+
+
+@dataclass(frozen=True)
+class _ReviewBatchPlan:
+    patches: dict[str, dict[str, str]]
+    applied_count: int
+    unchanged_count: int
+
+
+class _ReviewBatchError(ValueError):
+    def __init__(
+        self,
+        errors: list[dict[str, Any]],
+        *,
+        rejected_count: int,
+    ) -> None:
+        self.errors = errors
+        self.data = {
+            "applied_count": 0,
+            "unchanged_count": 0,
+            "rejected_count": rejected_count,
+        }
+        super().__init__(
+            "Batch review rejected: "
+            f"0 applied, 0 unchanged, {rejected_count} rejected; no files changed."
+        )
 
 
 def _emit_json(
@@ -832,6 +879,7 @@ Commands:
   honeymoney review [FILTERS]      Review filtered accounting flow decisions
   honeymoney review --transaction ID --as income
                                    Apply one human accounting decision
+  honeymoney review --file FILE    Apply an accounting decision batch
   honeymoney profile validate ... Validate a profile and optionally preview input
   honeymoney evaluate LEDGER --reference CORRECTIONS
                                    Report category coverage and exact accuracy
@@ -866,8 +914,9 @@ Review filters and decisions:
   --category CATEGORY              Compose with period, flow, and direction filters
   --flow unresolved --direction inflow
   --transaction ID --as DECISION  Non-interactive one-shot review
+  --file FILE                      Apply a CSV or JSON decision batch
   --remember --yes                 Save an exact, directional income rule
-  --json                           Valid only for a fully specified one-shot review
+  --json                           Valid for one-shot or batch review
 """
 
 
@@ -1886,6 +1935,7 @@ def _review_command(argv: list[str]) -> int:
     parser.add_argument("--direction", choices=["inflow", "outflow"])
     parser.add_argument("--transaction", dest="transaction_id")
     parser.add_argument("--as", dest="decision")
+    parser.add_argument("--file", dest="decision_file")
     parser.add_argument("--remember", action="store_true")
     parser.add_argument("--yes", action="store_true")
     parser.add_argument("--json", action="store_true")
@@ -1894,10 +1944,11 @@ def _review_command(argv: list[str]) -> int:
     has_period = bool(args.month or args.period or args.start or args.end)
     has_filters = bool(args.categories or args.flows or args.direction or has_period)
     one_shot = bool(args.transaction_id or args.decision or args.remember or args.yes)
-    if args.json and not (args.transaction_id and args.decision):
+    batch_review = bool(args.decision_file)
+    if args.json and not (batch_review or args.transaction_id and args.decision):
         raise ValueError(
-            "honeymoney review --json requires --transaction ID and --as DECISION; "
-            "JSON mode cannot prompt"
+            "honeymoney review --json requires --file FILE or "
+            "--transaction ID and --as DECISION; JSON mode cannot prompt"
         )
     if bool(args.transaction_id) != bool(args.decision):
         raise ValueError(
@@ -1909,6 +1960,10 @@ def _review_command(argv: list[str]) -> int:
         )
     if one_shot and has_filters:
         raise ValueError("One-shot review cannot be combined with review filters")
+    if batch_review and (one_shot or has_filters):
+        raise ValueError(
+            "Batch review cannot be combined with filters or one-shot options"
+        )
     if args.yes and not args.remember:
         raise ValueError("--yes is valid only with --remember")
     if args.remember and not args.yes:
@@ -1927,12 +1982,26 @@ def _review_command(argv: list[str]) -> int:
     if not ledger_rows:
         if args.transaction_id:
             raise ValueError(f"Unknown transaction_id: {args.transaction_id}")
+        if batch_review:
+            return _batch_review(
+                args,
+                config,
+                categorized_path,
+                ledger_rows,
+            )
         print(f"No processed records found at {categorized_path}")
         print("Run `honeymoney import` or `honeymoney run` first.")
         return 0
 
     if args.transaction_id:
         return _one_shot_review(
+            args,
+            config,
+            categorized_path,
+            ledger_rows,
+        )
+    if batch_review:
+        return _batch_review(
             args,
             config,
             categorized_path,
@@ -2065,6 +2134,322 @@ def _one_shot_review(
         )
         print(f"Reviewed {args.transaction_id} as {decision}{suffix}.")
     return 0
+
+
+def _batch_review(
+    args: argparse.Namespace,
+    config: dict[str, Any],
+    categorized_path: Path,
+    ledger_rows: list[dict[str, str]],
+) -> int:
+    entries = _load_accounting_decision_batch(args.decision_file)
+    ledger_ids = {
+        row.get("transaction_id", "")
+        for row in ledger_rows
+        if row.get("transaction_id")
+    }
+    aliases = (
+        _proven_accounting_decision_aliases(config, categorized_path)
+        if any(identifier.strip() not in ledger_ids for identifier, _ in entries)
+        else {}
+    )
+    plan = _plan_accounting_decision_batch(entries, ledger_rows, aliases=aliases)
+
+    def require_same_plan(current_rows: list[dict[str, str]]) -> None:
+        current_plan = _plan_accounting_decision_batch(
+            entries,
+            current_rows,
+            aliases=aliases,
+        )
+        if current_plan != plan:
+            raise _review_batch_input_error(
+                "stale_batch_generation",
+                "The ledger changed after this decision batch was checked",
+                rejected_count=len(entries),
+            )
+
+    try:
+        result = apply_correction_operation(
+            config,
+            categorized_path,
+            plan.patches,
+            ledger_precondition=require_same_plan,
+        )
+    except GenerationConflictError as error:
+        raise _review_batch_input_error(
+            "stale_batch_generation",
+            "The ledger changed before this decision batch could be saved",
+            rejected_count=len(entries),
+        ) from error
+    data = {
+        "applied_count": plan.applied_count,
+        "unchanged_count": plan.unchanged_count,
+        "rejected_count": 0,
+        "remaining_review_count": result.remaining_review_count,
+    }
+    if args.json:
+        _emit_json(
+            "review",
+            "success",
+            data=data,
+            artifacts=_correction_artifacts(config, categorized_path),
+        )
+    else:
+        print(
+            "Batch review complete: "
+            f"{plan.applied_count} applied, {plan.unchanged_count} unchanged, "
+            f"0 rejected; {result.remaining_review_count} transactions still need review"
+        )
+    return 0
+
+
+def _load_accounting_decision_batch(source: str) -> list[tuple[str, str]]:
+    try:
+        if source == "-":
+            return _json_accounting_decision_entries(json.load(sys.stdin))
+        path = Path(source)
+        suffix = path.suffix.casefold()
+        if suffix == ".json":
+            with path.open(encoding="utf-8") as handle:
+                return _json_accounting_decision_entries(json.load(handle))
+        if suffix == ".csv":
+            with path.open(newline="", encoding="utf-8") as handle:
+                reader = csv.DictReader(handle)
+                if reader.fieldnames != ["transaction_id", "decision"]:
+                    raise _review_batch_input_error(
+                        "invalid_columns",
+                        "CSV decision input must have exactly "
+                        "transaction_id,decision columns",
+                    )
+                rows = list(reader)
+                rejected_count = max(1, len(rows))
+                entries: list[tuple[str, str]] = []
+                for index, row in enumerate(rows):
+                    if None in row:
+                        raise _review_batch_input_error(
+                            "invalid_entry",
+                            f"Decision at index {index} has extra CSV fields",
+                            rejected_count=rejected_count,
+                            index=index,
+                        )
+                    entries.append(
+                        (
+                            str(row.get("transaction_id") or ""),
+                            str(row.get("decision") or ""),
+                        )
+                    )
+                return entries
+        raise _review_batch_input_error(
+            "unsupported_format",
+            "Decision input must be a .csv or .json file",
+        )
+    except _ReviewBatchError:
+        raise
+    except (csv.Error, json.JSONDecodeError, OSError, UnicodeError) as error:
+        raise _review_batch_input_error(
+            "unreadable_input",
+            "Decision input could not be read",
+        ) from error
+
+
+def _json_accounting_decision_entries(payload: Any) -> list[tuple[str, str]]:
+    if not isinstance(payload, list):
+        raise _review_batch_input_error(
+            "invalid_document",
+            "JSON decision input must be an array",
+        )
+    entries: list[tuple[str, str]] = []
+    for index, item in enumerate(payload):
+        if not isinstance(item, dict) or set(item) != {"transaction_id", "decision"}:
+            raise _review_batch_input_error(
+                "invalid_entry",
+                f"Decision at index {index} must contain only "
+                "transaction_id and decision",
+                rejected_count=max(1, len(payload)),
+                index=index,
+            )
+        transaction_id = item["transaction_id"]
+        decision = item["decision"]
+        if not isinstance(transaction_id, str) or not isinstance(decision, str):
+            raise _review_batch_input_error(
+                "invalid_entry",
+                f"Decision at index {index} must use string values",
+                rejected_count=max(1, len(payload)),
+                index=index,
+            )
+        entries.append((transaction_id, decision))
+    return entries
+
+
+def _plan_accounting_decision_batch(
+    entries: list[tuple[str, str]],
+    ledger_rows: list[dict[str, str]],
+    *,
+    aliases: Mapping[str, str] | None = None,
+) -> _ReviewBatchPlan:
+    if not entries:
+        raise _review_batch_input_error(
+            "empty_batch",
+            "Decision batch must contain at least one entry",
+        )
+    ledger_by_id = {
+        row["transaction_id"]: row for row in ledger_rows if row.get("transaction_id")
+    }
+    patches: dict[str, dict[str, str]] = {}
+    unchanged_count = 0
+    seen: set[str] = set()
+    errors: list[dict[str, Any]] = []
+    for index, (raw_transaction_id, raw_decision) in enumerate(entries):
+        supplied_transaction_id = raw_transaction_id.strip()
+        if not supplied_transaction_id:
+            errors.append(
+                _review_batch_error(
+                    "invalid_transaction_id",
+                    index,
+                    f"Decision at index {index} requires a transaction ID",
+                )
+            )
+            continue
+        transaction_id = (aliases or {}).get(
+            supplied_transaction_id,
+            supplied_transaction_id,
+        )
+        if transaction_id in seen:
+            errors.append(
+                _review_batch_error(
+                    "duplicate_transaction_id",
+                    index,
+                    f"Decision at index {index} repeats a transaction ID",
+                )
+            )
+            continue
+        seen.add(transaction_id)
+        transaction = ledger_by_id.get(transaction_id)
+        if transaction is None:
+            errors.append(
+                _review_batch_error(
+                    "stale_transaction_id",
+                    index,
+                    f"Decision at index {index} has a stale transaction ID",
+                )
+            )
+            continue
+        try:
+            decision = _normalize_review_decision(raw_decision)
+        except ValueError:
+            errors.append(
+                _review_batch_error(
+                    "unsupported_decision",
+                    index,
+                    f"Decision at index {index} is not supported",
+                )
+            )
+            continue
+        reasons = review_reason_tokens(transaction.get("review_reasons", ""))
+        if REVIEW_REASON_ACCOUNTING_FLOW not in reasons:
+            if _accounting_decision_matches(transaction, decision):
+                unchanged_count += 1
+            else:
+                errors.append(
+                    _review_batch_error(
+                        "stale_review_state",
+                        index,
+                        f"Decision at index {index} no longer has an "
+                        "accounting-flow review reason",
+                    )
+                )
+            continue
+        if transaction.get(
+            "reason"
+        ) == _BATCH_REVIEW_REASON and _accounting_decision_matches(
+            transaction, decision
+        ):
+            unchanged_count += 1
+            continue
+        try:
+            patches[transaction_id] = _accounting_decision_patch(
+                transaction,
+                decision,
+                _BATCH_REVIEW_REASON,
+            )
+        except ValueError:
+            errors.append(
+                _review_batch_error(
+                    "decision_not_applicable",
+                    index,
+                    f"Decision at index {index} is not valid for the current transaction",
+                )
+            )
+    if errors:
+        raise _ReviewBatchError(errors, rejected_count=len(entries))
+    return _ReviewBatchPlan(
+        patches,
+        applied_count=len(patches),
+        unchanged_count=unchanged_count,
+    )
+
+
+def _proven_accounting_decision_aliases(
+    config: dict[str, Any],
+    categorized_path: Path,
+) -> dict[str, str]:
+    state = load_configured_identity_state(categorized_path, config)
+    if state.source_rows is None or state.overlap_manifest is None:
+        return {}
+    current = canonicalize_overlaps(
+        state.source_rows,
+        state.rows,
+        state.overlap_manifest,
+    )
+    aliases: dict[str, str] = {}
+    for group in current.diagnostic["groups"]:
+        canonical_ids = [
+            str(identifier) for identifier in group["canonical_transaction_ids"]
+        ]
+        if len(canonical_ids) != 1:
+            continue
+        for pool in group["source_occurrence_pools"]:
+            for identifier in pool:
+                aliases[str(identifier)] = canonical_ids[0]
+    return aliases
+
+
+def _accounting_decision_matches(
+    transaction: dict[str, str],
+    decision: str,
+) -> bool:
+    expected = _ACCOUNTING_DECISION_FIELDS[decision]
+    return all(transaction.get(field, "") == value for field, value in expected.items())
+
+
+def _review_batch_input_error(
+    code: str,
+    message: str,
+    *,
+    rejected_count: int = 1,
+    index: int | None = None,
+) -> _ReviewBatchError:
+    detail: dict[str, Any] = {
+        "type": "ReviewBatchValidationError",
+        "code": code,
+        "message": message,
+    }
+    if index is not None:
+        detail["index"] = index
+    return _ReviewBatchError([detail], rejected_count=rejected_count)
+
+
+def _review_batch_error(
+    code: str,
+    index: int,
+    message: str,
+) -> dict[str, Any]:
+    return {
+        "type": "ReviewBatchValidationError",
+        "code": code,
+        "index": index,
+        "message": message,
+    }
 
 
 def _filtered_review_rows(
@@ -2201,25 +2586,7 @@ def _accounting_decision_patch(
         if item != REVIEW_REASON_ACCOUNTING_FLOW
     ]
     patch = {"confidence": "1.00", "reason": reason}
-    mappings = {
-        "income": {"category": "Income", "flow_type": "income"},
-        "refund": {"flow_type": "refund"},
-        "internal-transfer": {
-            "category": "Internal Transfer",
-            "flow_type": "internal_transfer",
-        },
-        "credit-card-payment": {
-            "category": "Credit Card Payment",
-            "flow_type": "credit_card_payment",
-        },
-        "investment-transfer": {
-            "category": "Investments",
-            "flow_type": "investment_transfer",
-        },
-        "expense": {"flow_type": "expense"},
-        "unresolved": {"flow_type": "unresolved"},
-    }
-    patch.update(mappings[decision])
+    patch.update(_ACCOUNTING_DECISION_FIELDS[decision])
     if "category" in patch:
         remaining_reasons = [
             item
@@ -3664,16 +4031,23 @@ def run() -> int:
             _emit_json(
                 command,
                 "error",
+                data=error.data if isinstance(error, _ReviewBatchError) else None,
                 errors=[
-                    identity_details
-                    if identity_details is not None
-                    else (
-                        duplicate_details
-                        if duplicate_details is not None
-                        else {
-                            "type": type(error).__name__,
-                            "message": str(error),
-                        }
+                    *(
+                        error.errors
+                        if isinstance(error, _ReviewBatchError)
+                        else [
+                            identity_details
+                            if identity_details is not None
+                            else (
+                                duplicate_details
+                                if duplicate_details is not None
+                                else {
+                                    "type": type(error).__name__,
+                                    "message": str(error),
+                                }
+                            )
+                        ]
                     )
                 ],
             )
