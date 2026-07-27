@@ -53,6 +53,7 @@ files = [
   "honeymoney/identity_contracts.py",
   "honeymoney/identity_state.py",
   "honeymoney/importers.pyi",
+  "honeymoney/learning.py",
   "honeymoney/normalization.py",
   "honeymoney/overlap.py",
   "honeymoney/overlap_contracts.py",

@@ -52,6 +52,7 @@ from honeymoney.identity import (
     resolve_batch,
 )
 from honeymoney.identity_state import load_configured_identity_state
+from honeymoney.learning import plan_learned_rules
 from honeymoney.ollama import (
     OllamaProgress,
     apply_ollama_fallback,
@@ -67,6 +68,7 @@ from honeymoney.overlap import (
     list_duplicate_groups,
     project_corrections,
     project_migration_corrections,
+    project_replacement_corrections,
     release_overlap_review_ownership,
     resolve_duplicate_group,
 )
@@ -80,8 +82,13 @@ from honeymoney.reconciliation import (
     reconciliation_date_window,
     transaction_direction,
 )
-from honeymoney.report import build_report_html
-from honeymoney.rules import apply_rules, load_rules
+from honeymoney.report import build_report_html, missing_base_currency_count
+from honeymoney.rules import (
+    MANAGED_RULE_MARKER,
+    apply_rules,
+    load_rules,
+    validate_rules,
+)
 from honeymoney.schema import (
     ALLOWED_FLOW_TYPES,
     allowed_categories,
@@ -198,6 +205,8 @@ def main(argv: list[str] | None = None) -> int:
         return _profile_command(argv[1:])
     if argv and argv[0] == "evaluate":
         return _evaluate_command(argv[1:])
+    if argv and argv[0] == "learn":
+        return _learn_command(argv[1:])
     if argv and argv[0] == "status":
         return _status_command(argv[1:])
     if argv and argv[0] == "pending":
@@ -308,6 +317,16 @@ def _run_pipeline(
         requested_action = "replace"
     else:
         requested_action = "import"
+    prior_replacement_overlap = (
+        canonicalize_overlaps(
+            identity_state.source_rows,
+            identity_state.rows,
+            identity_state.overlap_manifest,
+        )
+        if requested_action == "replace"
+        and not identity_state.canonical_migration_required
+        else None
+    )
     candidate_source_ids = importers._candidate_source_ids(
         input_files, input_path, config
     )
@@ -336,6 +355,7 @@ def _run_pipeline(
             identity_state.canonical_migration_required
             and requested_action in {"replace", "reset"}
         ),
+        allow_parser_upgrade_reallocation=requested_action in {"replace", "reset"},
     )
     source_transactions = [dict(row) for row in resolution.resolved_rows]
     resolved_source_ids = {
@@ -429,6 +449,11 @@ def _run_pipeline(
         if row.get("canonical_group_id") in affected_group_ids
     ]
     release_overlap_review_ownership(transactions)
+    parser_upgrade_source_ids = _parser_upgrade_rekeyed_source_ids(
+        identity_state.manifest,
+        resolution.next_manifest,
+        set(resolution.replaced_source_ids),
+    )
     if migration_source_corrections:
         migration_projection = project_migration_corrections(
             overlap_result,
@@ -441,6 +466,19 @@ def _run_pipeline(
         corrections.update(migration_correction_updates)
         removed_correction_ids.update(migration_projection.removed_transaction_ids)
         correction_projection = migration_projection
+    elif prior_replacement_overlap is not None and parser_upgrade_source_ids:
+        replacement_projection = project_replacement_corrections(
+            prior_replacement_overlap,
+            overlap_result,
+            identity_state.source_rows,
+            source_rows,
+            corrections,
+            parser_upgrade_source_ids,
+        )
+        migration_correction_updates = replacement_projection.corrections
+        corrections.update(migration_correction_updates)
+        removed_correction_ids.update(replacement_projection.removed_transaction_ids)
+        correction_projection = replacement_projection
     else:
         correction_projection = project_corrections(overlap_result, corrections)
     canonical_corrections = correction_projection.corrections
@@ -588,6 +626,49 @@ def _run_pipeline(
     return 0
 
 
+def _parser_upgrade_rekeyed_source_ids(
+    prior_manifest: Mapping[str, object],
+    next_manifest: Mapping[str, object],
+    replaced_source_ids: set[str],
+) -> set[str]:
+    prior_sources = {
+        str(source.get("source_id", "")): source
+        for source in prior_manifest.get("sources", [])
+        if isinstance(source, dict)
+    }
+    next_sources = {
+        str(source.get("source_id", "")): source
+        for source in next_manifest.get("sources", [])
+        if isinstance(source, dict)
+    }
+    upgraded: set[str] = set()
+    for source_id in replaced_source_ids:
+        prior = prior_sources.get(source_id)
+        next_source = next_sources.get(source_id)
+        if prior is None or next_source is None:
+            continue
+        if prior.get("extractor_contract_id") != next_source.get(
+            "extractor_contract_id"
+        ):
+            upgraded.add(source_id)
+            continue
+        if prior.get("source_revision") != next_source.get("source_revision"):
+            continue
+        prior_fingerprints = sorted(
+            str(record.get("record_fingerprint", ""))
+            for record in prior.get("records", [])
+            if isinstance(record, dict) and record.get("state") == "active"
+        )
+        next_fingerprints = sorted(
+            str(record.get("record_fingerprint", ""))
+            for record in next_source.get("records", [])
+            if isinstance(record, dict) and record.get("state") == "active"
+        )
+        if prior_fingerprints != next_fingerprints:
+            upgraded.add(source_id)
+    return upgraded
+
+
 def _help_text() -> str:
     return """Honeymoney
 
@@ -605,6 +686,7 @@ Commands:
   honeymoney profile validate ... Validate a profile and optionally preview input
   honeymoney evaluate LEDGER --reference CORRECTIONS
                                    Report category coverage and exact accuracy
+  honeymoney learn [--yes]          Build exact rules from active reviews
   honeymoney status [MONTH]        Show processed/categorized counts for a period
   honeymoney pending [MONTH]       List transactions that need review
   honeymoney duplicates            List unresolved exact-overlap count groups
@@ -638,6 +720,78 @@ Review filters and decisions:
   --remember --yes                 Save an exact, directional income rule
   --json                           Valid only for a fully specified one-shot review
 """
+
+
+def _learn_command(argv: list[str]) -> int:
+    parser = _command_parser(
+        argv,
+        prog="honeymoney learn",
+        description="Build safe exact rules from active human reviews.",
+    )
+    parser.add_argument("--config", dest="config_path")
+    parser.add_argument("--yes", action="store_true")
+    parser.add_argument("--json", action="store_true")
+    args = parser.parse_args(argv)
+
+    config = _load_config(args.config_path)
+    categorized_path = Path(config["paths"]["output"])
+    state = load_configured_identity_state(categorized_path, config)
+    if state.canonical_migration_required:
+        raise ValueError("The active ledger must be migrated before learning rules")
+    plan = plan_learned_rules(state.rows, load_corrections(config))
+
+    rules_value = config.get("rules")
+    if not isinstance(rules_value, str) or not rules_value.strip():
+        raise ValueError("Config must define a rules JSON path")
+    rules_path = Path(rules_value)
+    if not rules_path.exists():
+        raise ValueError("The configured rules file does not exist")
+    with rules_path.open(encoding="utf-8") as handle:
+        document = json.load(handle)
+    if not isinstance(document, dict) or not isinstance(document.get("rules"), list):
+        raise ValueError("Rules document field rules must be a list")
+    if not all(isinstance(rule, dict) for rule in document["rules"]):
+        raise ValueError("Rules document entries must be objects")
+    manual_rules = [
+        rule
+        for rule in document["rules"]
+        if rule.get("managed_by") != MANAGED_RULE_MARKER
+    ]
+    next_rules = [*manual_rules, *plan.rules]
+    validate_rules(next_rules, config)
+    next_document = dict(document)
+    next_document["rules"] = next_rules
+    next_content = json.dumps(next_document, indent=2, sort_keys=True) + "\n"
+
+    if args.yes and next_content != rules_path.read_text(encoding="utf-8"):
+        persist_generation(
+            categorized_path,
+            {
+                rules_path: next_content,
+                categorized_path: categorized_path.read_text(encoding="utf-8"),
+            },
+        )
+
+    counts = plan.counts()
+    if args.json:
+        _emit_json(
+            "learn",
+            "success" if args.yes else "dry_run",
+            data=counts,
+        )
+        return 0
+    mode = "Updated" if args.yes else "Dry run"
+    print(
+        f"{mode}: {counts['candidates']} candidates, "
+        f"{counts['broad_rules']} broad rules, "
+        f"{counts['amount_specific_rules']} amount-specific rules, "
+        f"{counts['historical_rows_covered']} historical rows covered, "
+        f"{counts['conflicts']} conflicts, {counts['skips']} skips, "
+        f"{counts['projected_coverage']:.1%} projected coverage."
+    )
+    if not args.yes:
+        print("Run again with --yes to update managed rules.")
+    return 0
 
 
 def _evaluate_command(argv: list[str]) -> int:
@@ -2368,6 +2522,7 @@ def _report_command(argv: list[str]) -> int:
             data={
                 "period": {"start": start.isoformat(), "end": end.isoformat()},
                 "transaction_count": len(rows),
+                "missing_base_currency_count": missing_base_currency_count(rows),
                 "overlap": period_overlap,
                 "duplicate_count": duplicate_count,
                 "duplicate_group_count": duplicate_group_count,

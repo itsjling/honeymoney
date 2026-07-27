@@ -163,6 +163,19 @@ normalized description, and inflow direction; it never matches by amount. The
 rule and correction are validated and persisted together, and deterministic
 rules run before the optional local Ollama fallback.
 
+```bash
+honeymoney learn
+honeymoney learn --yes
+honeymoney learn --json
+```
+
+Builds exact deterministic rules from active reviewed corrections. The command
+is a dry run unless you pass `--yes`. It learns a broad rule only when every
+active row with the same institution, account ID, normalized description, and
+direction has an agreeing review. Conflicting groups may split by exact posted
+amount and currency. Managed rules never set owner or payment method, and
+hand-written rules stay first. Output contains counts only.
+
 ## Accounting-safe Ollama categorization
 
 Ollama is an optional local merchant-category suggester, never an accounting
@@ -205,7 +218,7 @@ Prints or edits the active `config.json`; pass `--config PATH` to target another
 ## Structured agent commands
 
 `setup`, `run`, `import`, `status`, `report`, `config`, `profile validate`,
-`evaluate`,
+`evaluate`, `learn`,
 and fully specified one-shot `review` accept `--json`. JSON mode prints exactly
 one versioned document to stdout, never prompts, and never opens a browser.
 Exit code `0` is success, `1` is strict partial success, and `2` is an input,
@@ -262,7 +275,7 @@ honeymoney report
 honeymoney report june --no-open
 ```
 
-Writes a self-contained `output/report.html` with transactions for the selected period and a pie chart of the category distribution with per-category sums, then opens it in your browser. Headline income includes only confirmed `income`; spending includes confirmed `expense` net of `refund`. Transfers, card payments, and investment movements are excluded, while unresolved inflows and outflows have separate visible tiles. Accepts the same period arguments and default as `status` (default: the current calendar month); `--no-open` writes the file without opening it. The page loads nothing from the network.
+Writes a self-contained `output/report.html` with transactions for the selected period and a pie chart of the category distribution with per-category sums, then opens it in your browser. Headline income includes only confirmed `income`; spending includes confirmed `expense` net of `refund`. Transfers, card payments, and investment movements are excluded, while unresolved inflows and outflows have separate visible tiles. Rows without base-currency conversion stay out of totals and trigger a visible count warning. Accepts the same period arguments and default as `status` (default: the current calendar month); `--no-open` writes the file without opening it. The page loads nothing from the network.
 
 ```bash
 honeymoney reconcile

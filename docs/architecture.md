@@ -43,6 +43,11 @@ resolver uses the hidden manifest, not `source_file`, to find sources for
 replacement and reset. `source_file` is display provenance only. Corrections
 are persistent overrides keyed by `transaction_id`; rules and Ollama
 suggestions run before corrections, so reviewed choices win.
+`honeymoney learn` can turn active exact corrections into managed deterministic
+rules. It writes only after `--yes`, replaces only its own managed rules, and
+never learns owner or payment method. Broad rules require full agreement for an
+exact institution, account, normalized description, and direction. Conflicting
+groups may split only by exact posted amount and currency.
 
 ## Filesystem persistence
 
@@ -136,6 +141,10 @@ per-source multiplicity sets the canonical count for each exact overlap group.
 Equal counts consolidate. Different counts keep that maximum, stay pooled, and
 force review. JSON keeps the old duplicate count fields as derived compatibility
 data, while `overlap` is the full provenance contract.
+Direction uses the base-currency amount when present. If conversion is missing,
+it may use a valid non-zero posted amount for direction only. Transfer matching
+and report totals still require base-currency amounts. Reports count rows omitted
+from totals and show that count without transaction text.
 
 ## Transaction identity
 
@@ -240,6 +249,8 @@ changing it.
 - `honeymoney/persistence.py`: staged filesystem generation commits, authoritative
   ledger replacement, directory synchronization, and retained-state recovery.
 - `honeymoney/rules.py`: deterministic rule validation and application.
+- `honeymoney/learning.py`: conservative managed-rule planning from active exact
+  human corrections.
 - `honeymoney/categorization_memory.py`: opt-in, correction-derived local
   spending-category matches rebuilt from validated identity state.
 - `honeymoney/ollama.py`: optional local-only categorization fallback. Its

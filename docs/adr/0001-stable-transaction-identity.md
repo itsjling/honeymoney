@@ -558,6 +558,17 @@ of `(current_locator, record_fingerprint)` pairs for the manifest's active
 records, with no duplicate key on either side. A mismatch is
 `identity_exact_state_mismatch` and fails before persistence.
 
+An explicit replace or reset has one narrow parser-upgrade exception. It applies
+only when the extractor contract changes, or when source bytes are unchanged
+but the active record-fingerprint multiset changes. Exact locator-and-fingerprint
+matches may keep their owners. Indistinguishable unmatched repeats do not enter
+a one-to-one assignment: their old owners retire and the incoming rows get new
+owners. Canonical correction history may move only through a unique source-local
+shape or when the whole repeated group has the same correction. Partial or
+conflicting history stays in review, and old canonical correction IDs that the
+upgrade retired are removed. This exception supersedes the ambiguity and exact-
+state failure rules above only for the proved parser-upgrade case.
+
 For an exact-state replace, reuse each mapped record's stored
 `source_record_id`, `transaction_id`, `transaction_id_kind`, and
 `allocation_origin` without recomputing or reallocating identity. It is an

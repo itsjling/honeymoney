@@ -254,6 +254,14 @@ _PAGE_TEMPLATE = """<!doctype html>
   .cat-cell .provenance { flex: none; font-size: 0.68rem; letter-spacing: 0.04em; color: var(--ink-muted); }
 
   .empty { color: var(--ink-faint); font-style: italic; padding: 1rem 0.75rem; }
+  .warning {
+    border: 1px solid var(--line-strong);
+    border-radius: 10px;
+    background: var(--surface);
+    color: var(--ink-muted);
+    padding: 0.85rem 1rem;
+    margin: -1rem 0 2rem;
+  }
 
   @media (max-width: 860px) {
     .stats { grid-template-columns: repeat(2, 1fr); }
@@ -295,6 +303,8 @@ _PAGE_TEMPLATE = """<!doctype html>
     <div class="stat"><div class="label">Unresolved outflow</div><div class="value neg num" id="tile-unresolved-outflow">__UNRESOLVED_OUTFLOW__</div></div>
     <div class="stat"><div class="label">Uncategorized</div><div class="value num" id="tile-uncategorized">__UNCATEGORIZED__</div></div>
   </section>
+
+  __COMPLETENESS_WARNING__
 
   <section class="panel rise d2">
     <div class="panel-head">
@@ -597,6 +607,15 @@ def build_report_html(
         sort_keys=True,
     ).replace("</", "<\\/")
     summary = _flow_summary(rows)
+    missing_count = missing_base_currency_count(rows)
+    warning = (
+        '<p class="warning" role="alert">'
+        f"{missing_count} "
+        f"{'row is' if missing_count == 1 else 'rows are'} omitted from period "
+        "totals because base-currency conversion is missing.</p>"
+        if missing_count
+        else ""
+    )
     replacements = {
         "__PERIOD__": html.escape(period_label),
         "__SOURCE_COUNT__": str(
@@ -610,6 +629,7 @@ def build_report_html(
         "__UNRESOLVED_INFLOW__": _format_amount(summary["unresolved_inflow"]),
         "__UNRESOLVED_OUTFLOW__": _format_amount(summary["unresolved_outflow"]),
         "__UNCATEGORIZED__": str(summary["uncategorized"]),
+        "__COMPLETENESS_WARNING__": warning,
     }
     document = _PAGE_TEMPLATE
     for placeholder, value in replacements.items():
@@ -637,9 +657,21 @@ def _report_row(row: dict[str, str]) -> dict[str, object]:
 
 def _amount_value(value: str) -> float | None:
     try:
-        return float(Decimal(value))
+        amount = Decimal(value)
     except (InvalidOperation, ValueError):
         return None
+    return float(amount) if amount.is_finite() else None
+
+
+def missing_base_currency_count(rows: list[dict[str, str]]) -> int:
+    count = 0
+    for row in rows:
+        if _amount_value(row.get("amount_hkd", "")) is not None:
+            continue
+        posted_amount = _amount_value(row.get("posted_amount", ""))
+        if posted_amount is not None and posted_amount != 0:
+            count += 1
+    return count
 
 
 def _flow_summary(rows: list[dict[str, str]]) -> dict[str, Decimal | int]:

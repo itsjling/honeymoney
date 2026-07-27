@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import json
 import re
-from decimal import Decimal
+import unicodedata
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +14,8 @@ from honeymoney.schema import (
     allowed_owners,
     allowed_payment_methods,
 )
+
+MANAGED_RULE_MARKER = "honeymoney.learn.v1"
 
 
 def load_rules(config: dict[str, Any]) -> list[dict[str, Any]]:
@@ -46,7 +49,11 @@ def validate_rules(
         "currency",
         "original_currency",
         "posted_currency",
+        "posted_amount",
         "direction",
+        "normalized_institution",
+        "normalized_account_id",
+        "normalized_original_description",
     }
     for rule in rules:
         rule_id = str(rule.get("id", ""))
@@ -139,7 +146,12 @@ def apply_rules(
     threshold = Decimal(str(config.get("review_confidence_threshold", 0.8)))
     ordered_rules = sorted(
         enumerate(rules),
-        key=lambda indexed: (Decimal(str(indexed[1].get("priority", 0))), -indexed[0]),
+        key=lambda indexed: (
+            indexed[1].get("managed_by") != MANAGED_RULE_MARKER,
+            Decimal(str(indexed[1].get("priority", 0))),
+            _managed_specificity(indexed[1]),
+            -indexed[0],
+        ),
         reverse=True,
     )
 
@@ -211,9 +223,46 @@ def _rule_matches(transaction: dict[str, str], rule: dict[str, Any]) -> bool:
 
 
 def _rule_field_value(transaction: dict[str, str], field: str) -> str:
-    if field != "direction":
-        return transaction.get(field, "")
-    return transaction_direction(transaction) or ""
+    if field == "direction":
+        return transaction_direction(transaction) or ""
+    if field == "normalized_institution":
+        return normalize_exact_text(transaction.get("institution", ""))
+    if field == "normalized_account_id":
+        return normalize_exact_text(transaction.get("account_id", ""))
+    if field == "normalized_original_description":
+        return normalize_exact_text(transaction.get("original_description", ""))
+    if field == "posted_amount":
+        return canonical_rule_amount(transaction.get("posted_amount", "")) or ""
+    return transaction.get(field, "")
+
+
+def normalize_exact_text(value: str) -> str:
+    return " ".join(unicodedata.normalize("NFKC", value).casefold().split())
+
+
+def canonical_rule_amount(value: str) -> str | None:
+    try:
+        amount = Decimal(value)
+    except (InvalidOperation, ValueError):
+        return None
+    if not amount.is_finite():
+        return None
+    normalized = amount.normalize()
+    return "0" if normalized == 0 else format(normalized, "f")
+
+
+def _managed_specificity(rule: dict[str, Any]) -> int:
+    if rule.get("managed_by") != MANAGED_RULE_MARKER:
+        return 0
+    return (
+        1
+        if any(
+            condition.get("field") == "posted_amount"
+            for condition in rule.get("conditions", [])
+            if isinstance(condition, dict)
+        )
+        else 0
+    )
 
 
 def _field_matches(

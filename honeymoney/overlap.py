@@ -395,6 +395,131 @@ def project_migration_corrections(
     )
 
 
+def project_replacement_corrections(
+    prior_result: CanonicalizationResult,
+    next_result: CanonicalizationResult,
+    prior_source_rows: Sequence[Mapping[str, object]],
+    next_source_rows: Sequence[Mapping[str, object]],
+    corrections: Mapping[str, Mapping[str, str]],
+    replaced_source_ids: set[str],
+) -> MigrationCorrectionProjection:
+    """Carry canonical review history across a parser-driven source rekey."""
+    prior_by_id = {
+        str(row.get("transaction_id", "")): row
+        for row in prior_source_rows
+        if row.get("transaction_id")
+    }
+    targeted_prior_keys = {
+        _migration_row_key(row)
+        for row in prior_source_rows
+        if str(row.get("source_id", "")) in replaced_source_ids
+        and has_stable_v2_identity(row)
+    }
+    targeted_next_rows = [
+        row
+        for row in next_source_rows
+        if str(row.get("source_id", "")) in replaced_source_ids
+        and has_stable_v2_identity(row)
+    ]
+    next_by_key: dict[tuple[str, ...], list[Mapping[str, object]]] = {}
+    for row in targeted_next_rows:
+        next_by_key.setdefault(_migration_row_key(row), []).append(row)
+
+    safe_by_key: dict[tuple[str, ...], dict[str, str]] = {}
+    ambiguous_keys: set[tuple[str, ...]] = set()
+    removed_ids: set[str] = set()
+    next_canonical_ids = {row["transaction_id"] for row in next_result.rows}
+
+    for group in prior_result.diagnostic["groups"]:
+        canonical_ids = [
+            str(identifier) for identifier in group["canonical_transaction_ids"]
+        ]
+        patches = [
+            {str(field): str(value) for field, value in corrections[identifier].items()}
+            for identifier in canonical_ids
+            if identifier in corrections
+        ]
+        if not patches:
+            continue
+        occurrence_ids = {
+            str(identifier)
+            for pool in group["source_occurrence_pools"]
+            for identifier in pool
+        }
+        keys: set[tuple[str, ...]] = set()
+        for identifier in occurrence_ids:
+            prior_row = prior_by_id.get(identifier)
+            if prior_row is None:
+                continue
+            key = _migration_row_key(prior_row)
+            if (
+                str(prior_row.get("source_id", "")) in replaced_source_ids
+                and key in targeted_prior_keys
+            ):
+                keys.add(key)
+        if not keys:
+            continue
+        removed_ids.update(
+            identifier
+            for identifier in canonical_ids
+            if identifier in corrections and identifier not in next_canonical_ids
+        )
+        unique = {tuple(sorted(patch.items())): patch for patch in patches}
+        fully_agreed = len(patches) == len(canonical_ids) and len(unique) == 1
+        if not fully_agreed:
+            ambiguous_keys.update(keys)
+            continue
+        agreed_patch = next(iter(unique.values()))
+        for key in keys:
+            existing = safe_by_key.get(key)
+            if existing is not None and existing != agreed_patch:
+                ambiguous_keys.add(key)
+                safe_by_key.pop(key, None)
+            elif key not in ambiguous_keys:
+                safe_by_key[key] = dict(agreed_patch)
+
+    aliases: dict[str, dict[str, str]] = {}
+    ambiguous_occurrence_ids: set[str] = set()
+    prior_counts: dict[tuple[str, ...], int] = {}
+    for row in prior_source_rows:
+        if str(
+            row.get("source_id", "")
+        ) in replaced_source_ids and has_stable_v2_identity(row):
+            key = _migration_row_key(row)
+            prior_counts[key] = prior_counts.get(key, 0) + 1
+    for key, rows in next_by_key.items():
+        if key in ambiguous_keys or (
+            key in safe_by_key and prior_counts.get(key, 0) != len(rows)
+        ):
+            ambiguous_occurrence_ids.update(
+                str(row.get("transaction_id", "")) for row in rows
+            )
+            continue
+        candidate_patch = safe_by_key.get(key)
+        if candidate_patch is None:
+            continue
+        for row in rows:
+            aliases[str(row.get("transaction_id", ""))] = dict(candidate_patch)
+
+    projected = project_corrections(next_result, {**corrections, **aliases})
+    ambiguous_canonical_ids = set(projected.ambiguous_transaction_ids)
+    for group in next_result.diagnostic["groups"]:
+        occurrence_ids = {
+            str(identifier)
+            for pool in group["source_occurrence_pools"]
+            for identifier in pool
+        }
+        if occurrence_ids & ambiguous_occurrence_ids:
+            ambiguous_canonical_ids.update(
+                str(identifier) for identifier in group["canonical_transaction_ids"]
+            )
+    return MigrationCorrectionProjection(
+        projected.corrections,
+        tuple(sorted(ambiguous_canonical_ids)),
+        tuple(sorted(removed_ids)),
+    )
+
+
 def _migration_rows_by_key(
     rows: Sequence[Mapping[str, object]],
 ) -> dict[tuple[str, ...], list[Mapping[str, object]]]:
@@ -402,19 +527,23 @@ def _migration_rows_by_key(
     for row in rows:
         if not has_stable_v2_identity(row):
             continue
-        identity = normalized_record_identity(row)
-        key = (
-            str(row.get("source_id", "")),
-            identity["date"],
-            identity["transaction_date"],
-            identity["posting_date"],
-            identity["original_amount"],
-            identity["posted_amount"],
-            identity["merchant"],
-            identity["original_description"],
-        )
+        key = _migration_row_key(row)
         grouped.setdefault(key, []).append(row)
     return grouped
+
+
+def _migration_row_key(row: Mapping[str, object]) -> tuple[str, ...]:
+    identity = normalized_record_identity(row)
+    return (
+        str(row.get("source_id", "")),
+        identity["date"],
+        identity["transaction_date"],
+        identity["posting_date"],
+        identity["original_amount"],
+        identity["posted_amount"],
+        identity["merchant"],
+        identity["original_description"],
+    )
 
 
 def apply_history_ambiguity(

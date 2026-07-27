@@ -160,6 +160,8 @@ def reconciliation_date_window(config: Config) -> int:
 
 def transaction_direction(row: dict[str, str]) -> str | None:
     amount = _amount(row)
+    if amount is None:
+        amount = _amount_from_field(row, "posted_amount")
     if amount is None or amount == 0:
         return None
     return "inflow" if amount > 0 else "outflow"

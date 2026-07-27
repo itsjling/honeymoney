@@ -554,6 +554,7 @@ def resolve_records(
     record_id_factory: Callable[[str, AllocationOrigin, str], str] | None = None,
     transaction_id_factory: Callable[[str, str], str] | None = None,
     allow_unmatched_reallocation: bool = False,
+    allow_parser_upgrade_reallocation: bool = False,
 ) -> RecordResolutionResult:
     """Resolve records for one already-resolved source without mutating inputs.
 
@@ -573,6 +574,8 @@ def resolve_records(
         raise IdentityError("identity_manifest_invalid")
     if not isinstance(allow_unmatched_reallocation, bool):
         raise IdentityError("identity_manifest_invalid")
+    if not isinstance(allow_parser_upgrade_reallocation, bool):
+        raise IdentityError("identity_manifest_invalid")
 
     rows = tuple(prior_rows)
     if not all(isinstance(row, Mapping) for row in rows):
@@ -585,8 +588,21 @@ def resolve_records(
     active = tuple(record for record in records if record["state"] == "active")
     retired = tuple(record for record in records if record["state"] == "retired")
     _validate_ledger_manifest_agreement(rows, source, assignment, active)
-
     fingerprints = tuple(record_fingerprint(item.row) for item in incoming)
+    parser_upgrade_is_proven = bool(
+        allow_parser_upgrade_reallocation
+        and source is not None
+        and (
+            source["extractor_contract_id"] != assignment.extractor_contract_id
+            or (
+                source["source_revision"] == assignment.source_revision
+                and sorted(record["record_fingerprint"] for record in active)
+                != sorted(fingerprints)
+            )
+        )
+    )
+    reallocation_is_safe = allow_unmatched_reallocation or parser_upgrade_is_proven
+
     origins = _incoming_origins(assignment, incoming, fingerprints)
     exact_current = source is not None and (
         source["source_revision"] == assignment.source_revision
@@ -600,7 +616,7 @@ def resolve_records(
         except IdentityError as error:
             if (
                 error.code != "identity_exact_state_mismatch"
-                or not allow_unmatched_reallocation
+                or not reallocation_is_safe
             ):
                 raise
         else:
@@ -615,7 +631,7 @@ def resolve_records(
 
     proved_active: dict[int, dict[str, Any]] = {}
     if (
-        allow_unmatched_reallocation
+        reallocation_is_safe
         and source is not None
         and source["source_revision"] == assignment.source_revision
     ):
@@ -704,7 +720,7 @@ def resolve_records(
                 record_id_factory,
                 transaction_id_factory,
             )
-        if not allow_unmatched_reallocation:
+        if not reallocation_is_safe:
             raise IdentityError("identity_record_match_ambiguous")
 
     resolved_owners: dict[int, dict[str, Any]] = {
@@ -788,6 +804,7 @@ def resolve_batch(
     sources: list[IncomingSourceIdentity] | tuple[IncomingSourceIdentity, ...],
     intent: str,
     allow_unmatched_reallocation: bool = False,
+    allow_parser_upgrade_reallocation: bool = False,
 ) -> IdentityResolution:
     """Resolve an import batch without changing the ledger or manifest inputs."""
     action = _source_resolution_action(intent)
@@ -798,6 +815,8 @@ def resolve_batch(
     ):
         raise IdentityError("identity_manifest_invalid")
     if not isinstance(allow_unmatched_reallocation, bool):
+        raise IdentityError("identity_manifest_invalid")
+    if not isinstance(allow_parser_upgrade_reallocation, bool):
         raise IdentityError("identity_manifest_invalid")
     for source in incoming_sources:
         if not isinstance(source.record_data, tuple) or not all(
@@ -871,6 +890,7 @@ def resolve_batch(
                 prior_rows,
                 intent,
                 allow_unmatched_reallocation=allow_unmatched_reallocation,
+                allow_parser_upgrade_reallocation=(allow_parser_upgrade_reallocation),
             )
             protected_legacy[assignment.source_display] = tuple(
                 _protect_legacy_row(row) for row in legacy_group
@@ -891,6 +911,7 @@ def resolve_batch(
                 (*prior_rows, *(legacy_group if target_legacy else ())),
                 intent,
                 allow_unmatched_reallocation=allow_unmatched_reallocation,
+                allow_parser_upgrade_reallocation=(allow_parser_upgrade_reallocation),
             )
             if result.retained_legacy_rows:
                 protected_legacy[assignment.source_display] = tuple(

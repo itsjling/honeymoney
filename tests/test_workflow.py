@@ -776,12 +776,15 @@ def open(source_path):
                 original_revision,
             )
 
-    def test_ambiguous_balance_contract_upgrade_fails_without_writes(self) -> None:
+    def test_repeated_balance_contract_upgrade_reallocates_without_pairing(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root, fake_modules, statement, profile_path = (
                 self._seed_balance_contract_workspace(tmp, repeated=True)
             )
-            before = self._import_artifact_bytes(root)
+            before = load_identity_state(root / "output" / "categorized.csv")
+            old_ids = {row["transaction_id"] for row in before.rows}
             self._add_balance_contract_mapping(profile_path)
 
             replacement = self._run_cli(
@@ -790,9 +793,16 @@ def open(source_path):
                 extra_pythonpath=fake_modules,
             )
 
-            self.assertEqual(replacement.returncode, 2, replacement.stderr)
-            self.assertIn("identity_record_match_ambiguous", replacement.stderr)
-            self.assertEqual(self._import_artifact_bytes(root), before)
+            self.assertEqual(replacement.returncode, 0, replacement.stderr)
+            replaced = load_identity_state(root / "output" / "categorized.csv")
+            self.assertEqual(len(replaced.rows), 2)
+            self.assertEqual({row["transaction_id"] for row in replaced.rows}, old_ids)
+            self.assertEqual(
+                replaced.source_rows[0]["statement_opening_balance"], "100.00"
+            )
+            self.assertEqual(
+                replaced.source_rows[-1]["statement_closing_balance"], "110.00"
+            )
 
     def test_identity_v2_replace_migrates_reviewed_repeated_rows_in_place(
         self,
@@ -952,6 +962,156 @@ def open(source_path):
             self.assertIn("Dining", html)
             for transaction_id in canonical_ids:
                 self.assertIn(transaction_id, html)
+
+    def test_current_replace_rekeys_repeated_rows_after_profile_upgrade(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root, fake_modules, statement, profile_path = (
+                self._seed_balance_contract_workspace(tmp, repeated=True)
+            )
+            categorized_path = root / "output" / "categorized.csv"
+            original = load_identity_state(categorized_path)
+            original_ids = [row["transaction_id"] for row in original.rows]
+            (root / "corrections.csv").write_text(
+                csv_document(
+                    CORRECTION_COLUMNS,
+                    [
+                        {
+                            "transaction_id": transaction_id,
+                            "category": "Dining",
+                            "flow_type": "expense",
+                            "confidence": "1.00",
+                            "reason": "Synthetic repeated review",
+                            "needs_review": "false",
+                        }
+                        for transaction_id in original_ids
+                    ],
+                ),
+                encoding="utf-8",
+            )
+            upgraded_profile = json.loads(profile_path.read_text(encoding="utf-8"))
+            upgraded_profile["account_id"] = "balance_contract_v2"
+            upgraded_profile["account"] = "Balance Contract V2"
+            profile_path.write_text(json.dumps(upgraded_profile), encoding="utf-8")
+
+            replacement = self._run_cli(
+                [
+                    "import",
+                    str(statement),
+                    "--replace",
+                    "--no-interactive",
+                    "--json",
+                ],
+                cwd=root,
+                extra_pythonpath=fake_modules,
+            )
+
+            self.assertEqual(replacement.returncode, 0, replacement.stderr)
+            replaced = load_identity_state(categorized_path)
+            replacement_ids = [row["transaction_id"] for row in replaced.rows]
+            self.assertEqual(len(replacement_ids), 2)
+            self.assertTrue(set(original_ids).isdisjoint(replacement_ids))
+            self.assertTrue(all(row["category"] == "Dining" for row in replaced.rows))
+            self.assertTrue(
+                all(row["needs_review"] == "false" for row in replaced.rows)
+            )
+            with (root / "corrections.csv").open(
+                newline="", encoding="utf-8"
+            ) as handle:
+                correction_ids = {
+                    row["transaction_id"] for row in csv.DictReader(handle)
+                }
+            self.assertEqual(correction_ids, set(replacement_ids))
+            first_generation = self._artifact_bytes(
+                root,
+                [
+                    "output/categorized.csv",
+                    "output/review_needed.csv",
+                    "output/.honeymoney-identity-manifest.json",
+                    "output/.honeymoney-source-occurrences.csv",
+                    "output/.honeymoney-overlap-manifest.json",
+                    "corrections.csv",
+                ],
+            )
+
+            repeated = self._run_cli(
+                [
+                    "import",
+                    str(statement),
+                    "--replace",
+                    "--no-interactive",
+                    "--json",
+                ],
+                cwd=root,
+                extra_pythonpath=fake_modules,
+            )
+
+            self.assertEqual(repeated.returncode, 0, repeated.stderr)
+            self.assertEqual(
+                self._artifact_bytes(root, list(first_generation)),
+                first_generation,
+            )
+
+    def test_current_replace_keeps_conflicting_repeated_history_reviewable(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root, fake_modules, statement, profile_path = (
+                self._seed_balance_contract_workspace(tmp, repeated=True)
+            )
+            categorized_path = root / "output" / "categorized.csv"
+            original = load_identity_state(categorized_path)
+            original_ids = [row["transaction_id"] for row in original.rows]
+            (root / "corrections.csv").write_text(
+                csv_document(
+                    CORRECTION_COLUMNS,
+                    [
+                        {
+                            "transaction_id": original_ids[0],
+                            "category": "Dining",
+                            "needs_review": "false",
+                        },
+                        {
+                            "transaction_id": original_ids[1],
+                            "category": "Shopping",
+                            "needs_review": "false",
+                        },
+                    ],
+                ),
+                encoding="utf-8",
+            )
+            upgraded_profile = json.loads(profile_path.read_text(encoding="utf-8"))
+            upgraded_profile["account_id"] = "balance_contract_v2"
+            upgraded_profile["account"] = "Balance Contract V2"
+            profile_path.write_text(json.dumps(upgraded_profile), encoding="utf-8")
+
+            replacement = self._run_cli(
+                [
+                    "import",
+                    str(statement),
+                    "--replace",
+                    "--no-interactive",
+                    "--json",
+                ],
+                cwd=root,
+                extra_pythonpath=fake_modules,
+            )
+
+            self.assertEqual(replacement.returncode, 0, replacement.stderr)
+            replaced = load_identity_state(categorized_path)
+            self.assertTrue(
+                all(
+                    "overlap_history_ambiguous" in row["flags"].split(";")
+                    and row["needs_review"] == "true"
+                    for row in replaced.rows
+                )
+            )
+            with (root / "corrections.csv").open(
+                newline="", encoding="utf-8"
+            ) as handle:
+                correction_ids = {
+                    row["transaction_id"] for row in csv.DictReader(handle)
+                }
+            self.assertTrue(set(original_ids).isdisjoint(correction_ids))
 
     def test_import_loads_identity_state_once(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

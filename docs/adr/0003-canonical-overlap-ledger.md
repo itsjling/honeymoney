@@ -47,6 +47,9 @@ This narrows these ADR 0001 rules:
 
 All other ADR 0001 privacy, no-guessing, source replacement, reset, hash
 conflict, and recoverable persistence rules remain in force.
+This includes ADR 0001's narrow parser-upgrade replacement exception: repeated
+source rows may reallocate without a guessed pairing, while canonical review
+history moves only when it is unique or fully agreed.
 
 ADR 0002 required source identity-v2 fields on each local-memory observation.
 After this migration, reviewed choices belong to stable canonical transaction
