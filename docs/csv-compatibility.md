@@ -67,6 +67,8 @@ ADR 0004 adds `valuation_source`, `valuation_status`, and `review_reasons`.
 Exact ADR 0003 headers remain migration input and gain the new columns on the
 next write. `review_needed.csv` also adds the display-only
 `review_reason_labels` column. JSON envelopes use schema version 2.
+Replacement and reset derive typed review reasons before they change legacy
+source rows, so an explicit `reconcile` upgrade is optional.
 
 New public text columns are safe by default. A new numeric or other canonical
 non-text column must be added to `CANONICAL_CSV_COLUMNS` and covered by a
