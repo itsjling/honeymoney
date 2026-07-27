@@ -15,7 +15,7 @@
       "transaction_id": "txn_gogo",
       "category": "Transport",
       "confidence": "0.60",
-      "needs_review": "true",
+      "needs_review": "false",
       "_flags_contains": ["matched_rule:gogo-low-confidence"]
     },
     {

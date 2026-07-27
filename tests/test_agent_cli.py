@@ -67,7 +67,7 @@ class AgentCliTest(unittest.TestCase):
                 "errors",
             },
         )
-        self.assertEqual(payload["schema_version"], 1)
+        self.assertEqual(payload["schema_version"], 2)
         self.assertIsInstance(payload["data"], dict)
         self.assertIsInstance(payload["artifacts"], dict)
         self.assertIsInstance(payload["warnings"], list)
@@ -105,7 +105,7 @@ class AgentCliTest(unittest.TestCase):
 
             self.assertEqual(result.returncode, 0, result.stderr)
             payload = self._json(result)
-            self.assertEqual(payload["schema_version"], 1)
+            self.assertEqual(payload["schema_version"], 2)
             self.assertEqual(payload["command"], "setup")
             self.assertEqual(payload["status"], "success")
             self.assertEqual(payload["data"]["root"], str(root.resolve()))
@@ -637,8 +637,12 @@ class AgentCliTest(unittest.TestCase):
                     "merchant",
                     "original_amount",
                     "original_currency",
+                    "posted_amount",
+                    "posted_currency",
                     "source_page",
                     "source_row",
+                    "valuation_source",
+                    "valuation_status",
                 },
             )
             self.assertEqual(payload["data"]["rows"][0]["merchant"], "MERCHANT 01")

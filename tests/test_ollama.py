@@ -447,6 +447,7 @@ class OllamaTest(unittest.TestCase):
         self.assertEqual(report["reviewable_count"], 1)
         self.assertEqual(transaction["category"], "Dining")
         self.assertEqual(transaction["needs_review"], "true")
+        self.assertEqual(transaction["review_reasons"], "category_suggestion")
 
     def test_invalid_ollama_json_shape_is_reported_not_raised(self) -> None:
         for response in [

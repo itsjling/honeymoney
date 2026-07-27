@@ -8,6 +8,11 @@ from pathlib import Path
 from typing import Any
 
 from honeymoney.reconciliation import transaction_direction
+from honeymoney.review_state import (
+    REVIEW_REASON_CATEGORY,
+    REVIEW_REASON_CATEGORY_SUGGESTION,
+    set_review_reason,
+)
 from honeymoney.schema import (
     ALLOWED_FLOW_TYPES,
     allowed_categories,
@@ -143,7 +148,6 @@ def apply_rules(
     rules: list[dict[str, Any]],
     config: dict[str, Any],
 ) -> None:
-    threshold = Decimal(str(config.get("review_confidence_threshold", 0.8)))
     ordered_rules = sorted(
         enumerate(rules),
         key=lambda indexed: (
@@ -176,8 +180,11 @@ def apply_rules(
                 )
             transaction["confidence"] = _format_decimal(confidence)
             if category_changed:
-                transaction["needs_review"] = (
-                    "false" if confidence >= threshold else "true"
+                set_review_reason(transaction, REVIEW_REASON_CATEGORY, False)
+                set_review_reason(
+                    transaction,
+                    REVIEW_REASON_CATEGORY_SUGGESTION,
+                    False,
                 )
             transaction["reason"] = f"Matched rule {rule.get('id', '')}".strip()
             if category_changed:

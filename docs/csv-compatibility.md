@@ -61,8 +61,12 @@ cells.
 
 Amount, balance, confidence, review-state, page, and row columns bypass the
 text encoding. In particular, a legitimate amount such as `-12.34` remains
-`-12.34`, not `'-12.34`. Headers, column order, paths, file permissions, JSON
-responses, and recoverable generation publishing are unchanged.
+`-12.34`, not `'-12.34`.
+
+ADR 0004 adds `valuation_source`, `valuation_status`, and `review_reasons`.
+Exact ADR 0003 headers remain migration input and gain the new columns on the
+next write. `review_needed.csv` also adds the display-only
+`review_reason_labels` column. JSON envelopes use schema version 2.
 
 New public text columns are safe by default. A new numeric or other canonical
 non-text column must be added to `CANONICAL_CSV_COLUMNS` and covered by a

@@ -161,7 +161,7 @@ class DuplicateEvaluationTest(unittest.TestCase):
         apply_duplicate_candidates([legacy], evaluate_duplicate_candidates([legacy]))
         self.assertEqual(legacy["flags"], "seed_flag")
         self.assertEqual(legacy["reason"], "Seed reason")
-        self.assertEqual(legacy["needs_review"], "true")
+        self.assertEqual(legacy["needs_review"], "false")
 
     def test_later_independent_review_survives_stale_candidate_cleanup(self) -> None:
         rows = [
@@ -176,6 +176,7 @@ class DuplicateEvaluationTest(unittest.TestCase):
             {
                 reviewed_id: {
                     "needs_review": "true",
+                    "review_reasons": "other_decision",
                     "reason": "Independent synthetic review",
                 }
             },

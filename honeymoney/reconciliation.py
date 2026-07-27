@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+from collections import defaultdict
 from datetime import date
 from decimal import Decimal, InvalidOperation
 from typing import Mapping
@@ -18,7 +19,21 @@ from honeymoney.duplicates import (
     release_duplicate_review_ownership,
 )
 from honeymoney.identity import ambiguous_legacy_transaction_ids
+from honeymoney.review_state import (
+    REVIEW_REASON_ACCOUNTING_FLOW,
+    REVIEW_REASON_CATEGORY,
+    REVIEW_REASON_CATEGORY_SUGGESTION,
+    review_reason_tokens,
+    set_review_reason,
+    synchronize_review_states,
+)
 from honeymoney.schema import ALLOWED_ACCOUNT_TYPES, ALLOWED_FLOW_TYPES
+from honeymoney.valuation import (
+    configured_exchange_rate,
+    set_matched_exchange_valuation,
+    valuation_summary,
+    value_transactions,
+)
 
 TRANSFER_FLOW_TYPES = {
     "internal_transfer",
@@ -29,6 +44,7 @@ EXTERNAL_FLOW_TYPES = {"income", "expense", "refund"}
 AMBIGUITY_FLAG = "reconciliation_ambiguous"
 AMBIGUITY_PRIOR_REVIEW_FLAG = "reconciliation_ambiguous_prior_review"
 AMBIGUITY_REASON = "Ambiguous transfer candidates"
+CROSS_CURRENCY_FLAG = "cross_currency_exchange"
 
 
 def reconcile_ledger(
@@ -38,6 +54,7 @@ def reconcile_ledger(
     statement_rows: list[dict[str, str]] | None = None,
 ) -> ReconciliationSummary:
     """Derive cash-flow treatment and pair unique owned-account transfers."""
+    validate_reconciliation_config(config)
     window = reconciliation_date_window(config)
     ambiguous_legacy_ids = ambiguous_legacy_transaction_ids(rows)
     protected = {
@@ -54,6 +71,11 @@ def reconcile_ledger(
             )
         )
     }
+    value_transactions(
+        (row for row in rows if id(row) not in protected),
+        config,
+        preserve_matched=False,
+    )
     by_id = {
         row.get("transaction_id", ""): row
         for row in rows
@@ -65,8 +87,25 @@ def reconcile_ledger(
         _reset_reconciliation(row)
         derive_flow_type(row)
 
+    paired: set[str] = set()
+    cross_currency_pairs = _cross_currency_exchange_pairs(rows, config, protected)
+    for base_row, foreign_row in cross_currency_pairs:
+        _pair_cross_currency(base_row, foreign_row)
+        paired.update(
+            {
+                base_row["transaction_id"],
+                foreign_row["transaction_id"],
+            }
+        )
+
     candidates: list[tuple[int, str, str, str]] = []
-    eligible = [row for row in rows if id(row) not in protected and _eligible(row)]
+    eligible = [
+        row
+        for row in rows
+        if id(row) not in protected
+        and row.get("transaction_id") not in paired
+        and _eligible(row)
+    ]
     for index, left in enumerate(eligible):
         for right in eligible[index + 1 :]:
             candidate = _candidate(left, right, window)
@@ -86,8 +125,7 @@ def reconcile_ledger(
             _, other_id, flow_type = nearest[0]
             best[transaction_id] = (other_id, flow_type)
 
-    paired: set[str] = set()
-    paired_groups = 0
+    paired_groups = len(cross_currency_pairs)
     for distance, left_id, right_id, flow_type in sorted(candidates):
         if left_id in paired or right_id in paired:
             continue
@@ -110,16 +148,18 @@ def reconcile_ledger(
         if transaction_id in choices:
             row["reconciliation_status"] = "ambiguous"
             row["reconciliation_confidence"] = "0.00"
-            if row.get(
-                "needs_review"
-            ) == "true" and DUPLICATE_REVIEW_PROMOTED_FLAG not in _tokens(
-                row.get("flags", "")
+            if (
+                row.get("needs_review") == "true"
+                and bool(review_reason_tokens(row.get("review_reasons", "")))
+                and REVIEW_REASON_ACCOUNTING_FLOW
+                not in review_reason_tokens(row.get("review_reasons", ""))
+                and DUPLICATE_REVIEW_PROMOTED_FLAG not in _tokens(row.get("flags", ""))
             ):
                 row["flags"] = _append_token(
                     row.get("flags", ""), AMBIGUITY_PRIOR_REVIEW_FLAG
                 )
             release_duplicate_review_ownership(row)
-            row["needs_review"] = "true"
+            set_review_reason(row, REVIEW_REASON_ACCOUNTING_FLOW, True)
             row["flags"] = _append_token(row.get("flags", ""), AMBIGUITY_FLAG)
             row["reason"] = _append_reason(row.get("reason", ""), AMBIGUITY_REASON)
             if row.get("flow_source") not in {"rule", "correction"}:
@@ -130,6 +170,11 @@ def reconcile_ledger(
             row["reconciliation_status"] = "unmatched"
             unmatched += 1
 
+    synchronize_review_states(
+        (row for row in rows if id(row) not in protected),
+        legacy=False,
+    )
+    valuations = valuation_summary(rows)
     return {
         "transaction_count": len(rows),
         "paired_groups": paired_groups,
@@ -139,6 +184,10 @@ def reconcile_ledger(
         "unresolved_transactions": sum(
             1 for row in rows if row.get("flow_type") == "unresolved"
         ),
+        "cross_currency_paired_groups": len(cross_currency_pairs),
+        "matched_exchange_valuations": len(cross_currency_pairs),
+        "missing_valuation_transactions": valuations["missing_count"],
+        "estimated_valuation_transactions": valuations["estimated_count"],
         "balance_reconciliation": _balance_reconciliation(
             statement_rows if statement_rows is not None else rows
         ),
@@ -156,6 +205,52 @@ def reconciliation_date_window(config: Config) -> int:
             "Config field reconciliation.date_window_days must be an integer from 0 to 31"
         )
     return value
+
+
+def validate_reconciliation_config(config: Config) -> None:
+    raw = config.get("reconciliation")
+    if raw is None:
+        reconciliation_date_window(config)
+        return
+    if not isinstance(raw, Mapping):
+        raise ValueError("Config field reconciliation must be a JSON object")
+    reconciliation_date_window(config)
+    for field in ("exchange_debit_markers", "foreign_deposit_markers"):
+        if field not in raw:
+            continue
+        value = raw[field]
+        if not isinstance(value, list):
+            raise ValueError(
+                f"Config field reconciliation.{field} must be a JSON array"
+            )
+        if not value:
+            raise ValueError(f"Config field reconciliation.{field} must not be empty")
+        markers: list[str] = []
+        for index, marker in enumerate(value):
+            if not isinstance(marker, str) or not marker.strip():
+                raise ValueError(
+                    f"Config field reconciliation.{field}[{index}] "
+                    "must be a non-empty string"
+                )
+            markers.append(marker.strip().casefold())
+        if len(markers) != len(set(markers)):
+            raise ValueError(
+                f"Config field reconciliation.{field} must not contain duplicates"
+            )
+    if "exchange_rate_spread_tolerance" in raw:
+        value = raw["exchange_rate_spread_tolerance"]
+        if isinstance(value, bool) or not isinstance(value, (int, float, Decimal)):
+            parsed = None
+        else:
+            try:
+                parsed = Decimal(str(value))
+            except (InvalidOperation, ValueError):
+                parsed = None
+        if parsed is None or not parsed.is_finite() or parsed < 0 or parsed > 1:
+            raise ValueError(
+                "Config field reconciliation.exchange_rate_spread_tolerance "
+                "must be a number from 0 to 1"
+            )
 
 
 def transaction_direction(row: dict[str, str]) -> str | None:
@@ -180,6 +275,11 @@ def _reset_reconciliation(row: dict[str, str]) -> None:
             if prior_review:
                 release_duplicate_review_ownership(row)
             row["needs_review"] = "true" if prior_review else "false"
+        set_review_reason(
+            row,
+            REVIEW_REASON_ACCOUNTING_FLOW,
+            prior_review,
+        )
     row["transfer_group_id"] = ""
     row["paired_transaction_id"] = ""
     row["reconciliation_status"] = "not_applicable"
@@ -200,6 +300,8 @@ def derive_flow_type(row: dict[str, str]) -> None:
 
     category = row.get("category", "")
     amount = _amount(row)
+    if amount is None:
+        amount = _amount_from_field(row, "posted_amount")
     account_type = row.get("account_type", "unknown")
     if account_type not in ALLOWED_ACCOUNT_TYPES:
         account_type = "unknown"
@@ -226,7 +328,10 @@ def derive_flow_type(row: dict[str, str]) -> None:
         flow_type = "unresolved"
     elif category in {"", "Unknown", "Other"}:
         flow_type = "unresolved"
-    elif amount > 0 and account_type == "credit_card":
+    elif amount > 0 and (
+        account_type == "credit_card"
+        or (account_type == "bank" and _has_refund_evidence(row))
+    ):
         flow_type = "refund"
     elif amount < 0:
         flow_type = "expense"
@@ -234,6 +339,16 @@ def derive_flow_type(row: dict[str, str]) -> None:
         flow_type = "unresolved"
     row["flow_type"] = flow_type
     row["flow_source"] = "deterministic"
+
+
+def _has_refund_evidence(row: Mapping[str, str]) -> bool:
+    text = " ".join(
+        (
+            row.get("merchant", ""),
+            row.get("original_description", ""),
+        )
+    ).casefold()
+    return any(marker in text for marker in ("refund", "rebate", "cashback"))
 
 
 def _eligible(row: dict[str, str]) -> bool:
@@ -312,6 +427,264 @@ def _pair(
         row["paired_transaction_id"] = other["transaction_id"]
         row["reconciliation_status"] = "paired"
         row["reconciliation_confidence"] = confidence
+
+
+def _cross_currency_exchange_pairs(
+    rows: list[dict[str, str]],
+    config: Config,
+    protected: set[int],
+) -> list[tuple[dict[str, str], dict[str, str]]]:
+    """Match statement-labelled HKD exchange debits to foreign deposits."""
+    raw_reconciliation = config.get("reconciliation", {})
+    settings = raw_reconciliation if isinstance(raw_reconciliation, Mapping) else {}
+    exchange_markers = _marker_list(
+        settings.get("exchange_debit_markers"),
+        ("exchange",),
+    )
+    deposit_markers = _marker_list(
+        settings.get("foreign_deposit_markers"),
+        ("deposit",),
+    )
+    tolerance = _decimal_setting(
+        settings.get("exchange_rate_spread_tolerance"),
+        Decimal("0.10"),
+    )
+    groups: dict[
+        tuple[str, str],
+        tuple[list[dict[str, str]], list[dict[str, str]]],
+    ] = defaultdict(lambda: ([], []))
+    base_currency = str(config.get("base_currency", "HKD")).upper()
+
+    for row in rows:
+        if id(row) in protected or row.get("account_type") != "bank":
+            continue
+        institution = row.get("institution", "").strip()
+        account_id = row.get("account_id", "").strip()
+        if not institution or not account_id:
+            continue
+        amount = _amount_from_field(row, "posted_amount")
+        if amount is None or amount == 0 or _row_date(row) is None:
+            continue
+        text = " ".join(
+            (
+                row.get("merchant", ""),
+                row.get("original_description", ""),
+            )
+        ).casefold()
+        key = (row.get("date", ""), institution)
+        currency = row.get("posted_currency", "").upper()
+        if (
+            currency == base_currency
+            and amount < 0
+            and any(marker in text for marker in exchange_markers)
+        ):
+            groups[key][0].append(row)
+        elif (
+            currency not in {"", base_currency}
+            and amount > 0
+            and any(marker in text for marker in deposit_markers)
+        ):
+            groups[key][1].append(row)
+
+    candidates: list[
+        tuple[
+            str,
+            str,
+            list[dict[str, str]],
+            list[dict[str, str]],
+            Decimal,
+        ]
+    ] = []
+    for (transaction_date, institution), (base_rows, foreign_rows) in groups.items():
+        if not base_rows or len(base_rows) != len(foreign_rows):
+            continue
+        currencies = {row.get("posted_currency", "").upper() for row in foreign_rows}
+        if len(currencies) != 1:
+            continue
+        currency = next(iter(currencies))
+        foreign_total = sum(
+            (_absolute_posted_amount(row) for row in foreign_rows), Decimal("0")
+        )
+        if foreign_total == 0:
+            continue
+        event_rate = (
+            sum((_absolute_posted_amount(row) for row in base_rows), Decimal("0"))
+            / foreign_total
+        )
+        candidates.append(
+            (
+                transaction_date,
+                institution,
+                base_rows,
+                foreign_rows,
+                event_rate,
+            )
+        )
+
+    cohort_rates: dict[tuple[str, str], Decimal] = {}
+    rates_by_cohort: dict[tuple[str, str], list[Decimal]] = defaultdict(list)
+    for _, institution, _, foreign_rows, event_rate in candidates:
+        currency = foreign_rows[0].get("posted_currency", "").upper()
+        rates_by_cohort[(institution, currency)].append(event_rate)
+    for key, rates in rates_by_cohort.items():
+        if len(rates) < 2:
+            continue
+        reference = sum(rates, Decimal("0")) / Decimal(len(rates))
+        if all(_rate_within_tolerance(rate, reference, tolerance) for rate in rates):
+            cohort_rates[key] = reference
+
+    pairs: list[tuple[dict[str, str], dict[str, str]]] = []
+    for transaction_date, institution, base_rows, foreign_rows, _ in candidates:
+        currency = foreign_rows[0].get("posted_currency", "").upper()
+        reference_rate = configured_exchange_rate(
+            config, currency, transaction_date
+        ) or cohort_rates.get((institution, currency))
+        if reference_rate is None:
+            continue
+        assignment = _unique_exchange_assignment(
+            sorted(base_rows, key=_absolute_posted_amount),
+            sorted(foreign_rows, key=_absolute_posted_amount),
+            reference_rate,
+            tolerance,
+        )
+        if assignment is not None:
+            pairs.extend(assignment)
+    return pairs
+
+
+def _unique_exchange_assignment(
+    base_rows: list[dict[str, str]],
+    foreign_rows: list[dict[str, str]],
+    reference_rate: Decimal,
+    tolerance: Decimal,
+) -> list[tuple[dict[str, str], dict[str, str]]] | None:
+    edges: list[list[int]] = []
+    for base in base_rows:
+        possible: list[int] = []
+        for foreign_index, foreign in enumerate(foreign_rows):
+            foreign_amount = _absolute_posted_amount(foreign)
+            if (
+                foreign_amount != 0
+                and base.get("account_id") != foreign.get("account_id")
+                and _rate_within_tolerance(
+                    _absolute_posted_amount(base) / foreign_amount,
+                    reference_rate,
+                    tolerance,
+                )
+            ):
+                possible.append(foreign_index)
+        edges.append(possible)
+
+    matching = _perfect_exchange_matching(edges, len(foreign_rows))
+    if matching is None:
+        return None
+    for base_index, foreign_index in enumerate(matching):
+        if (
+            _perfect_exchange_matching(
+                edges,
+                len(foreign_rows),
+                excluded=(base_index, foreign_index),
+            )
+            is not None
+        ):
+            return None
+    return [
+        (base_rows[base_index], foreign_rows[foreign_index])
+        for base_index, foreign_index in enumerate(matching)
+    ]
+
+
+def _perfect_exchange_matching(
+    edges: list[list[int]],
+    foreign_count: int,
+    *,
+    excluded: tuple[int, int] | None = None,
+) -> list[int] | None:
+    matched_base = [-1] * foreign_count
+
+    def assign(base_index: int, seen: set[int]) -> bool:
+        for foreign_index in edges[base_index]:
+            if excluded == (base_index, foreign_index) or foreign_index in seen:
+                continue
+            seen.add(foreign_index)
+            prior_base = matched_base[foreign_index]
+            if prior_base == -1 or assign(prior_base, seen):
+                matched_base[foreign_index] = base_index
+                return True
+        return False
+
+    for base_index in range(len(edges)):
+        if not assign(base_index, set()):
+            return None
+    if len(edges) != foreign_count:
+        return None
+    matching = [-1] * len(edges)
+    for foreign_index, base_index in enumerate(matched_base):
+        if base_index >= 0:
+            matching[base_index] = foreign_index
+    return matching if all(index >= 0 for index in matching) else None
+
+
+def _rate_within_tolerance(
+    rate: Decimal, reference_rate: Decimal, tolerance: Decimal
+) -> bool:
+    return (
+        reference_rate > 0 and abs(rate - reference_rate) / reference_rate <= tolerance
+    )
+
+
+def _pair_cross_currency(
+    base_row: dict[str, str],
+    foreign_row: dict[str, str],
+) -> None:
+    base_amount = _amount(base_row)
+    if base_amount is None:
+        raise AssertionError("base exchange leg lost its statement valuation")
+    set_matched_exchange_valuation(foreign_row, abs(base_amount))
+    transaction_ids = sorted(
+        [base_row["transaction_id"], foreign_row["transaction_id"]]
+    )
+    digest = hashlib.sha256("|".join(transaction_ids).encode("utf-8")).hexdigest()[:16]
+    group_id = f"xfer_{digest}"
+    for row, other in ((base_row, foreign_row), (foreign_row, base_row)):
+        row["category"] = "Internal Transfer"
+        row["flow_type"] = "internal_transfer"
+        row["flow_source"] = "reconciliation"
+        row["transfer_group_id"] = group_id
+        row["paired_transaction_id"] = other["transaction_id"]
+        row["reconciliation_status"] = "paired"
+        row["reconciliation_confidence"] = "1.00"
+        row["flags"] = _append_token(
+            _remove_token(row.get("flags", ""), "uncategorized"),
+            CROSS_CURRENCY_FLAG,
+        )
+        set_review_reason(row, REVIEW_REASON_CATEGORY, False)
+        set_review_reason(row, REVIEW_REASON_CATEGORY_SUGGESTION, False)
+        set_review_reason(row, REVIEW_REASON_ACCOUNTING_FLOW, False)
+
+
+def _marker_list(value: object, default: tuple[str, ...]) -> tuple[str, ...]:
+    if value is None:
+        return default
+    if not isinstance(value, list):
+        raise AssertionError("reconciliation marker validation was skipped")
+    return tuple(item.strip().casefold() for item in value if isinstance(item, str))
+
+
+def _decimal_setting(value: object, default: Decimal) -> Decimal:
+    if value is None:
+        return default
+    try:
+        parsed = Decimal(str(value))
+    except (InvalidOperation, ValueError):
+        raise AssertionError(
+            "reconciliation tolerance validation was skipped"
+        ) from None
+    return parsed
+
+
+def _absolute_posted_amount(row: dict[str, str]) -> Decimal:
+    return abs(_amount_from_field(row, "posted_amount") or Decimal("0"))
 
 
 def _amount(row: dict[str, str]) -> Decimal | None:

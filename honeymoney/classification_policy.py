@@ -8,6 +8,12 @@ from decimal import Decimal, InvalidOperation
 from typing import Mapping
 
 from honeymoney.contracts import Config
+from honeymoney.review_state import (
+    REVIEW_REASON_CATEGORY,
+    REVIEW_REASON_CATEGORY_SUGGESTION,
+    REVIEW_REASON_OWNERSHIP,
+    set_review_reason,
+)
 from honeymoney.schema import allowed_categories
 
 PROTECTED_ACCOUNTING_CATEGORIES = frozenset(
@@ -207,10 +213,12 @@ def _set_structural(
     row["flow_type"] = flow_type
     row["flow_source"] = "structural"
     row["confidence"] = "1.00"
-    row["needs_review"] = (
-        "true"
-        if category == "Other" or row.get("owner") in {"", "Unknown"}
-        else "false"
+    set_review_reason(row, REVIEW_REASON_CATEGORY, False)
+    set_review_reason(row, REVIEW_REASON_CATEGORY_SUGGESTION, category == "Other")
+    set_review_reason(
+        row,
+        REVIEW_REASON_OWNERSHIP,
+        row.get("owner") in {"", "Unknown"},
     )
     row["flags"] = _append(row.get("flags", ""), "structural_classification")
     row["reason"] = _append_reason(
@@ -260,11 +268,14 @@ def _calibrated_threshold(config: Config) -> Decimal | None:
 
 
 def _amount(row: dict[str, str]) -> Decimal | None:
-    try:
-        amount = Decimal(row.get("amount_hkd", ""))
-    except (InvalidOperation, ValueError):
-        return None
-    return amount if amount.is_finite() else None
+    for field in ("amount_hkd", "posted_amount"):
+        try:
+            amount = Decimal(row.get(field, ""))
+        except (InvalidOperation, ValueError):
+            continue
+        if amount.is_finite():
+            return amount
+    return None
 
 
 def _append(value: str, item: str) -> str:

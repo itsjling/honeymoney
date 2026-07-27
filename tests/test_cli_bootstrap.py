@@ -7,6 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from honeymoney.corrections import CORRECTION_COLUMNS
 from honeymoney.identity_state import load_identity_state
 from honeymoney.schema import CATEGORIZED_COLUMNS
 
@@ -93,6 +94,10 @@ class CliBootstrapTest(unittest.TestCase):
                 )
             )
             self.assertTrue((root / "corrections.csv").exists())
+            self.assertEqual(
+                (root / "corrections.csv").read_text(encoding="utf-8").splitlines()[0],
+                ",".join(CORRECTION_COLUMNS),
+            )
             self.assertTrue((root / "profile_mappings.json").exists())
 
             config = json.loads((root / "config.json").read_text(encoding="utf-8"))
@@ -1157,8 +1162,10 @@ class CliBootstrapTest(unittest.TestCase):
             self.assertEqual(row["original_amount"], "-1000.00")
             self.assertEqual(row["original_currency"], "JPY")
             self.assertEqual(row["amount_hkd"], "")
+            self.assertEqual(row["valuation_source"], "missing")
+            self.assertEqual(row["valuation_status"], "missing")
             self.assertIn("missing_exchange_rate", row["flags"])
-            self.assertEqual(row["reason"], "Missing exchange rate for JPY")
+            self.assertEqual(row["reason"], "No categorization rules have been applied")
             self.assertEqual(row["needs_review"], "true")
 
     def test_csv_file_input_flags_invalid_amount_for_review(self) -> None:
@@ -1426,6 +1433,8 @@ class CliBootstrapTest(unittest.TestCase):
             self.assertEqual(row["posted_amount"], "-78.50")
             self.assertEqual(row["posted_currency"], "HKD")
             self.assertEqual(row["amount_hkd"], "-78.50")
+            self.assertEqual(row["valuation_source"], "statement_posted")
+            self.assertEqual(row["valuation_status"], "actual")
 
     def test_posted_amount_uses_credit_debit_indicator_for_sign(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -5483,7 +5492,8 @@ def open(path):
             self.assertNotEqual(manual["transaction_id"], manual_id)
             self.assertEqual(manual["category"], "Shopping")
             self.assertEqual(manual["owner"], "Justin")
-            self.assertEqual(manual["needs_review"], "true")
+            self.assertEqual(manual["needs_review"], "false")
+            self.assertEqual(manual["review_reasons"], "")
             pdf_row = next(
                 row
                 for row in load_identity_state(

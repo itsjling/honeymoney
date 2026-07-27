@@ -40,6 +40,7 @@ from honeymoney.schema import (
     allowed_owners,
     allowed_payment_methods,
 )
+from honeymoney.valuation import value_transaction
 
 
 @dataclass(frozen=True)
@@ -1138,6 +1139,7 @@ def _import_csv(
                 columns=columns,
                 source_file=_relative_source(csv_path, input_root),
             )
+            value_transaction(normalized, config)
             if _row_is_skipped(normalized, skip_patterns):
                 row_number += 1
                 continue
@@ -1209,6 +1211,7 @@ def _import_pdf(
                         source_file=_relative_source(pdf_path, input_root),
                         source_page=str(page_number),
                     )
+                    value_transaction(normalized, config)
                     if _row_is_skipped(normalized, skip_patterns):
                         continue
                     rows.append(normalized)
@@ -1253,6 +1256,7 @@ def _import_pdf(
                             source_file=_relative_source(pdf_path, input_root),
                             source_page=str(page_number),
                         )
+                        value_transaction(normalized, config)
                         if _row_is_skipped(normalized, skip_patterns):
                             continue
                         rows.append(normalized)
@@ -1325,6 +1329,7 @@ def _import_pdf(
                                 source_file=_relative_source(pdf_path, input_root),
                                 source_page=str(page_number),
                             )
+                            value_transaction(normalized, config)
                             if _row_is_skipped(normalized, skip_patterns):
                                 continue
                             rows.append(normalized)

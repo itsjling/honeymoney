@@ -1537,7 +1537,7 @@ def open(source_path):
             listed = self._run_cli(["duplicates", "--json"], cwd=root)
             self.assertEqual(listed.returncode, 0, listed.stderr)
             listed_document = json.loads(listed.stdout)
-            self.assertEqual(listed_document["schema_version"], 1)
+            self.assertEqual(listed_document["schema_version"], 2)
             self.assertEqual(listed_document["command"], "duplicates")
             [group] = listed_document["data"]["groups"]
             self.assertEqual(group["keep_all_count"], 3)
@@ -2425,7 +2425,10 @@ def open(source_path):
                 rows = list(csv.DictReader(handle))
             self.assertEqual(len(rows), 2)
             for row in rows:
+                row["category"] = "Dining"
+                row["flow_type"] = "expense"
                 row["needs_review"] = "true"
+                row["review_reasons"] = "identity_conflict"
                 row["flags"] = "duplicate_suspected;duplicate_review_promoted"
                 row["reason"] = (
                     "Duplicate candidate [match_type=legacy, occurrence_ids=stale]"
@@ -3932,7 +3935,7 @@ def open(source_path):
             import_result = self._run_cli(
                 ["import", str(statement)],
                 cwd=root,
-                input_text=f"{_category_number('Other')}\n\n",
+                input_text=f"{_category_number('Dining')}\n\n",
             )
             self.assertEqual(import_result.returncode, 0, import_result.stderr)
 
@@ -3945,12 +3948,14 @@ def open(source_path):
             self.assertEqual(review_result.returncode, 0, review_result.stderr)
             self.assertIn("1 records need review", review_result.stdout)
             self.assertIn("PENDING PURCHASE", review_result.stdout)
+            self.assertIn("Resolve the accounting flow", review_result.stdout)
+            self.assertIn("Choose a category", review_result.stdout)
             self.assertNotIn("REVIEWED PURCHASE", review_result.stdout)
             with (root / "output" / "categorized.csv").open(
                 newline="", encoding="utf-8"
             ) as fh:
                 rows = {row["merchant"]: row for row in csv.DictReader(fh)}
-            self.assertEqual(rows["REVIEWED PURCHASE"]["category"], "Other")
+            self.assertEqual(rows["REVIEWED PURCHASE"]["category"], "Dining")
             self.assertEqual(rows["PENDING PURCHASE"]["category"], "Groceries")
 
     def test_repeated_review_categories_select_the_union_without_duplicates(
@@ -4125,7 +4130,7 @@ def open(source_path):
             import_result = self._run_cli(
                 ["import", str(statement)],
                 cwd=root,
-                input_text=f"{_category_number('Other')}\n",
+                input_text=f"{_category_number('Dining')}\n",
             )
             self.assertEqual(import_result.returncode, 0, import_result.stderr)
             before = self._review_artifact_bytes(root)

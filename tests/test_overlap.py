@@ -1211,6 +1211,53 @@ class CanonicalOverlapTest(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "overlap_manifest_invalid"):
                     validate_overlap_agreement(corrupted, [legacy], result.manifest)
 
+    def test_agreement_accepts_only_matched_exchange_valuation_without_source_hkd(
+        self,
+    ) -> None:
+        occurrence = _occurrence("1", "a")
+        occurrence.update(
+            {
+                "original_amount": "100.00",
+                "original_currency": "EUR",
+                "posted_amount": "100.00",
+                "posted_currency": "EUR",
+                "amount_hkd": "",
+                "valuation_source": "missing",
+                "valuation_status": "missing",
+            }
+        )
+        result = canonicalize_overlaps(
+            [occurrence], [], empty_overlap_manifest(_NAMESPACE_KEY)
+        )
+        matched = copy.deepcopy(result.rows)
+        matched[0]["amount_hkd"] = "850.00"
+        matched[0]["valuation_source"] = "matched_exchange_leg"
+        matched[0]["valuation_status"] = "actual"
+
+        validate_overlap_agreement(matched, [occurrence], result.manifest)
+
+        unsupported = copy.deepcopy(matched)
+        unsupported[0]["valuation_source"] = "configured_fixed_rate"
+        with self.assertRaisesRegex(ValueError, "overlap_manifest_invalid"):
+            validate_overlap_agreement(unsupported, [occurrence], result.manifest)
+
+        configured_source = copy.deepcopy(occurrence)
+        configured_source["amount_hkd"] = "780.00"
+        configured_source["valuation_source"] = "configured_fixed_rate"
+        configured_source["valuation_status"] = "estimated"
+        configured_result = canonicalize_overlaps(
+            [configured_source], [], empty_overlap_manifest(_NAMESPACE_KEY)
+        )
+        preferred_match = copy.deepcopy(configured_result.rows)
+        preferred_match[0]["amount_hkd"] = "850.00"
+        preferred_match[0]["valuation_source"] = "matched_exchange_leg"
+        preferred_match[0]["valuation_status"] = "actual"
+        validate_overlap_agreement(
+            preferred_match,
+            [configured_source],
+            configured_result.manifest,
+        )
+
     def test_agreement_rejects_public_source_display_and_balance_evidence(self) -> None:
         occurrences = [_occurrence("1", "a"), _occurrence("2", "b")]
         result = canonicalize_overlaps(

@@ -92,6 +92,11 @@ Every response is one JSON object with `schema_version`, `command`, `status`,
 `data`, `artifacts`, `warnings`, and `errors`. Progress and diagnostics remain
 on stderr so stdout can be parsed directly.
 
+Schema version 2 adds typed review reasons and HKD valuation source and status.
+`pending` includes stable reason tokens and plain labels. Valuation gaps appear
+in completeness counts and do not enter the transaction-review queue by
+themselves.
+
 Import and ledger-reading commands report parsed source occurrences separately
 from canonical ledger occurrences. Read `source_occurrence_count`,
 `canonical_occurrence_count`, and `consolidated_occurrence_count`, then inspect

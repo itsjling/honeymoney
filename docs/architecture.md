@@ -114,6 +114,14 @@ unless the config names a locally calibrated acceptance threshold. Import
 reports split category provenance into deterministic, memory, exact-correction,
 accepted-model, reviewable-model, and unresolved counts.
 
+`needs_review` is derived from the stable tokens in `review_reasons`; it cannot
+remain true with no current human decision. The free-text `reason` field keeps
+categorization and processing provenance. HKD valuation completeness stays
+separate from transaction review. `valuation_source` and `valuation_status`
+distinguish statement amounts, matched exchange legs, dated or fixed rate
+estimates, and missing values. See
+[`ADR 0004`](adr/0004-review-state-and-hkd-valuation.md).
+
 `category` is the merchant/budget classification. `flow_type` is the accounting
 treatment used by cash-flow totals. Ollama is limited to configured spending
 categories and cannot set an owner or protected accounting treatment. Protected
@@ -262,6 +270,10 @@ changing it.
 - `honeymoney/report.py`: offline HTML report generation.
 - `honeymoney/reconciliation.py`: deterministic flow derivation, transfer pairing,
   and optional statement balance checks.
+- `honeymoney/review_state.py`: review-reason tokens, plain labels, and the
+  boolean invariant.
+- `honeymoney/valuation.py`: HKD value source, dated and fixed rates, and
+  completeness counts.
 - `honeymoney/data/profiles/`: bundled institution profiles copied by setup.
 - `tests/fixtures/`: synthetic golden inputs and expected behavior.
 
@@ -284,7 +296,8 @@ form.
 
 Remembered income rules are deterministic exact matches on institution,
 account identity, normalized description, and the virtual inflow direction.
-Direction is derived from `amount_hkd` and is not part of transaction identity.
+Direction uses `amount_hkd` when present, then the posted amount. It is not part
+of transaction identity.
 Human corrections, deterministic rules, and conservative structural matching
 may establish protected flows; reconciliation may establish owned-account
 transfers. Refunds and owned-account flows remain distinct, and Ollama cannot

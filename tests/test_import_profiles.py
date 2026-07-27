@@ -247,6 +247,8 @@ class MoxCreditCardPdfProfileTest(unittest.TestCase):
         self.assertEqual(rows[0]["posted_amount"], "-79.80")
         self.assertEqual(rows[0]["posted_currency"], "HKD")
         self.assertEqual(rows[0]["amount_hkd"], "-79.80")
+        self.assertEqual(rows[0]["valuation_source"], "statement_posted")
+        self.assertEqual(rows[0]["valuation_status"], "actual")
 
 
 class AccountSemanticsTest(unittest.TestCase):

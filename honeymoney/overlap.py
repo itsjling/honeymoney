@@ -34,7 +34,15 @@ from honeymoney.overlap_contracts import (
     OverlapWarning,
 )
 from honeymoney.reconciliation import derive_flow_type
+from honeymoney.review_state import (
+    REVIEW_REASON_ACCOUNTING_FLOW,
+    REVIEW_REASON_CATEGORY,
+    REVIEW_REASON_IDENTITY,
+    set_review_reason,
+    synchronize_review_state,
+)
 from honeymoney.schema import CATEGORIZED_COLUMNS
+from honeymoney.valuation import VALUATION_SOURCE_MATCHED_EXCHANGE
 
 OVERLAP_MANIFEST_SCHEMA_VERSION = 2
 OVERLAP_MANIFEST_NAME = ".honeymoney-overlap-manifest.json"
@@ -117,6 +125,7 @@ _MUTABLE_FIELDS = (
     "payment_method",
     "confidence",
     "needs_review",
+    "review_reasons",
     "reason",
     "flags",
     "notes",
@@ -266,6 +275,7 @@ def validate_overlap_agreement(
         if any(
             str(actual.get(field, "")) != expected_row[field]
             for field in _IMMUTABLE_SOURCE_FIELDS
+            if field != "amount_hkd"
         ):
             raise ValueError("overlap_manifest_invalid")
         if any(
@@ -559,7 +569,7 @@ def apply_history_ambiguity(
             flags.append(OVERLAP_HISTORY_FLAG)
         row["flags"] = ";".join(flags)
         row["reason"] = _append_reason(row.get("reason", ""), OVERLAP_HISTORY_REASON)
-        row["needs_review"] = "true"
+        set_review_reason(row, REVIEW_REASON_IDENTITY, True)
 
 
 def clear_history_ambiguity(
@@ -576,6 +586,7 @@ def clear_history_ambiguity(
             if item and item != OVERLAP_HISTORY_FLAG
         )
         row["reason"] = _remove_reason(row.get("reason", ""), OVERLAP_HISTORY_REASON)
+        set_review_reason(row, REVIEW_REASON_IDENTITY, False)
 
 
 def enforce_overlap_review(
@@ -597,7 +608,7 @@ def enforce_overlap_review(
             resolved=row.get("canonical_group_id") in resolved_group_ids,
         )
         if OVERLAP_HISTORY_FLAG in row.get("flags", "").split(";"):
-            row["needs_review"] = "true"
+            set_review_reason(row, REVIEW_REASON_IDENTITY, True)
 
 
 def release_overlap_review_ownership(rows: list[dict[str, str]]) -> None:
@@ -1091,6 +1102,8 @@ def _agreed_canonical_template(
     row["amount_hkd"] = _agreed_value(
         bucket, "amount_hkd", next(iter(amount_hkd_values))
     )
+    row["valuation_source"] = _agreed_value(bucket, "valuation_source", "")
+    row["valuation_status"] = _agreed_value(bucket, "valuation_status", "")
     for field in _DISPLAY_FIELDS:
         row[field] = _agreed_value(bucket, field, "")
 
@@ -1114,6 +1127,9 @@ def _agreed_canonical_template(
                 "payment_method": _agreed_value(bucket, "payment_method", "Unknown"),
                 "confidence": "0.00",
                 "needs_review": "true",
+                "review_reasons": (
+                    f"{REVIEW_REASON_CATEGORY};{REVIEW_REASON_ACCOUNTING_FLOW}"
+                ),
                 "reason": "Canonical occurrence requires review",
                 "flags": "uncategorized",
             }
@@ -1196,10 +1212,12 @@ def _apply_overlap_review(
             flags.append(OVERLAP_PRIOR_REVIEW_FLAG)
         flags.append(OVERLAP_AMBIGUITY_FLAG)
         reason = _append_reason(reason, OVERLAP_AMBIGUITY_REASON)
-        row["needs_review"] = "true"
+        set_review_reason(row, REVIEW_REASON_IDENTITY, True)
     elif had_ambiguity and "manual_correction" not in flags:
-        row["needs_review"] = (
-            "true" if prior_review or OVERLAP_HISTORY_FLAG in flags else "false"
+        set_review_reason(
+            row,
+            REVIEW_REASON_IDENTITY,
+            prior_review or OVERLAP_HISTORY_FLAG in flags,
         )
     row["flags"] = ";".join(dict.fromkeys(flags))
     row["reason"] = reason
@@ -1237,7 +1255,25 @@ def _validate_canonical_amount_hkd(
         canonical_amount = normalized_decimal(canonical_row.get("amount_hkd", ""))
     except IdentityError as error:
         raise ValueError("overlap_manifest_invalid") from error
-    if len(source_amounts) != 1 or canonical_amount not in source_amounts:
+    matched_exchange = (
+        canonical_row.get("valuation_source") == VALUATION_SOURCE_MATCHED_EXCHANGE
+        and bool(canonical_amount)
+        and all(
+            str(row.get("valuation_source", ""))
+            in {
+                "",
+                "missing",
+                "configured_dated_rate",
+                "configured_fixed_rate",
+            }
+            for row in source_occurrences
+            if has_stable_v2_identity(row)
+            and record_fingerprint(row) == group_fingerprint
+        )
+    )
+    if not matched_exchange and (
+        len(source_amounts) != 1 or canonical_amount not in source_amounts
+    ):
         raise ValueError("overlap_manifest_invalid")
 
 
@@ -1569,6 +1605,7 @@ def _project_correction(
         "reason",
         "notes",
         "needs_review",
+        "review_reasons",
     ):
         if field in patch:
             projected[field] = str(patch[field])
@@ -1583,6 +1620,7 @@ def _project_correction(
     if "manual_correction" not in flags:
         flags.append("manual_correction")
     projected["flags"] = ";".join(flags)
+    synchronize_review_state(projected)
     return projected
 
 

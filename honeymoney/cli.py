@@ -30,6 +30,7 @@ from honeymoney.classification_policy import (
     validate_category_policies,
 )
 from honeymoney.corrections import (
+    CORRECTION_COLUMNS,
     CORRECTION_FIELDS,
     apply_correction_operation,
     apply_corrections,
@@ -37,6 +38,7 @@ from honeymoney.corrections import (
     load_corrections,
     prepare_corrections_document,
     read_ledger,
+    review_state_correction_updates,
     to_review_row,
     validate_correction,
 )
@@ -79,10 +81,21 @@ from honeymoney.persistence import (
 )
 from honeymoney.reconciliation import (
     reconcile_ledger,
-    reconciliation_date_window,
     transaction_direction,
+    validate_reconciliation_config,
 )
 from honeymoney.report import build_report_html, missing_base_currency_count
+from honeymoney.review_state import (
+    REVIEW_REASON_ACCOUNTING_FLOW,
+    REVIEW_REASON_CATEGORY,
+    REVIEW_REASON_CATEGORY_SUGGESTION,
+    REVIEW_REASON_IDENTITY,
+    review_reason_labels,
+    review_reason_tokens,
+    review_summary,
+    set_review_reason,
+    synchronize_review_states,
+)
 from honeymoney.rules import (
     MANAGED_RULE_MARKER,
     apply_rules,
@@ -93,8 +106,13 @@ from honeymoney.schema import (
     ALLOWED_FLOW_TYPES,
     allowed_categories,
 )
+from honeymoney.valuation import (
+    validate_dated_rates,
+    valuation_summary,
+    value_transactions,
+)
 
-JSON_SCHEMA_VERSION = 1
+JSON_SCHEMA_VERSION = 2
 IDENTITY_MIGRATION_AMBIGUITY_FLAG = "identity_migration_ambiguous"
 PROFILE_PREVIEW_LIMIT = 10
 PROFILE_PREVIEW_FIELDS = [
@@ -103,8 +121,12 @@ PROFILE_PREVIEW_FIELDS = [
     "merchant",
     "original_amount",
     "original_currency",
+    "posted_amount",
+    "posted_currency",
     "source_page",
     "source_row",
+    "valuation_source",
+    "valuation_status",
 ]
 
 
@@ -525,6 +547,7 @@ def _run_pipeline(
         refresh_duplicate_candidates(ledger_rows, final_review_ids=final_review_ids)
         enforce_overlap_review(ledger_rows, overlap_result)
     _enforce_identity_review(ledger_rows)
+    synchronize_review_states(ledger_rows, legacy=False)
     review_rows = [row for row in transactions if row["needs_review"] == "true"]
     duplicate_count, duplicate_group_count, duplicate_candidates = (
         _duplicate_compatibility(overlap_result.diagnostic)
@@ -569,6 +592,8 @@ def _run_pipeline(
                 1 for row in ledger_rows if row.get("needs_review") == "true"
             ),
             "uncategorized_count": _uncategorized_count(ledger_rows),
+            "review_reason_counts": review_summary(ledger_rows),
+            "valuation": valuation_summary(ledger_rows),
         },
         "files": file_reports,
         "transaction_flags": _transaction_flags(ledger_rows),
@@ -599,6 +624,7 @@ def _run_pipeline(
             for transaction in categorized_interactively
         }
     )
+    correction_updates.update(review_state_correction_updates(corrections, ledger_rows))
     if config.get("corrections") and (correction_updates or removed_correction_ids):
         corrections_path, corrections_content, _ = prepare_corrections_document(
             config,
@@ -1251,6 +1277,7 @@ def _validate_config_document(config: dict[str, Any]) -> None:
             _validate_finite_number(
                 f"exchange_rates.{currency}", rate, minimum=Decimal("0"), exclusive=True
             )
+    validate_dated_rates(config)
 
     threshold = config.get("review_confidence_threshold")
     if threshold is not None:
@@ -1311,7 +1338,7 @@ def _validate_config_document(config: dict[str, Any]) -> None:
     if reconciliation is not None:
         if not isinstance(reconciliation, dict):
             raise ValueError("Config field reconciliation must be a JSON object")
-        reconciliation_date_window(config)
+    validate_reconciliation_config(config)
 
     categorization_memory = config.get("categorization_memory")
     if categorization_memory is not None:
@@ -2041,11 +2068,12 @@ def _accounting_decision_patch(
 ) -> dict[str, str]:
     if decision == "income" and transaction_direction(transaction) != "inflow":
         raise ValueError("Income can be confirmed only for a normalized inflow")
-    patch = {
-        "confidence": "1.00",
-        "reason": reason,
-        "needs_review": "false",
-    }
+    remaining_reasons = [
+        item
+        for item in review_reason_tokens(transaction.get("review_reasons", ""))
+        if item != REVIEW_REASON_ACCOUNTING_FLOW
+    ]
+    patch = {"confidence": "1.00", "reason": reason}
     mappings = {
         "income": {"category": "Income", "flow_type": "income"},
         "refund": {"flow_type": "refund"},
@@ -2062,9 +2090,19 @@ def _accounting_decision_patch(
             "flow_type": "investment_transfer",
         },
         "expense": {"flow_type": "expense"},
-        "unresolved": {"flow_type": "unresolved", "needs_review": "true"},
+        "unresolved": {"flow_type": "unresolved"},
     }
     patch.update(mappings[decision])
+    if "category" in patch:
+        remaining_reasons = [
+            item
+            for item in remaining_reasons
+            if item not in {REVIEW_REASON_CATEGORY, REVIEW_REASON_CATEGORY_SUGGESTION}
+        ]
+    if decision == "unresolved":
+        remaining_reasons.append(REVIEW_REASON_ACCOUNTING_FLOW)
+    patch["review_reasons"] = ";".join(dict.fromkeys(remaining_reasons))
+    patch["needs_review"] = str(bool(remaining_reasons)).lower()
     return patch
 
 
@@ -2087,16 +2125,18 @@ def _accounting_review_line(transaction: dict[str, str]) -> str:
     merchant_label = merchant
     if description and description != merchant:
         merchant_label += f" / {description}"
-    return "  ".join(
-        [
-            transaction.get("date", ""),
-            amount_label,
-            transaction.get("account", "") or transaction.get("account_id", ""),
-            merchant_label,
-            f"category={transaction.get('category', '')}",
-            f"flow={transaction.get('flow_type', '')}",
-        ]
-    )
+    parts = [
+        transaction.get("date", ""),
+        amount_label,
+        transaction.get("account", "") or transaction.get("account_id", ""),
+        merchant_label,
+        f"category={transaction.get('category', '')}",
+        f"flow={transaction.get('flow_type', '')}",
+    ]
+    labels = review_reason_labels(transaction.get("review_reasons", ""))
+    if labels:
+        parts.append("review=" + ", ".join(labels))
+    return "  ".join(parts)
 
 
 def _can_remember_income(transaction: dict[str, str]) -> bool:
@@ -2250,7 +2290,10 @@ def _overlap_diagnostic_for_rows(
     }
 
 
-def _normalize_loaded_rows(rows: list[dict[str, str]]) -> list[dict[str, str]]:
+def _normalize_loaded_rows(
+    rows: list[dict[str, str]],
+    config: Mapping[str, object] | None = None,
+) -> list[dict[str, str]]:
     normalized = [dict(row) for row in rows]
     for row in normalized:
         if not row.get("account_type") and not row.get("canonical_group_id"):
@@ -2259,6 +2302,9 @@ def _normalize_loaded_rows(rows: list[dict[str, str]]) -> list[dict[str, str]]:
                 "Credit Card": "credit_card",
                 "Brokerage": "investment",
             }.get(row.get("payment_method", ""), "unknown")
+    if config is not None:
+        value_transactions(normalized, config)
+    synchronize_review_states(normalized, legacy=True)
     return normalized
 
 
@@ -2326,7 +2372,7 @@ def _status_command(argv: list[str]) -> int:
     config = _load_config(args.config_path)
     categorized_path = Path(config["paths"]["output"])
     state = load_configured_identity_state(categorized_path, config)
-    ledger_rows = _normalize_loaded_rows(state.rows)
+    ledger_rows = _normalize_loaded_rows(state.rows, config)
     if not ledger_rows:
         if args.json:
             _emit_json(
@@ -2339,6 +2385,8 @@ def _status_command(argv: list[str]) -> int:
                     "categorized": 0,
                     "uncategorized": 0,
                     "needs_review": 0,
+                    "review_reason_counts": review_summary([]),
+                    "valuation": valuation_summary([]),
                     "source_occurrence_count": 0,
                     "canonical_occurrence_count": 0,
                     "consolidated_occurrence_count": 0,
@@ -2421,6 +2469,8 @@ def _status_command(argv: list[str]) -> int:
                 "categorized": len(categorized),
                 "uncategorized": len(rows) - len(categorized),
                 "needs_review": len(review),
+                "review_reason_counts": review_summary(rows),
+                "valuation": valuation_summary(rows),
                 "overlap": overlap,
                 "duplicate_count": duplicate_count,
                 "duplicate_group_count": duplicate_group_count,
@@ -2444,6 +2494,8 @@ def _status_command(argv: list[str]) -> int:
     print(f"  Categorized:          {len(categorized)}")
     print(f"  Uncategorized:        {len(rows) - len(categorized)}")
     print(f"  Needs review:         {len(review)}")
+    missing_valuation = valuation_summary(rows)["missing_count"]
+    print(f"  Missing HKD values:   {missing_valuation}")
     print(f"  Consolidated overlap: {len(source_rows) - len(rows)}")
     print(f"  Ambiguous groups:     {overlap['ambiguous_group_count']}")
     print(f"  Unresolved inflows:   {unresolved_inflows}")
@@ -2477,7 +2529,7 @@ def _report_command(argv: list[str]) -> int:
     config = _load_config(args.config_path)
     categorized_path = Path(config["paths"]["output"])
     state = load_configured_identity_state(categorized_path, config)
-    ledger_rows = _normalize_loaded_rows(state.rows)
+    ledger_rows = _normalize_loaded_rows(state.rows, config)
     current_overlap = (
         None
         if state.canonical_migration_required
@@ -2523,6 +2575,8 @@ def _report_command(argv: list[str]) -> int:
                 "period": {"start": start.isoformat(), "end": end.isoformat()},
                 "transaction_count": len(rows),
                 "missing_base_currency_count": missing_base_currency_count(rows),
+                "valuation": valuation_summary(rows),
+                "review_reason_counts": review_summary(rows),
                 "overlap": period_overlap,
                 "duplicate_count": duplicate_count,
                 "duplicate_group_count": duplicate_group_count,
@@ -2562,14 +2616,14 @@ def _reconcile_command(argv: list[str]) -> int:
         overlap_result = canonicalize_overlaps(
             state.source_rows, [], state.overlap_manifest
         )
-        rows = _normalize_loaded_rows(overlap_result.rows)
+        rows = _normalize_loaded_rows(overlap_result.rows, config)
         correction_projection = project_corrections(
             overlap_result, load_corrections(config)
         )
         apply_corrections(rows, correction_projection.corrections)
         apply_history_ambiguity(rows, correction_projection.ambiguous_transaction_ids)
     else:
-        rows = _normalize_loaded_rows(state.rows)
+        rows = _normalize_loaded_rows(state.rows, config)
         overlap_result = (
             None
             if state.canonical_migration_required
@@ -2584,12 +2638,22 @@ def _reconcile_command(argv: list[str]) -> int:
             state.source_rows, rows, overlap_result.manifest
         )
         rows = overlap_result.rows
+        summary = reconcile_ledger(rows, config, statement_rows=state.source_rows)
+        enforce_overlap_review(rows, overlap_result)
     overlap_diagnostic = (
         _unmigrated_overlap(rows)
         if overlap_result is None
         else overlap_result.diagnostic
     )
     if not args.dry_run:
+        correction_document: tuple[Path, str] | None = None
+        if config.get("corrections"):
+            correction_updates = review_state_correction_updates(corrections, rows)
+            correction_path, correction_content, _ = prepare_corrections_document(
+                config,
+                correction_updates,
+            )
+            correction_document = (correction_path, correction_content)
         _write_ledger_outputs(
             categorized_path,
             rows,
@@ -2603,6 +2667,7 @@ def _reconcile_command(argv: list[str]) -> int:
             ),
             overlap_result=overlap_result,
             identity_manifest_document=state.manifest_document,
+            correction_document=correction_document,
         )
 
     artifacts = {"categorized_csv": str(categorized_path.resolve())}
@@ -2658,7 +2723,7 @@ def _pending_command(argv: list[str]) -> int:
     config = _load_config(args.config_path)
     categorized_path = Path(config["paths"]["output"])
     state = load_configured_identity_state(categorized_path, config)
-    ledger_rows = _normalize_loaded_rows(state.rows)
+    ledger_rows = _normalize_loaded_rows(state.rows, config)
     refresh_duplicate_candidates(
         ledger_rows,
         final_review_ids=_final_review_ids(load_corrections(config)),
@@ -2671,7 +2736,10 @@ def _pending_command(argv: list[str]) -> int:
         )
     )
     pending_rows = [
-        to_review_row(row)
+        {
+            **to_review_row(row),
+            "review_reason_labels": review_reason_labels(row.get("review_reasons", "")),
+        }
         for row in _rows_in_period(ledger_rows, start, end)
         if row.get("needs_review") == "true"
     ]
@@ -2695,6 +2763,7 @@ def _pending_command(argv: list[str]) -> int:
                 "period": {"start": start.isoformat(), "end": end.isoformat()},
                 "count": len(pending_rows),
                 "transactions": pending_rows,
+                "review_reason_counts": review_summary(pending_rows),
                 "overlap": pending_overlap,
                 "duplicate_count": duplicate_count,
                 "duplicate_group_count": duplicate_group_count,
@@ -2721,7 +2790,10 @@ def _pending_command(argv: list[str]) -> int:
     if pending_overlap["ambiguous_group_count"]:
         print(f"  Ambiguous overlap groups: {pending_overlap['ambiguous_group_count']}")
     for row in pending_rows:
-        print(f"  {row['transaction_id']}  {row['date']}  {row['merchant']}")
+        labels = ", ".join(row["review_reason_labels"])
+        print(
+            f"  {row['transaction_id']}  {row['date']}  {row['merchant']}  [{labels}]"
+        )
     return 0
 
 
@@ -2964,20 +3036,21 @@ def _write_ledger_outputs(
     overlap_manifest: dict[str, object] | None = None,
     overlap_result: CanonicalizationResult | None = None,
     identity_manifest_document: str | None = None,
+    correction_document: tuple[Path, str] | None = None,
 ) -> None:
     refresh_duplicate_candidates(ledger_rows, final_review_ids=final_review_ids)
     enforce_overlap_review(ledger_rows, overlap_result)
-    persist_generation(
+    documents = ledger_output_documents(
         categorized_path,
-        ledger_output_documents(
-            categorized_path,
-            ledger_rows,
-            source_occurrences=source_rows,
-            source_evidence=source_evidence,
-            overlap_manifest=overlap_manifest,
-            identity_manifest_document=identity_manifest_document,
-        ),
+        ledger_rows,
+        source_occurrences=source_rows,
+        source_evidence=source_evidence,
+        overlap_manifest=overlap_manifest,
+        identity_manifest_document=identity_manifest_document,
     )
+    if correction_document is not None:
+        documents[correction_document[0]] = correction_document[1]
+    persist_generation(categorized_path, documents)
 
 
 def _active_source_ids_by_fingerprint(
@@ -3122,6 +3195,9 @@ def _transaction_prompt_line(transaction: dict[str, str]) -> str:
     parts = [transaction.get("date", ""), f"{amount} {currency}".strip(), name]
     if description and description != name:
         parts.append(description)
+    labels = review_reason_labels(transaction.get("review_reasons", ""))
+    if labels:
+        parts.append("Review: " + ", ".join(labels))
     return "  ".join(part for part in parts if part)
 
 
@@ -3183,7 +3259,7 @@ def _write_starter_workspace(root: Path, force: bool) -> None:
     _write_json_file(rules_path, _starter_rules(), force)
     _write_text_file(
         corrections_path,
-        "transaction_id,category,flow_type,owner,payment_method,confidence,reason,notes,needs_review\n",
+        ",".join(CORRECTION_COLUMNS) + "\n",
         force,
     )
     _write_json_file(
@@ -3369,9 +3445,18 @@ def _transaction_diagnostics(
             continue
         diagnostics[transaction["transaction_id"]] = {
             "needs_review": transaction.get("needs_review") == "true",
+            "review_reasons": transaction.get("review_reasons", "").split(";")
+            if transaction.get("review_reasons")
+            else [],
+            "review_reason_labels": review_reason_labels(
+                transaction.get("review_reasons", "")
+            ),
             "reason": transaction.get("reason", ""),
             "category": transaction.get("category", ""),
             "owner": transaction.get("owner", ""),
+            "amount_hkd": transaction.get("amount_hkd", ""),
+            "valuation_source": transaction.get("valuation_source", ""),
+            "valuation_status": transaction.get("valuation_status", ""),
         }
     return diagnostics
 
@@ -3382,7 +3467,7 @@ def _enforce_identity_review(transactions: list[dict[str, str]]) -> None:
         if IDENTITY_MIGRATION_AMBIGUITY_FLAG not in flags:
             continue
         release_duplicate_review_ownership(transaction)
-        transaction["needs_review"] = "true"
+        set_review_reason(transaction, REVIEW_REASON_IDENTITY, True)
         transaction["reason"] = (
             "Identity migration is ambiguous; explicit resolution is required"
         )

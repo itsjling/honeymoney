@@ -516,7 +516,8 @@ _PAGE_TEMPLATE = """<!doctype html>
     var headRow = thead.insertRow();
     [
       ["Date", ""], ["Merchant", ""], ["Category", ""],
-      ["Amount (HKD)", "amt"], ["Account", "col-account"], ["Owner", "col-owner"]
+      ["Original", "amt"], ["Amount (HKD)", "amt"], ["Valuation", ""],
+      ["Account", "col-account"], ["Owner", "col-owner"]
     ].forEach(function (col) {
       var th = document.createElement("th");
       th.textContent = col[0];
@@ -527,7 +528,7 @@ _PAGE_TEMPLATE = """<!doctype html>
     if (!rows.length) {
       var er = tbody.insertRow();
       var ec = er.insertCell();
-      ec.colSpan = 6;
+      ec.colSpan = 8;
       ec.className = "empty";
       ec.textContent = "No transactions recorded in this view.";
       return;
@@ -554,7 +555,8 @@ _PAGE_TEMPLATE = """<!doctype html>
         if (row.needs_review) {
           var rv = document.createElement("span");
           rv.className = "review";
-          rv.textContent = "review";
+          rv.textContent = "review: " + row.review_reason_labels.join(", ");
+          rv.title = row.review_reason_labels.join(", ");
           wrap.appendChild(rv);
         }
         if (row.provenance_status && row.provenance_status !== "single_source") {
@@ -567,9 +569,18 @@ _PAGE_TEMPLATE = """<!doctype html>
         }
         catCell.appendChild(wrap);
 
+        var originalCell = tr.insertCell();
+        originalCell.className = "amt";
+        originalCell.textContent = row.original_amount +
+          (row.original_currency ? " " + row.original_currency : "");
+
         var amtCell = tr.insertCell();
         amtCell.className = "amt " + (row.amount === null ? "na" : signClass(row.amount));
         amtCell.textContent = fmt(row.amount);
+
+        var valuationCell = tr.insertCell();
+        valuationCell.textContent = row.valuation_label;
+        valuationCell.title = row.valuation_source;
 
         cell(tr, "account col-account", row.account, row.account);
         cell(tr, "owner col-owner", row.owner, row.owner);
@@ -612,7 +623,7 @@ def build_report_html(
         '<p class="warning" role="alert">'
         f"{missing_count} "
         f"{'row is' if missing_count == 1 else 'rows are'} omitted from period "
-        "totals because base-currency conversion is missing.</p>"
+        "totals because HKD valuation is missing.</p>"
         if missing_count
         else ""
     )
@@ -644,15 +655,45 @@ def _report_row(row: dict[str, str]) -> dict[str, object]:
         "category": row.get("category", ""),
         "flow_type": row.get("flow_type", "unresolved"),
         "amount": _amount_value(row.get("amount_hkd", "")),
+        "original_amount": row.get("original_amount", "")
+        or row.get("posted_amount", ""),
+        "original_currency": row.get("original_currency", "")
+        or row.get("posted_currency", ""),
+        "valuation_source": row.get("valuation_source", ""),
+        "valuation_status": row.get("valuation_status", ""),
+        "valuation_label": _valuation_label(row),
         "account": row.get("account", ""),
         "owner": row.get("owner", ""),
         "needs_review": row.get("needs_review") == "true",
+        "review_reasons": [
+            item for item in row.get("review_reasons", "").split(";") if item
+        ],
+        "review_reason_labels": _review_labels(row.get("review_reasons", "")),
         "transaction_id": row.get("transaction_id", ""),
         "canonical_group_id": row.get("canonical_group_id", ""),
         "canonical_slot": row.get("canonical_slot", ""),
         "provenance_status": row.get("provenance_status", ""),
         "source_occurrence_count": row.get("source_occurrence_count", ""),
     }
+
+
+def _valuation_label(row: dict[str, str]) -> str:
+    status = row.get("valuation_status", "") or "missing"
+    source = row.get("valuation_source", "") or "missing"
+    labels = {
+        "statement_posted": "Statement-posted",
+        "matched_exchange_leg": "Matched exchange leg",
+        "configured_dated_rate": "Dated rate estimate",
+        "configured_fixed_rate": "Fixed rate estimate",
+        "missing": "Missing",
+    }
+    return f"{labels.get(source, source)} ({status})"
+
+
+def _review_labels(value: str) -> list[str]:
+    from honeymoney.review_state import review_reason_labels
+
+    return review_reason_labels(value)
 
 
 def _amount_value(value: str) -> float | None:

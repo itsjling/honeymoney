@@ -21,6 +21,11 @@ from honeymoney.duplicates import (
     DUPLICATE_FLAG,
     release_duplicate_review_ownership,
 )
+from honeymoney.review_state import (
+    REVIEW_REASON_CATEGORY,
+    REVIEW_REASON_CATEGORY_SUGGESTION,
+    set_review_reason,
+)
 from honeymoney.schema import allowed_categories
 
 _TICK_INTERVAL_SECONDS = 1.0
@@ -746,6 +751,8 @@ def _ollama_transaction_payload(transaction: dict[str, str]) -> dict[str, str]:
         "posted_amount": transaction["posted_amount"],
         "posted_currency": transaction["posted_currency"],
         "amount_hkd": transaction["amount_hkd"],
+        "valuation_source": transaction.get("valuation_source", ""),
+        "valuation_status": transaction.get("valuation_status", ""),
         "institution": transaction["institution"],
         "payment_method": transaction["payment_method"],
     }
@@ -855,8 +862,11 @@ def _apply_ollama_response(
             transaction, category, confidence, config
         ):
             release_duplicate_review_ownership(transaction)
-        transaction["needs_review"] = (
-            "false" if outcome.outcome == "accepted" else "true"
+        set_review_reason(transaction, REVIEW_REASON_CATEGORY, False)
+        set_review_reason(
+            transaction,
+            REVIEW_REASON_CATEGORY_SUGGESTION,
+            outcome.outcome == "reviewable",
         )
         counts[outcome.outcome] += 1
 

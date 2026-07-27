@@ -225,8 +225,8 @@ class CashFlowWorkflowTest(unittest.TestCase):
             )
             report = (root / "output" / "report.html").read_text(encoding="utf-8")
             self.assertIn(
-                "2 rows are omitted from period totals because base-currency "
-                "conversion is missing.",
+                "2 rows are omitted from period totals because HKD valuation "
+                "is missing.",
                 report,
             )
 
@@ -474,7 +474,7 @@ class CashFlowWorkflowTest(unittest.TestCase):
             for row in rows.values():
                 self.assertNotIn("reconciliation_ambiguous", row["flags"])
                 self.assertNotIn("Ambiguous transfer candidates", row["reason"])
-            self.assertEqual(rows["txn_out"]["needs_review"], "true")
+            self.assertEqual(rows["txn_out"]["needs_review"], "false")
             self.assertEqual(rows["txn_out"]["flags"], "")
             self.assertEqual(rows["txn_out"]["reason"], "")
             self.assertEqual(rows["txn_unique_in"]["needs_review"], "false")
@@ -483,10 +483,7 @@ class CashFlowWorkflowTest(unittest.TestCase):
                 newline="", encoding="utf-8"
             ) as fh:
                 review_rows = list(csv.DictReader(fh))
-            self.assertEqual(
-                [row["transaction_id"] for row in review_rows],
-                [self._legacy_id("txn_out")],
-            )
+            self.assertEqual(review_rows, [])
 
     def test_equal_salary_and_expense_are_not_hidden_as_transfer(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

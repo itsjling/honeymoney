@@ -37,6 +37,17 @@ from honeymoney.overlap import (
 from honeymoney.overlap_contracts import OverlapManifest
 from honeymoney.persistence import persist_generation
 from honeymoney.reconciliation import reconcile_ledger
+from honeymoney.review_state import (
+    REVIEW_REASON_CATEGORY,
+    REVIEW_REASON_CATEGORY_SUGGESTION,
+    replace_review_reasons,
+    review_reason_labels,
+    review_reason_tokens,
+    set_review_reason,
+    synchronize_review_state,
+    synchronize_review_states,
+    validate_review_reason_value,
+)
 from honeymoney.rules import validate_rules
 from honeymoney.schema import (
     ALLOWED_FLOW_TYPES,
@@ -57,6 +68,7 @@ CORRECTION_FIELDS = [
     "reason",
     "notes",
     "needs_review",
+    "review_reasons",
 ]
 CORRECTION_COLUMNS = ["transaction_id", *CORRECTION_FIELDS]
 
@@ -100,6 +112,10 @@ def load_corrections(config: Config) -> dict[str, dict[str, str]]:
                 (row_index, "notes") in artifact.encoded_cells,
             )
         if meaningful:
+            if meaningful.get("review_reasons"):
+                meaningful["needs_review"] = str(
+                    bool(review_reason_tokens(meaningful["review_reasons"]))
+                ).lower()
             validate_correction(transaction_id, meaningful, config)
             corrections[transaction_id] = meaningful
     return corrections
@@ -165,6 +181,14 @@ def validate_correction(
             f"Unsupported needs_review in correction {transaction_id}: "
             f"{correction['needs_review']}"
         )
+    if correction.get("review_reasons"):
+        try:
+            validate_review_reason_value(correction["review_reasons"])
+        except ValueError as error:
+            raise ValueError(
+                f"Unsupported review_reasons in correction {transaction_id}: "
+                f"{correction['review_reasons']}"
+            ) from error
 
 
 def apply_corrections(
@@ -183,6 +207,7 @@ def apply_corrections(
             "confidence",
             "reason",
             "notes",
+            "review_reasons",
         ]:
             if field in correction:
                 transaction[field] = correction[field]
@@ -193,10 +218,22 @@ def apply_corrections(
         if "needs_review" in correction:
             release_duplicate_review_ownership(transaction)
             transaction["needs_review"] = correction["needs_review"].casefold()
+        if "category" in correction and correction["category"] not in {"", "Unknown"}:
+            transaction["flags"] = _remove_flag(
+                transaction.get("flags", ""), "uncategorized"
+            )
+            set_review_reason(transaction, REVIEW_REASON_CATEGORY, False)
+            set_review_reason(transaction, REVIEW_REASON_CATEGORY_SUGGESTION, False)
         clear_history_ambiguity([transaction], {transaction["transaction_id"]})
         transaction["flags"] = _append_flag(
             transaction.get("flags", ""), "manual_correction"
         )
+        if "review_reasons" in correction:
+            replace_review_reasons(
+                transaction,
+                review_reason_tokens(correction["review_reasons"]),
+            )
+        synchronize_review_state(transaction)
 
 
 def prepare_corrections_document(
@@ -226,6 +263,30 @@ def prepare_corrections_document(
     )
 
 
+def review_state_correction_updates(
+    corrections: Mapping[str, Mapping[str, str]],
+    ledger_rows: list[dict[str, str]],
+) -> dict[str, dict[str, str]]:
+    """Return the review-state fields that differ from the repaired ledger."""
+    by_id = {row.get("transaction_id", ""): row for row in ledger_rows}
+    updates: dict[str, dict[str, str]] = {}
+    for transaction_id, correction in corrections.items():
+        row = by_id.get(transaction_id)
+        if row is None:
+            continue
+        needs_review = row.get("needs_review", "false")
+        review_reasons = row.get("review_reasons", "")
+        if (
+            correction.get("needs_review", "") != needs_review
+            or correction.get("review_reasons", "") != review_reasons
+        ):
+            updates[transaction_id] = {
+                "needs_review": needs_review,
+                "review_reasons": review_reasons,
+            }
+    return updates
+
+
 def ledger_output_documents(
     categorized_path: Path,
     ledger_rows: list[dict[str, str]],
@@ -238,6 +299,7 @@ def ledger_output_documents(
     overlap_manifest_document_value: str | None = None,
 ) -> dict[Path, str]:
     """Build public and hidden artifacts for one canonical generation."""
+    synchronize_review_states(ledger_rows, legacy=True)
     if identity_manifest is not None and identity_manifest_document is not None:
         raise ValueError("Pass either an identity manifest or its document, not both")
     if overlap_manifest is not None and overlap_manifest_document_value is not None:
@@ -618,11 +680,15 @@ def _normalize_ledger_rows(state: IdentityState) -> list[dict[str, str]]:
                 "Credit Card": "credit_card",
                 "Brokerage": "investment",
             }.get(row.get("payment_method", ""), "unknown")
+    synchronize_review_states(rows, legacy=True)
     return rows
 
 
 def to_review_row(row: dict[str, str]) -> dict[str, str]:
     review_row = {column: row.get(column, "") for column in REVIEW_NEEDED_COLUMNS}
+    review_row["review_reason_labels"] = "; ".join(
+        review_reason_labels(row.get("review_reasons", ""))
+    )
     review_row["suggested_category"] = row.get("category", "")
     review_row["suggested_flow_type"] = row.get("flow_type", "")
     review_row["suggested_owner"] = row.get("owner", "")
@@ -639,3 +705,7 @@ def _append_flag(existing: str, flag: str) -> str:
     if flag not in flags:
         flags.append(flag)
     return ";".join(flags)
+
+
+def _remove_flag(existing: str, flag: str) -> str:
+    return ";".join(item for item in existing.split(";") if item and item != flag)
