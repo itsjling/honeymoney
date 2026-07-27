@@ -31,8 +31,10 @@ def _normalized_row(
     ).upper()
     invalid_amount_columns: list[str] = []
     original_amount = _signed_amount(source_row, columns, invalid_amount_columns)
+    explicit_posted_amount = _value(source_row, columns.get("posted_amount"))
     posted_currency = (
         _value(source_row, columns.get("posted_currency"))
+        or (str(profile.get("account_currency", "")) if explicit_posted_amount else "")
         or original_currency
         or str(profile.get("account_currency", ""))
     ).upper()

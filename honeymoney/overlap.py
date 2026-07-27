@@ -145,6 +145,15 @@ class CorrectionProjection:
 
 
 @dataclass(frozen=True)
+class MigrationCorrectionProjection:
+    """Final canonical corrections after a proven source-record rekey."""
+
+    corrections: dict[str, dict[str, str]]
+    ambiguous_transaction_ids: tuple[str, ...]
+    removed_transaction_ids: tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class DuplicateResolution:
     """One validated duplicate decision and its canonical result."""
 
@@ -317,6 +326,95 @@ def project_corrections(
             continue
         ambiguous.update(unprojected_ids)
     return CorrectionProjection(projected, tuple(sorted(ambiguous)))
+
+
+def project_migration_corrections(
+    result: CanonicalizationResult,
+    prior_source_rows: Sequence[Mapping[str, object]],
+    next_source_rows: Sequence[Mapping[str, object]],
+    source_corrections: Mapping[str, Mapping[str, str]],
+    current_corrections: Mapping[str, Mapping[str, str]],
+) -> MigrationCorrectionProjection:
+    """Carry review history across a unique parser-driven source rekey."""
+    prior_by_key = _migration_rows_by_key(prior_source_rows)
+    next_by_key = _migration_rows_by_key(next_source_rows)
+    next_aliases: dict[str, dict[str, str]] = {}
+    ambiguous_occurrence_ids: set[str] = set()
+
+    for key in sorted(set(prior_by_key) & set(next_by_key)):
+        prior_rows = prior_by_key[key]
+        next_rows = next_by_key[key]
+        patches = [
+            {
+                str(field): str(value)
+                for field, value in source_corrections[identifier].items()
+            }
+            for row in prior_rows
+            if (identifier := str(row.get("transaction_id", ""))) in source_corrections
+        ]
+        if not patches:
+            continue
+        unique_patches = {tuple(sorted(patch.items())): patch for patch in patches}
+        if (
+            len(prior_rows) == len(next_rows)
+            and len(patches) == len(prior_rows)
+            and len(unique_patches) == 1
+        ):
+            patch = next(iter(unique_patches.values()))
+            for row in next_rows:
+                next_aliases[str(row.get("transaction_id", ""))] = dict(patch)
+            continue
+        ambiguous_occurrence_ids.update(
+            str(row.get("transaction_id", "")) for row in next_rows
+        )
+
+    projected = project_corrections(
+        result,
+        {**current_corrections, **next_aliases},
+    )
+    ambiguous_canonical_ids = set(projected.ambiguous_transaction_ids)
+    for group in result.diagnostic["groups"]:
+        occurrence_ids = {
+            str(identifier)
+            for pool in group["source_occurrence_pools"]
+            for identifier in pool
+        }
+        if occurrence_ids & ambiguous_occurrence_ids:
+            ambiguous_canonical_ids.update(
+                str(identifier) for identifier in group["canonical_transaction_ids"]
+            )
+    prior_ids = {
+        str(row.get("transaction_id", ""))
+        for row in prior_source_rows
+        if row.get("transaction_id")
+    }
+    return MigrationCorrectionProjection(
+        projected.corrections,
+        tuple(sorted(ambiguous_canonical_ids)),
+        tuple(sorted(prior_ids & set(source_corrections))),
+    )
+
+
+def _migration_rows_by_key(
+    rows: Sequence[Mapping[str, object]],
+) -> dict[tuple[str, ...], list[Mapping[str, object]]]:
+    grouped: dict[tuple[str, ...], list[Mapping[str, object]]] = {}
+    for row in rows:
+        if not has_stable_v2_identity(row):
+            continue
+        identity = normalized_record_identity(row)
+        key = (
+            str(row.get("source_id", "")),
+            identity["date"],
+            identity["transaction_date"],
+            identity["posting_date"],
+            identity["original_amount"],
+            identity["posted_amount"],
+            identity["merchant"],
+            identity["original_description"],
+        )
+        grouped.setdefault(key, []).append(row)
+    return grouped
 
 
 def apply_history_ambiguity(

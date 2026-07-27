@@ -3246,6 +3246,7 @@ class CliBootstrapTest(unittest.TestCase):
                             "enabled": True,
                             "url": "http://localhost:11434/api/generate",
                             "model": "qwen2.5:7b-instruct",
+                            "calibrated_acceptance_threshold": 0.8,
                         },
                     }
                 ),
@@ -3383,6 +3384,7 @@ class CliBootstrapTest(unittest.TestCase):
                             "enabled": True,
                             "url": "http://localhost:11434/api/generate",
                             "model": "synthetic",
+                            "calibrated_acceptance_threshold": 0.8,
                         },
                     }
                 ),

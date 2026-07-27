@@ -229,23 +229,34 @@ def evaluate_model_suggestion(
             "rejected", f"Ollama policy rejected category {category}"
         )
     amount = _amount(row)
+    calibrated_threshold = _calibrated_threshold(config)
     if (
         amount is None
         or amount == 0
         or amount >= 0
         or row.get("owner") in {"", "Unknown"}
         or "duplicate_suspected" in set(filter(None, row.get("flags", "").split(";")))
-        or confidence < _threshold(config)
+        or calibrated_threshold is None
+        or confidence < calibrated_threshold
     ):
         return ModelSuggestion("reviewable")
     return ModelSuggestion("accepted")
 
 
-def _threshold(config: Config) -> Decimal:
+def _calibrated_threshold(config: Config) -> Decimal | None:
+    ollama = config.get("ollama", {})
+    if not isinstance(ollama, Mapping):
+        return None
+    value = ollama.get("calibrated_acceptance_threshold")
+    if value is None:
+        return None
     try:
-        return Decimal(str(config.get("review_confidence_threshold", 0.8)))
+        threshold = Decimal(str(value))
     except InvalidOperation:
-        return Decimal("0.8")
+        return None
+    if not threshold.is_finite() or threshold < 0 or threshold > 1:
+        return None
+    return threshold
 
 
 def _amount(row: dict[str, str]) -> Decimal | None:

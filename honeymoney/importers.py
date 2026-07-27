@@ -395,6 +395,7 @@ def _validate_pdf_balance_mappings(profile_id: str, settings: dict[str, Any]) ->
         "currency_group",
         "opening_regex",
         "closing_regex",
+        "closing_requires_opening",
     }
     for index, mapping in enumerate(mappings):
         mapping_field = f"{field}[{index}]"
@@ -407,6 +408,13 @@ def _validate_pdf_balance_mappings(profile_id: str, settings: dict[str, Any]) ->
             raise ValueError(
                 f"Profile {profile_id} field {mapping_field} has unsupported fields: "
                 + ", ".join(unknown)
+            )
+        if "closing_requires_opening" in mapping and not isinstance(
+            mapping["closing_requires_opening"], bool
+        ):
+            raise ValueError(
+                f"Profile {profile_id} field {mapping_field}."
+                "closing_requires_opening must be a boolean"
             )
         compiled: dict[str, re.Pattern[str]] = {}
         for regex_field in ("opening_regex", "closing_regex"):
@@ -1409,13 +1417,24 @@ def _pdf_balance_observations(
                         if match is None:
                             continue
                         target = _pdf_balance_target(mapping, accounts, match)
+                        target_candidates = observations.setdefault(
+                            target, {"opening": [], "closing": []}
+                        )
+                        if (
+                            kind == "closing"
+                            and mapping.get("closing_requires_opening", False)
+                            and (
+                                not target_candidates["opening"]
+                                or target_candidates["closing"]
+                            )
+                        ):
+                            continue
                         balance = _strict_pdf_balance(
-                            match.group("balance"),
+                            match.groupdict().get("balance")
+                            or match.groupdict().get("total_balance"),
                             match.groupdict().get("balance_sign"),
                         )
-                        observations.setdefault(target, {"opening": [], "closing": []})[
-                            kind
-                        ].append(
+                        target_candidates[kind].append(
                             _PdfBalanceCandidate(
                                 page_number,
                                 line_number,
@@ -1801,9 +1820,7 @@ def _pdf_sectioned_word_source_rows(
                 in_table
                 and (date_match is not None or deposits or withdrawals or description)
             )
-            matched_section = (
-                "" if has_transaction_shape else _pdf_matching_section(folded, accounts)
-            )
+            matched_section = _pdf_exact_matching_section(folded, accounts)
             matched_account = accounts.get(matched_section)
             if isinstance(matched_account, dict):
                 current_account = {
@@ -1968,6 +1985,22 @@ def _pdf_matching_section(text: str, accounts: dict[str, Any]) -> str:
             str(section)
             for section in accounts
             if " ".join(str(section).casefold().split()) in normalized_text
+        ),
+        "",
+    )
+
+
+def _pdf_exact_matching_section(text: str, accounts: dict[str, Any]) -> str:
+    normalized_text = " ".join(text.casefold().split())
+    return next(
+        (
+            str(section)
+            for section in accounts
+            if normalized_text
+            in {
+                " ".join(str(section).casefold().split()),
+                f"account: {' '.join(str(section).casefold().split())}",
+            }
         ),
         "",
     )

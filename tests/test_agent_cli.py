@@ -116,6 +116,81 @@ class AgentCliTest(unittest.TestCase):
             self.assertEqual(payload["errors"], [])
             self.assertEqual(result.stdout.count("\n"), 1)
 
+    def test_evaluate_json_reports_aggregate_accuracy_without_transaction_text(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            candidate = root / "candidate.csv"
+            reference = root / "reference.csv"
+            candidate.write_text(
+                "transaction_id,category,merchant,original_description\n"
+                "txn_1,Dining,PRIVATE ONE,PRIVATE TEXT ONE\n"
+                "txn_2,Shopping,PRIVATE TWO,PRIVATE TEXT TWO\n"
+                "txn_3,Unknown,PRIVATE THREE,PRIVATE TEXT THREE\n",
+                encoding="utf-8",
+            )
+            reference.write_text(
+                "transaction_id,category\n"
+                "txn_1,Dining\n"
+                "txn_2,Groceries\n"
+                "txn_3,Transport\n"
+                "txn_4,Health\n",
+                encoding="utf-8",
+            )
+
+            result = self._run_cli(
+                [
+                    "evaluate",
+                    str(candidate),
+                    "--reference",
+                    str(reference),
+                    "--json",
+                ],
+                cwd=root,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            payload = self._json(result)
+            self.assertEqual(payload["command"], "evaluate")
+            self.assertEqual(
+                payload["data"],
+                {
+                    "reference_count": 4,
+                    "candidate_count": 3,
+                    "covered_count": 2,
+                    "coverage": 0.5,
+                    "correct_count": 1,
+                    "exact_category_accuracy": 0.25,
+                    "covered_category_accuracy": 0.5,
+                    "unresolved_count": 1,
+                    "missing_candidate_count": 1,
+                    "confusion_counts": [
+                        {
+                            "reference_category": "Dining",
+                            "candidate_category": "Dining",
+                            "count": 1,
+                        },
+                        {
+                            "reference_category": "Groceries",
+                            "candidate_category": "Shopping",
+                            "count": 1,
+                        },
+                        {
+                            "reference_category": "Health",
+                            "candidate_category": "Missing",
+                            "count": 1,
+                        },
+                        {
+                            "reference_category": "Transport",
+                            "candidate_category": "Unknown",
+                            "count": 1,
+                        },
+                    ],
+                },
+            )
+            self.assertNotIn("PRIVATE", result.stdout)
+
     def test_profile_validate_text_and_pdf_json_are_read_only(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = self._setup_workspace(tmp)

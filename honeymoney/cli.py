@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import calendar
+import csv
 import hashlib
 import json
 import os
@@ -39,6 +40,7 @@ from honeymoney.corrections import (
     to_review_row,
     validate_correction,
 )
+from honeymoney.csv_artifacts import canonical_csv_cell
 from honeymoney.duplicates import (
     DUPLICATE_MATCH_TYPE,
     refresh_duplicate_candidates,
@@ -64,6 +66,7 @@ from honeymoney.overlap import (
     enforce_overlap_review,
     list_duplicate_groups,
     project_corrections,
+    project_migration_corrections,
     release_overlap_review_ownership,
     resolve_duplicate_group,
 )
@@ -193,6 +196,8 @@ def main(argv: list[str] | None = None) -> int:
         return _import_command(argv[1:])
     if argv and argv[0] == "profile":
         return _profile_command(argv[1:])
+    if argv and argv[0] == "evaluate":
+        return _evaluate_command(argv[1:])
     if argv and argv[0] == "status":
         return _status_command(argv[1:])
     if argv and argv[0] == "pending":
@@ -251,6 +256,7 @@ def _run_pipeline(
     profile_mappings = importers._load_profile_mappings(config)
     identity_state = load_configured_identity_state(categorized_path, config)
     corrections = load_corrections(config)
+    migration_source_corrections: dict[str, dict[str, str]] = {}
     migration_correction_updates: dict[str, dict[str, str]] = {}
     prior_canonical_rows = identity_state.rows
     prior_overlap_manifest = identity_state.overlap_manifest
@@ -258,6 +264,9 @@ def _run_pipeline(
         identity_state.canonical_migration_required
         and not identity_state.bootstrap_required
     ):
+        migration_source_corrections = {
+            identifier: dict(patch) for identifier, patch in corrections.items()
+        }
         migration_baseline = canonicalize_overlaps(
             identity_state.source_rows,
             [],
@@ -420,7 +429,20 @@ def _run_pipeline(
         if row.get("canonical_group_id") in affected_group_ids
     ]
     release_overlap_review_ownership(transactions)
-    correction_projection = project_corrections(overlap_result, corrections)
+    if migration_source_corrections:
+        migration_projection = project_migration_corrections(
+            overlap_result,
+            identity_state.source_rows,
+            source_rows,
+            migration_source_corrections,
+            corrections,
+        )
+        migration_correction_updates = migration_projection.corrections
+        corrections.update(migration_correction_updates)
+        removed_correction_ids.update(migration_projection.removed_transaction_ids)
+        correction_projection = migration_projection
+    else:
+        correction_projection = project_corrections(overlap_result, corrections)
     canonical_corrections = correction_projection.corrections
     local_memory = build_local_categorization_memory(
         ledger_rows, canonical_corrections, config
@@ -488,7 +510,10 @@ def _run_pipeline(
         "duplicate_count": duplicate_count,
         "duplicate_group_count": duplicate_group_count,
         "duplicate_candidates": duplicate_candidates,
-        "categorization": {"structural_count": structural_count},
+        "categorization": {
+            "structural_count": structural_count,
+            "provenance": _categorization_provenance(transactions),
+        },
         "strict": args.strict,
         "interactive": interactive,
         "replace": args.replace or args.reset,
@@ -578,6 +603,8 @@ Commands:
   honeymoney review --transaction ID --as income
                                    Apply one human accounting decision
   honeymoney profile validate ... Validate a profile and optionally preview input
+  honeymoney evaluate LEDGER --reference CORRECTIONS
+                                   Report category coverage and exact accuracy
   honeymoney status [MONTH]        Show processed/categorized counts for a period
   honeymoney pending [MONTH]       List transactions that need review
   honeymoney duplicates            List unresolved exact-overlap count groups
@@ -611,6 +638,144 @@ Review filters and decisions:
   --remember --yes                 Save an exact, directional income rule
   --json                           Valid only for a fully specified one-shot review
 """
+
+
+def _evaluate_command(argv: list[str]) -> int:
+    parser = _command_parser(
+        argv,
+        prog="honeymoney evaluate",
+        description=(
+            "Compare candidate categories with an exact local reference without "
+            "printing transaction text."
+        ),
+    )
+    parser.add_argument("candidate_path", metavar="LEDGER")
+    parser.add_argument("--reference", required=True, dest="reference_path")
+    parser.add_argument("--json", action="store_true")
+    args = parser.parse_args(argv)
+
+    candidate = _category_rows(Path(args.candidate_path))
+    reference = _category_rows(Path(args.reference_path))
+    reference = {
+        identifier: category
+        for identifier, category in reference.items()
+        if category and category != "Unknown"
+    }
+    confusion: dict[tuple[str, str], int] = {}
+    covered = 0
+    correct = 0
+    unresolved = 0
+    missing = 0
+    for identifier, reference_category in reference.items():
+        candidate_category = candidate.get(identifier)
+        if candidate_category is None:
+            label = "Missing"
+            missing += 1
+        elif not candidate_category or candidate_category == "Unknown":
+            label = "Unknown"
+            unresolved += 1
+        else:
+            label = candidate_category
+            covered += 1
+            if candidate_category == reference_category:
+                correct += 1
+        key = (reference_category, label)
+        confusion[key] = confusion.get(key, 0) + 1
+    reference_count = len(reference)
+    data = {
+        "reference_count": reference_count,
+        "candidate_count": len(candidate),
+        "covered_count": covered,
+        "coverage": covered / reference_count if reference_count else 0.0,
+        "correct_count": correct,
+        "exact_category_accuracy": (
+            correct / reference_count if reference_count else 0.0
+        ),
+        "covered_category_accuracy": correct / covered if covered else 0.0,
+        "unresolved_count": unresolved,
+        "missing_candidate_count": missing,
+        "confusion_counts": [
+            {
+                "reference_category": reference_category,
+                "candidate_category": candidate_category,
+                "count": count,
+            }
+            for (reference_category, candidate_category), count in sorted(
+                confusion.items()
+            )
+        ],
+    }
+    if args.json:
+        _emit_json("evaluate", "success", data=data)
+        return 0
+    print(
+        f"Coverage: {covered}/{reference_count}; "
+        f"exact category accuracy: {correct}/{reference_count}; "
+        f"covered category accuracy: {correct}/{covered}"
+    )
+    for item in data["confusion_counts"]:
+        print(
+            f"{item['reference_category']} -> {item['candidate_category']}: "
+            f"{item['count']}"
+        )
+    return 0
+
+
+def _category_rows(path: Path) -> dict[str, str]:
+    if not path.exists() or not path.is_file():
+        raise ValueError("Category comparison input does not exist or is not a file")
+    with path.open(newline="", encoding="utf-8-sig") as handle:
+        reader = csv.DictReader(handle)
+        fields = set(reader.fieldnames or ())
+        if not {"transaction_id", "category"} <= fields:
+            raise ValueError(
+                "Category comparison input must contain transaction_id and category"
+            )
+        rows: dict[str, str] = {}
+        for row in reader:
+            identifier = canonical_csv_cell(
+                "transaction_id", row.get("transaction_id") or ""
+            ).strip()
+            if not identifier:
+                continue
+            if identifier in rows:
+                raise ValueError(
+                    "Category comparison input contains a duplicate transaction_id"
+                )
+            rows[identifier] = canonical_csv_cell(
+                "category", row.get("category") or ""
+            ).strip()
+    return rows
+
+
+def _categorization_provenance(rows: list[dict[str, str]]) -> dict[str, int]:
+    counts = {
+        "total_count": len(rows),
+        "deterministic_count": 0,
+        "memory_count": 0,
+        "exact_correction_count": 0,
+        "accepted_model_count": 0,
+        "reviewable_model_count": 0,
+        "unresolved_count": 0,
+    }
+    for row in rows:
+        flags = set(filter(None, row.get("flags", "").split(";")))
+        if "manual_correction" in flags:
+            counts["exact_correction_count"] += 1
+        elif "local_memory_categorized" in flags:
+            counts["memory_count"] += 1
+        elif "ollama_categorized" in flags:
+            key = (
+                "accepted_model_count"
+                if row.get("needs_review") == "false"
+                else "reviewable_model_count"
+            )
+            counts[key] += 1
+        elif row.get("category") in {"", "Unknown"}:
+            counts["unresolved_count"] += 1
+        else:
+            counts["deterministic_count"] += 1
+    return counts
 
 
 def _duplicates_command(argv: list[str]) -> int:
@@ -976,6 +1141,14 @@ def _validate_config_document(config: dict[str, Any]) -> None:
                 ollama["timeout_seconds"],
                 minimum=Decimal("0"),
                 exclusive=True,
+            )
+        if "calibrated_acceptance_threshold" in ollama:
+            _validate_finite_number(
+                "ollama.calibrated_acceptance_threshold",
+                ollama["calibrated_acceptance_threshold"],
+                minimum=Decimal("0"),
+                maximum=Decimal("1"),
+                range_message="must be a number from 0 to 1",
             )
         if "think" in ollama and not isinstance(ollama["think"], (bool, str)):
             raise ValueError("Config field ollama.think must be a boolean or string")

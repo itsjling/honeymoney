@@ -127,7 +127,10 @@ class ClassificationPolicyTest(unittest.TestCase):
     def test_model_review_and_trusted_provenance(self) -> None:
         self.assertEqual(
             evaluate_model_suggestion(
-                row("SHOP", "-10.00"), "Dining", Decimal("0.9"), {}
+                row("SHOP", "-10.00"),
+                "Dining",
+                Decimal("0.9"),
+                {"ollama": {"calibrated_acceptance_threshold": 0.8}},
             ).outcome,
             "accepted",
         )

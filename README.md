@@ -177,7 +177,8 @@ establish their flows.
 Optional `category_policies` entries give a category a `kind` and model
 description. Kinds are `spending`, `accounting`, and `manual_only`; custom
 categories default to manual-only, and protected built-ins cannot become
-spending. Import reports include additive structural and Ollama outcome metrics.
+spending. Import reports count deterministic, memory, exact-correction,
+accepted-model, reviewable-model, and unresolved results.
 
 ```bash
 honeymoney config
@@ -204,6 +205,7 @@ Prints or edits the active `config.json`; pass `--config PATH` to target another
 ## Structured agent commands
 
 `setup`, `run`, `import`, `status`, `report`, `config`, `profile validate`,
+`evaluate`,
 and fully specified one-shot `review` accept `--json`. JSON mode prints exactly
 one versioned document to stdout, never prompts, and never opens a browser.
 Exit code `0` is success, `1` is strict partial success, and `2` is an input,
@@ -223,7 +225,13 @@ honeymoney config --config ./money/config.json --json
 honeymoney config edit ollama --config ./money/config.json --model qwen3.5:4b --json
 honeymoney profile validate ./money/profiles/starter_csv.json \
   --config ./money/config.json --json
+honeymoney evaluate ./money/output/categorized.csv \
+  --reference ./money/corrections.csv --json
 ```
+
+`evaluate` joins rows by exact transaction ID. It reports category coverage,
+exact accuracy across the full reference set, accuracy among labeled rows, and
+confusion counts. It does not print merchant or statement text.
 
 `pending` returns transactions requiring review. Apply reviewed corrections as
 one validated JSON batch:
@@ -392,8 +400,11 @@ Set `ollama.enabled` to `true` to categorize remaining unknown transactions with
 - `timeout_seconds`: request timeout per batch (default 120).
 - `batch_size`: transactions per request (default 5). Local inference is generation-bound, so total time is roughly constant regardless of batch size (~1-2s per transaction); a smaller batch just means the status line updates more often and any one request has less to lose if it fails.
 - `think`: allow thinking models to reason before answering (default `false`; slower and unnecessary since responses are schema-constrained).
+- `calibrated_acceptance_threshold`: an optional threshold from `0` to `1`
+  backed by a local accuracy check. Without it, model labels stay in review
+  even when the model reports high confidence.
 
-Requests constrain the response to model-eligible spending categories, with definitions and accounting-boundary guidance; they never include owners. The status line shows which batch is in flight (`batch 2/20 (transactions 6-10 of 98, 4s)`) and ticks up every second while waiting, so a slow local model doesn't look stuck. If Ollama is unreachable, the model is missing, or a categorization is rejected, the import prints a warning explaining why and the affected rows stay uncategorized for interactive or manual review.
+Requests constrain the response to model-eligible spending categories, with definitions and accounting-boundary guidance; they never include owners. When a response omits a row or gives an invalid item, Honeymoney retries only those rows once and keeps valid results. The status line shows which batch is in flight (`batch 2/20 (transactions 6-10 of 98, 4s)`) and ticks up every second while waiting, so a slow local model doesn't look stuck. If Ollama is unreachable, the model is missing, or a categorization is rejected, the import prints a warning explaining why and the affected rows stay uncategorized for interactive or manual review.
 When an interactive import reaches uncategorized rows while the fallback is disabled, the prompt explains that `ollama.enabled` must be set to `true` in `config.json`.
 
 The repo also includes fuller examples:

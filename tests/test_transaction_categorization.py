@@ -433,7 +433,14 @@ class OllamaCategorizationTest(unittest.TestCase):
         ) as server:
             report, warnings = apply_ollama_fallback(
                 rows,
-                {**base_config(), "ollama": {"enabled": True, "url": server.url}},
+                {
+                    **base_config(),
+                    "ollama": {
+                        "enabled": True,
+                        "url": server.url,
+                        "calibrated_acceptance_threshold": 0.8,
+                    },
+                },
                 transport=server,
             )
 
@@ -527,6 +534,7 @@ class OllamaCategorizationTest(unittest.TestCase):
                         "enabled": True,
                         "url": server.url,
                         "batch_size": 2,
+                        "calibrated_acceptance_threshold": 0.8,
                     },
                 },
                 transport=server,

@@ -64,6 +64,86 @@ class HsbcOnePdfProfileTest(unittest.TestCase):
             "accepted_statement",
         )
 
+    def test_foreign_section_survives_a_continuation_page_header(self) -> None:
+        profile = load_profile("hsbc_one_pdf.json")
+        first_page = [
+            {"text": "Statement", "x0": 20, "top": 10},
+            {"text": "Date", "x0": 75, "top": 10},
+            {"text": "05", "x0": 105, "top": 10},
+            {"text": "January", "x0": 123, "top": 10},
+            {"text": "2026", "x0": 153, "top": 10},
+            {"text": "Foreign", "x0": 20, "top": 30},
+            {"text": "Currency", "x0": 65, "top": 30},
+            {"text": "Savings", "x0": 115, "top": 30},
+            {"text": "Date", "x0": 10, "top": 50},
+            {"text": "Transaction", "x0": 40, "top": 50},
+            {"text": "Details", "x0": 110, "top": 50},
+            {"text": "Deposit", "x0": 340, "top": 50},
+            {"text": "Withdrawal", "x0": 418, "top": 50},
+            {"text": "Balance", "x0": 490, "top": 50},
+            {"text": "EUR", "x0": 59, "top": 70},
+            {"text": "02", "x0": 79, "top": 70},
+            {"text": "Jan", "x0": 85, "top": 70},
+            {"text": "SYNTHETIC", "x0": 120, "top": 70},
+            {"text": "CREDIT", "x0": 210, "top": 70},
+            {"text": "10.00", "x0": 350, "top": 70},
+        ]
+        continuation_page = [
+            {"text": "HSBC One HKD Current account summary", "x0": 20, "top": 10},
+            {"text": "SERVICE", "x0": 120, "top": 30},
+            {"text": "FEE", "x0": 170, "top": 30},
+            {"text": "1.00", "x0": 425, "top": 30},
+        ]
+
+        rows, warnings, _ = _import_fake_pdf(
+            profile,
+            page_words=[first_page, continuation_page],
+        )
+
+        self.assertEqual(warnings, [])
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(
+            {row["account_id"] for row in rows},
+            {"hsbc_one_fcy_savings"},
+        )
+        self.assertEqual({row["posted_currency"] for row in rows}, {"EUR"})
+
+    def test_exact_heading_replaces_an_open_continuation_section(self) -> None:
+        profile = load_profile("hsbc_one_pdf.json")
+        first_page = _hsbc_one_transaction_words(
+            "Foreign Currency Savings", "EUR", "02"
+        )
+        continuation_page = [
+            {"text": "HKD", "x0": 120, "top": 10},
+            {"text": "Current", "x0": 170, "top": 10},
+            {"text": "Date", "x0": 10, "top": 30},
+            {"text": "Transaction", "x0": 40, "top": 30},
+            {"text": "Details", "x0": 110, "top": 30},
+            {"text": "Deposit", "x0": 340, "top": 30},
+            {"text": "Withdrawal", "x0": 418, "top": 30},
+            {"text": "Balance", "x0": 490, "top": 30},
+            {"text": "03", "x0": 79, "top": 50},
+            {"text": "Jan", "x0": 85, "top": 50},
+            {"text": "SYNTHETIC", "x0": 120, "top": 50},
+            {"text": "CREDIT", "x0": 210, "top": 50},
+            {"text": "5.00", "x0": 350, "top": 50},
+        ]
+
+        rows, warnings, _ = _import_fake_pdf(
+            profile,
+            page_words=[first_page, continuation_page],
+        )
+
+        self.assertEqual(warnings, [])
+        self.assertEqual(
+            [row["account_id"] for row in rows],
+            ["hsbc_one_fcy_savings", "hsbc_one_hkd_current"],
+        )
+        self.assertEqual(
+            [row["posted_currency"] for row in rows],
+            ["EUR", "HKD"],
+        )
+
 
 class HsbcCreditCardPdfProfileTest(unittest.TestCase):
     def test_accepted_statement(self) -> None:
@@ -153,6 +233,20 @@ class MoxCreditCardPdfProfileTest(unittest.TestCase):
             load_profile("mox_credit_card_pdf.json"),
             "accepted_statement",
         )
+
+    def test_foreign_purchase_without_rate_line_settles_in_hkd(self) -> None:
+        rows, warnings, _ = _import_fake_pdf(
+            load_profile("mox_credit_card_pdf.json"),
+            tables=[[["17 May 18 May SYNTHETIC FOREIGN PURCHASE -10.00 USD -79.80"]]],
+        )
+
+        self.assertEqual(warnings, [])
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["original_amount"], "-10.00")
+        self.assertEqual(rows[0]["original_currency"], "USD")
+        self.assertEqual(rows[0]["posted_amount"], "-79.80")
+        self.assertEqual(rows[0]["posted_currency"], "HKD")
+        self.assertEqual(rows[0]["amount_hkd"], "-79.80")
 
 
 class AccountSemanticsTest(unittest.TestCase):
@@ -349,6 +443,160 @@ class PdfBalanceMappingValidationTest(unittest.TestCase):
 
 
 class PdfBalanceReconciliationTest(unittest.TestCase):
+    def test_mox_balance_rows_allow_account_text_between_label_and_amount(
+        self,
+    ) -> None:
+        profile = load_profile("mox_bank_pdf.json")
+        observations = _balance_observations_from_table_pages(
+            profile,
+            [
+                [
+                    "01 Apr 01 Apr OPENING BALANCE MAIN ACCOUNT HKD 100.00",
+                    "30 Apr 30 Apr CLOSING BALANCE MAIN ACCOUNT HKD 110.00",
+                ]
+            ],
+        )
+
+        self.assertEqual(
+            observations[("mox_bank_main", "HKD")],
+            {
+                "opening": [Decimal("100.00")],
+                "closing": [Decimal("110.00")],
+            },
+        )
+        rows, warnings, _ = _import_fake_pdf(
+            profile,
+            tables=[
+                [
+                    ["01 Apr 01 Apr OPENING BALANCE MAIN ACCOUNT HKD 100.00"],
+                    ["02 Apr 02 Apr SYNTHETIC CREDIT +10.00"],
+                    ["30 Apr 30 Apr CLOSING BALANCE MAIN ACCOUNT HKD 110.00"],
+                ]
+            ],
+        )
+        statement = reconcile_ledger(rows, {})["balance_reconciliation"][
+            "mox_bank_main"
+        ]["statements"][0]
+
+        self.assertEqual(warnings, [])
+        self.assertEqual(statement["result"], "matched")
+
+    def test_hsbc_one_section_currency_endpoints_ignore_portfolio_total(
+        self,
+    ) -> None:
+        observations = _balance_observations_from_table_pages(
+            load_profile("hsbc_one_pdf.json"),
+            [
+                [
+                    "Foreign Currency Savings",
+                    "EUR 01 Apr B/F BALANCE 100.00",
+                    "TOTAL BALANCE 110.00 EUR",
+                    "TOTAL BALANCE 999.00 FOREIGN CURRENCY",
+                ]
+            ],
+        )
+
+        self.assertEqual(
+            observations,
+            {
+                ("hsbc_one_fcy_savings", "EUR"): {
+                    "opening": [Decimal("100.00")],
+                    "closing": [Decimal("110.00")],
+                }
+            },
+        )
+
+    def test_hsbc_one_total_balances_reconcile_by_section_and_currency(
+        self,
+    ) -> None:
+        profile = load_profile("hsbc_one_pdf.json")
+        cases = (
+            (
+                "HKD Savings",
+                "HKD",
+                "hsbc_one_hkd_savings",
+                [
+                    ["HKD Savings"],
+                    ["01 Apr B/F BALANCE 100.00"],
+                    ["TOTAL BALANCE 110.00 HKD"],
+                ],
+            ),
+            (
+                "Foreign Currency Savings",
+                "EUR",
+                "hsbc_one_fcy_savings",
+                [
+                    ["Foreign Currency Savings"],
+                    ["EUR 01 Apr B/F BALANCE 100.00"],
+                    ["TOTAL BALANCE 110.00 EUR"],
+                    ["TOTAL BALANCE 999.00 FOREIGN CURRENCY"],
+                ],
+            ),
+        )
+        for section, currency, account_id, table in cases:
+            with self.subTest(section=section):
+                rows, warnings, _ = _import_fake_pdf(
+                    profile,
+                    tables=[table],
+                    words=_hsbc_one_transaction_words(section, currency, "02"),
+                )
+                statement = reconcile_ledger(rows, {})["balance_reconciliation"][
+                    account_id
+                ]["statements"][0]
+
+                self.assertEqual(warnings, [])
+                self.assertEqual(statement["result"], "matched")
+                self.assertEqual(statement["opening_balance"], "100.00")
+                self.assertEqual(statement["closing_balance"], "110.00")
+
+    def test_positive_credit_liability_balances_reconcile_against_signed_rows(
+        self,
+    ) -> None:
+        rows = [
+            {
+                "transaction_id": "txn_liability",
+                "source_file": "synthetic.pdf",
+                "account_id": "synthetic_card",
+                "account_type": "credit_card",
+                "posted_currency": "HKD",
+                "posted_amount": "-25.00",
+                "amount_hkd": "-25.00",
+                "statement_opening_balance": "100.00",
+                "statement_closing_balance": "125.00",
+                "flags": "",
+            }
+        ]
+
+        statement = reconcile_ledger(rows, {})["balance_reconciliation"][
+            "synthetic_card"
+        ]["statements"][0]
+
+        self.assertEqual(statement["result"], "matched")
+        self.assertEqual(statement["calculated_closing_balance"], "125.00")
+
+    def test_one_statement_balance_endpoint_remains_unavailable(self) -> None:
+        rows = [
+            {
+                "transaction_id": "txn_one_endpoint",
+                "source_file": "synthetic.pdf",
+                "account_id": "synthetic_bank",
+                "account_type": "bank",
+                "posted_currency": "HKD",
+                "posted_amount": "10.00",
+                "amount_hkd": "10.00",
+                "statement_opening_balance": "100.00",
+                "statement_closing_balance": "",
+                "flags": "",
+            }
+        ]
+
+        statement = reconcile_ledger(rows, {})["balance_reconciliation"][
+            "synthetic_bank"
+        ]["statements"][0]
+
+        self.assertEqual(statement["result"], "unavailable")
+        self.assertEqual(statement["reason"], "Closing balance is unavailable.")
+
     def test_multi_page_balance_rollovers_keep_statement_endpoints(self) -> None:
         cases = (
             (
@@ -1649,6 +1897,44 @@ def _identity_config(root: Path) -> dict:
     return _load_config_document(str(config_path), recover=False)
 
 
+def _hsbc_one_transaction_words(
+    section: str, currency: str, day: str
+) -> list[dict[str, object]]:
+    words: list[dict[str, object]] = [
+        {"text": "Statement", "x0": 20, "top": 10},
+        {"text": "Date", "x0": 75, "top": 10},
+        {"text": "05", "x0": 105, "top": 10},
+        {"text": "January", "x0": 123, "top": 10},
+        {"text": "2026", "x0": 153, "top": 10},
+    ]
+    x0 = 20
+    for part in section.split():
+        words.append({"text": part, "x0": x0, "top": 30})
+        x0 += len(part) * 7 + 5
+    words.extend(
+        [
+            {"text": "Date", "x0": 10, "top": 50},
+            {"text": "Transaction", "x0": 40, "top": 50},
+            {"text": "Details", "x0": 110, "top": 50},
+            {"text": "Deposit", "x0": 340, "top": 50},
+            {"text": "Withdrawal", "x0": 418, "top": 50},
+            {"text": "Balance", "x0": 490, "top": 50},
+        ]
+    )
+    if currency != "HKD":
+        words.append({"text": currency, "x0": 59, "top": 70})
+    words.extend(
+        [
+            {"text": day, "x0": 79, "top": 70},
+            {"text": "Jan", "x0": 85, "top": 70},
+            {"text": "SYNTHETIC", "x0": 120, "top": 70},
+            {"text": "CREDIT", "x0": 210, "top": 70},
+            {"text": "10.00", "x0": 350, "top": 70},
+        ]
+    )
+    return words
+
+
 def _balance_observations_from_table_pages(
     profile: dict,
     pages: list[list[str]],
@@ -1734,6 +2020,7 @@ def _import_fake_pdf(
     tables: list | None = None,
     words: list | None = None,
     page_tables: list[list] | None = None,
+    page_words: list[list] | None = None,
     preview: bool = False,
 ):
     class Page:
@@ -1758,10 +2045,22 @@ def _import_fake_pdf(
     class Pdf:
         pages = (
             [
-                Page(page_tables_value=value, page_words_value=[])
-                for value in page_tables
+                Page(
+                    page_tables_value=(
+                        page_tables[index] if page_tables is not None else []
+                    ),
+                    page_words_value=(
+                        page_words[index] if page_words is not None else []
+                    ),
+                )
+                for index in range(
+                    max(
+                        len(page_tables) if page_tables is not None else 0,
+                        len(page_words) if page_words is not None else 0,
+                    )
+                )
             ]
-            if page_tables is not None
+            if page_tables is not None or page_words is not None
             else [Page()]
         )
 

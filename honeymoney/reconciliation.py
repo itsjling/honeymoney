@@ -397,10 +397,24 @@ def _balance_reconciliation(
             else:
                 assert opening is not None
                 assert closing is not None
-                calculated = opening + sum(
+                activity = sum(
                     (amount for amount in amounts if amount is not None),
                     Decimal("0"),
                 )
+                signed_calculated = opening + activity
+                liability_calculated = opening - activity
+                credit_liability = all(
+                    row.get("account_type", "") == "credit_card"
+                    for row in statement_rows
+                )
+                calculated = signed_calculated
+                if credit_liability and (
+                    liability_calculated == closing
+                    or signed_calculated != closing
+                    and opening >= 0
+                    and closing >= 0
+                ):
+                    calculated = liability_calculated
                 difference = closing - calculated
                 statement.update(
                     {

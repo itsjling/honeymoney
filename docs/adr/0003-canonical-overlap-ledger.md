@@ -336,6 +336,17 @@ unmatched records retire and receive new source owners without pairing old and
 new occurrences. Compatible corrections and review history remain on the
 stable canonical slots.
 
+If a parser repair changes account or currency fields during that first write,
+correction projection may compare old and new rows within the same `source_id`.
+The comparison uses normalized dates, original and posted amounts, merchant,
+and description; it does not use the repaired account or currency fields. A
+unique old and new row may carry one correction. A repeated group may carry a
+correction only when its counts match, every old row has a correction, and all
+patches agree. Partial or conflicting groups stay pooled and require review.
+Corrections never choose source owners or canonical slots. The published
+correction file uses final canonical IDs and removes the retired source-ID
+aliases.
+
 Any partial canonical state fails before persistence. Repeated migration,
 import, replacement, reset, correction, and reconciliation are idempotent.
 

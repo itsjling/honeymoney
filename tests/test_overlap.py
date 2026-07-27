@@ -17,6 +17,7 @@ from honeymoney.overlap import (
     overlap_manifest_document,
     parse_overlap_manifest,
     project_corrections,
+    project_migration_corrections,
     release_overlap_review_ownership,
     resolve_duplicate_group,
     validate_overlap_agreement,
@@ -1095,6 +1096,72 @@ class CanonicalOverlapTest(unittest.TestCase):
         self.assertEqual(projected.corrections[first_id]["category"], "Groceries")
         self.assertNotIn(second_id, projected.corrections)
         self.assertEqual(projected.ambiguous_transaction_ids, (second_id,))
+
+    def test_migration_rekeys_unique_history_and_retires_conflicting_aliases(
+        self,
+    ) -> None:
+        prior = [
+            _occurrence("1", "a", merchant="SYNTHETIC REPEAT"),
+            _occurrence("2", "a", merchant="SYNTHETIC REPEAT"),
+            _occurrence("5", "a", merchant="SYNTHETIC UNIQUE"),
+        ]
+        current = [
+            _occurrence("3", "a", merchant="SYNTHETIC REPEAT"),
+            _occurrence("4", "a", merchant="SYNTHETIC REPEAT"),
+            _occurrence("6", "a", merchant="SYNTHETIC UNIQUE"),
+        ]
+        for row in current:
+            row["account_id"] = "household_card_v2"
+        result = canonicalize_overlaps(
+            current, [], empty_overlap_manifest(_NAMESPACE_KEY)
+        )
+        source_corrections = {
+            prior[0]["transaction_id"]: {
+                "category": "Dining",
+                "needs_review": "false",
+            },
+            prior[1]["transaction_id"]: {
+                "category": "Groceries",
+                "needs_review": "false",
+            },
+            prior[2]["transaction_id"]: {
+                "category": "Transport",
+                "needs_review": "false",
+            },
+        }
+
+        projected = project_migration_corrections(
+            result,
+            prior,
+            current,
+            source_corrections,
+            source_corrections,
+        )
+
+        unique_id = next(
+            row["transaction_id"]
+            for row in result.rows
+            if row["merchant"] == "SYNTHETIC UNIQUE"
+        )
+        repeated_ids = {
+            row["transaction_id"]
+            for row in result.rows
+            if row["merchant"] == "SYNTHETIC REPEAT"
+        }
+        self.assertEqual(
+            projected.corrections,
+            {
+                unique_id: {
+                    "category": "Transport",
+                    "needs_review": "false",
+                }
+            },
+        )
+        self.assertEqual(set(projected.ambiguous_transaction_ids), repeated_ids)
+        self.assertEqual(
+            set(projected.removed_transaction_ids),
+            set(source_corrections),
+        )
 
     def test_unresolved_legacy_rows_pass_through_without_consolidation(self) -> None:
         legacy = _occurrence("1", "a")

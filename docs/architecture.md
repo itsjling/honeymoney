@@ -103,6 +103,11 @@ source fails, while the authoritative ledger, its derived review rows, and saved
 corrections remain on the prior financial generation. Ollama is an optional
 post-parse categorizer: its unavailability leaves parsed rows pending review and
 does not turn a successfully processed statement into a failed reset.
+An invalid response triggers one follow-up request for only missing or invalid
+rows. Valid results stay fixed. Raw model confidence does not clear review
+unless the config names a locally calibrated acceptance threshold. Import
+reports split category provenance into deterministic, memory, exact-correction,
+accepted-model, reviewable-model, and unresolved counts.
 
 `category` is the merchant/budget classification. `flow_type` is the accounting
 treatment used by cash-flow totals. Ollama is limited to configured spending
@@ -174,6 +179,11 @@ Exact locator and fingerprint matches keep their source owners, followed by
 unique fingerprint matches. Repeated unmatched records retire and receive new
 source owners as a pool, without pairing old and new occurrences. Compatible
 corrections and review history stay on the canonical slots.
+When a parser repair changes account or currency identity during this move,
+the migration joins old and new source rows only on one unique normalized
+source-local record shape. A repeated group moves only when every old row has
+the same correction. Conflicts stay in review. The published correction file
+keeps final active canonical IDs and drops retired source aliases.
 
 ## Persistence authority and recovery
 

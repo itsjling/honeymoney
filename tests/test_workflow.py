@@ -850,6 +850,13 @@ def open(source_path):
                 encoding="utf-8",
             )
             self._add_balance_contract_mapping(profile_path)
+            upgraded_profile = json.loads(profile_path.read_text(encoding="utf-8"))
+            upgraded_profile["account_id"] = "balance_contract_v2"
+            upgraded_profile["account"] = "Balance Contract V2"
+            upgraded_profile["pdf"]["balance_mappings"][0]["account_id"] = (
+                "balance_contract_v2"
+            )
+            profile_path.write_text(json.dumps(upgraded_profile), encoding="utf-8")
 
             replacement = self._run_cli(
                 [
@@ -887,7 +894,18 @@ def open(source_path):
                 correction_ids = {
                     row["transaction_id"] for row in csv.DictReader(corrections_file)
                 }
-            self.assertTrue(set(canonical_ids) <= correction_ids)
+            self.assertEqual(set(canonical_ids), correction_ids)
+            first_generation = self._artifact_bytes(
+                root,
+                [
+                    "output/categorized.csv",
+                    "output/review_needed.csv",
+                    "output/.honeymoney-identity-manifest.json",
+                    "output/.honeymoney-source-occurrences.csv",
+                    "output/.honeymoney-overlap-manifest.json",
+                    "corrections.csv",
+                ],
+            )
 
             repeated = self._run_cli(
                 [
@@ -903,11 +921,18 @@ def open(source_path):
 
             self.assertEqual(repeated.returncode, 0, repeated.stderr)
             self.assertEqual(
-                [
-                    row["transaction_id"]
-                    for row in load_identity_state(categorized_path).rows
-                ],
-                canonical_ids,
+                self._artifact_bytes(
+                    root,
+                    [
+                        "output/categorized.csv",
+                        "output/review_needed.csv",
+                        "output/.honeymoney-identity-manifest.json",
+                        "output/.honeymoney-source-occurrences.csv",
+                        "output/.honeymoney-overlap-manifest.json",
+                        "corrections.csv",
+                    ],
+                ),
+                first_generation,
             )
             html_path = root / "output" / "migration.html"
             report = self._run_cli(
@@ -3283,6 +3308,18 @@ def open(source_path):
                             "skipped_exact_category_correction_count"
                         ],
                         1,
+                    )
+                    self.assertEqual(
+                        replace_report["categorization"]["provenance"],
+                        {
+                            "total_count": 2,
+                            "deterministic_count": 0,
+                            "memory_count": 0,
+                            "exact_correction_count": 1,
+                            "accepted_model_count": 0,
+                            "reviewable_model_count": 1,
+                            "unresolved_count": 0,
+                        },
                     )
                     self.assertEqual(
                         sent_batches,
