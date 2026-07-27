@@ -374,6 +374,12 @@ python3 -m pip install -e ".[pdf]"
 
 Current example profiles cover HSBC One, HSBC credit-card, and Mox bank/card statement shapes. `hsbc_one_pdf` is the sole HSBC bank-statement profile: it separates HKD Savings, HKD Current, and Foreign Currency Savings transactions into stable account identities, preserves each transaction currency, and retains the original PDF as source provenance. Select that profile when prompted and optionally save the filename mapping for future statements. Real private samples should stay in `samples/` or `private_samples/`.
 
+The bundled HSBC and Mox PDF profiles also read statement opening and closing
+balances. Reconciliation checks each source, account, and posted currency and
+keeps the existing `status` values while the added `result` field reports
+`matched`, `mismatched`, or `unavailable` with a reason. The balance lines do
+not become ledger transactions.
+
 Migration: remove `hsbc_hk_bank` and `hsbc_hk_bank_pdf` paths or mappings from
 existing configurations. Use `hsbc_one_pdf` for HSBC One PDF statements. For
 CSV exports, use `starter_csv` when its signed `Amount` columns fit, or keep a

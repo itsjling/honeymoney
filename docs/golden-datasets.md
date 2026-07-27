@@ -103,6 +103,36 @@ word-row parser. CSV mappings are also checked against the selected synthetic
 statement's actual headers; a golden cannot silently normalize a missing mapped
 column to an empty value or zero amount.
 
+PDF profiles may add `pdf.balance_mappings`. Each mapping must define both
+`opening_regex` and `closing_regex`, and both patterns must name a `balance`
+group. A mapping can target:
+
+- a fixed `account_id` and three-letter `currency`;
+- a known `section` and fixed `currency`; or
+- a known dynamic-currency `section` and a `currency_group` named by both
+  patterns.
+
+The importer scans raw word or table lines for these patterns. It adds the
+opening value to the first transaction and the closing value to the last
+transaction for the same account and posted currency. Balance lines stay out
+of the ledger. Profiles without `balance_mappings` still work; their statement
+balance check stays unavailable.
+
+Keep the patterns narrow enough to match one kind of balance line. Validation
+rejects missing pairs, bad patterns, unknown sections, missing named groups,
+fixed mappings for the same account and currency, and any dynamic mapping that
+can overlap another mapping for the same account. If one statement yields
+different values for the same opening or closing target, import keeps the
+transactions, stores no disputed balance, and adds a privacy-safe conflict
+flag. Reconciliation then reports an unavailable result with a clear reason.
+
+`balance_mappings` forms part of the extractor contract. Adding or changing it
+changes `extractor_contract_id`, even when the PDF bytes stay the same. During
+`--replace`, unique transaction fingerprints keep their transaction IDs.
+Indistinguishable repeated rows cannot use position as a tie-break. Honeymoney
+returns `identity_record_match_ambiguous` and writes nothing in that case, as
+required by ADR 0001.
+
 ### Regenerating the accepted PDF bytes
 
 The tracked `input.pdf` files are deterministic clean-room documents generated

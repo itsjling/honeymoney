@@ -13,7 +13,7 @@ endobj
 << /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents 5 0 R >>
 endobj
 5 0 obj
-<< /Length 1136 >>
+<< /Length 1296 >>
 stream
 q
 BT /F1 4 Tf 1 0 0 1 60.00 778.00 Tm (Post) Tj ET
@@ -38,6 +38,9 @@ BT /F1 4 Tf 1 0 0 1 137.00 748.00 Tm (DCC) Tj ET
 BT /F1 4 Tf 1 0 0 1 156.00 748.00 Tm (FEE-NON-HK) Tj ET
 BT /F1 4 Tf 1 0 0 1 209.00 748.00 Tm (MERCHANT) Tj ET
 BT /F1 4 Tf 1 0 0 1 537.00 748.00 Tm (0.08) Tj ET
+BT /F1 4 Tf 1 0 0 1 137.00 738.00 Tm (CLOSING) Tj ET
+BT /F1 4 Tf 1 0 0 1 180.00 738.00 Tm (BALANCE) Tj ET
+BT /F1 4 Tf 1 0 0 1 518.00 738.00 Tm (4,501.92) Tj ET
 Q
 endstream
 endobj
@@ -61,10 +64,10 @@ xref
 0000000127 00000 n 
 0000000224 00000 n 
 0000000350 00000 n 
-0000001537 00000 n 
-0000001663 00000 n 
+0000001697 00000 n 
+0000001823 00000 n 
 trailer
 << /Size 8 /Root 1 0 R >>
 startxref
-1831
+1991
 %%EOF

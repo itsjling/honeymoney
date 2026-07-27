@@ -9,6 +9,7 @@
       "original_description": "24/7 SYNTHETIC GYM HK",
       "original_amount": "-498.00",
       "posted_amount": "-498.00",
+      "statement_opening_balance": "5000.00",
       "amount_hkd": "-498.00",
       "account_id": "hsbc_hk_credit_card",
       "institution": "HSBC HK",
@@ -25,6 +26,7 @@
       "merchant": "DCC FEE-NON-HK MERCHANT",
       "original_amount": "-0.08",
       "posted_amount": "-0.08",
+      "statement_closing_balance": "4501.92",
       "amount_hkd": "-0.08",
       "source_page": "1",
       "source_row": "2"

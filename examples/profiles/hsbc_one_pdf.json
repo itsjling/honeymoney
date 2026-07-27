@@ -60,7 +60,27 @@
       "statement_year_filename_regex": "eStatementFile_(?P<year>20\\d{2})(?P<statement_month>\\d{2})(?P<statement_day>\\d{2})",
       "skip_descriptions": ["B/F BALANCE", "C/F BALANCE"],
       "table_end_descriptions": ["C/F BALANCE"]
-    }
+    },
+    "balance_mappings": [
+      {
+        "section": "HKD Savings",
+        "currency": "HKD",
+        "opening_regex": "^(?:\\d{1,2}\\s+[A-Za-z]{3}\\s+)?B/F BALANCE\\s+(?P<balance>[+-]?\\d[\\d,]*\\.\\d{2})$",
+        "closing_regex": "^(?:\\d{1,2}\\s+[A-Za-z]{3}\\s+)?C/F BALANCE\\s+(?P<balance>[+-]?\\d[\\d,]*\\.\\d{2})$"
+      },
+      {
+        "section": "HKD Current",
+        "currency": "HKD",
+        "opening_regex": "^(?:\\d{1,2}\\s+[A-Za-z]{3}\\s+)?B/F BALANCE\\s+(?P<balance>[+-]?\\d[\\d,]*\\.\\d{2})$",
+        "closing_regex": "^(?:\\d{1,2}\\s+[A-Za-z]{3}\\s+)?C/F BALANCE\\s+(?P<balance>[+-]?\\d[\\d,]*\\.\\d{2})$"
+      },
+      {
+        "section": "Foreign Currency Savings",
+        "currency_group": "currency",
+        "opening_regex": "^(?P<currency>[A-Z]{3})\\s+B/F BALANCE\\s+(?P<balance>[+-]?\\d[\\d,]*\\.\\d{2})$",
+        "closing_regex": "^(?P<currency>[A-Z]{3})\\s+C/F BALANCE\\s+(?P<balance>[+-]?\\d[\\d,]*\\.\\d{2})$"
+      }
+    ]
   },
   "skip_descriptions": [
     "B/F BALANCE",

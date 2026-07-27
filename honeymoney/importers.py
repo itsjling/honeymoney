@@ -7,8 +7,9 @@ import json
 import logging
 import re
 from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import date, datetime
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from fnmatch import fnmatch
 from pathlib import Path
 from typing import Any, Callable
@@ -24,9 +25,11 @@ from honeymoney.identity import (
     source_revision,
 )
 from honeymoney.normalization import (
+    _append_flag,
     _clean_text,
     _date_format_has_year,
     _default_profile,
+    _format_decimal,
     _normalized_row,
     _parse_decimal,
     _parse_profile_date,
@@ -36,6 +39,12 @@ from honeymoney.schema import (
     allowed_owners,
     allowed_payment_methods,
 )
+
+
+@dataclass(frozen=True)
+class _PdfBalanceLine:
+    text: str
+    is_continuation: bool = False
 
 
 def _relative_source(path: Path, input_root: Path) -> str:
@@ -351,6 +360,164 @@ def _validate_pdf_profile(profile_id: str, settings: dict[str, Any]) -> None:
                 f"Profile {profile_id} pdf.columns map missing row-regex groups: "
                 + ", ".join(missing_sources)
             )
+    _validate_pdf_balance_mappings(profile_id, settings)
+
+
+def _validate_pdf_balance_mappings(profile_id: str, settings: dict[str, Any]) -> None:
+    mappings = settings.get("balance_mappings")
+    if mappings is None:
+        return
+    field = "pdf.balance_mappings"
+    if not isinstance(mappings, list) or not mappings:
+        raise ValueError(
+            f"Profile {profile_id} field {field} must be a non-empty JSON array"
+        )
+    section_settings = settings.get("sectioned_word_rows", {})
+    accounts = (
+        section_settings.get("accounts", {})
+        if isinstance(section_settings, dict)
+        else {}
+    )
+    fixed_targets: dict[tuple[str, str], int] = {}
+    dynamic_targets: dict[str, int] = {}
+    allowed_fields = {
+        "account_id",
+        "section",
+        "currency",
+        "currency_group",
+        "opening_regex",
+        "closing_regex",
+    }
+    for index, mapping in enumerate(mappings):
+        mapping_field = f"{field}[{index}]"
+        if not isinstance(mapping, dict):
+            raise ValueError(
+                f"Profile {profile_id} field {mapping_field} must be a JSON object"
+            )
+        unknown = sorted(set(mapping) - allowed_fields)
+        if unknown:
+            raise ValueError(
+                f"Profile {profile_id} field {mapping_field} has unsupported fields: "
+                + ", ".join(unknown)
+            )
+        compiled: dict[str, re.Pattern[str]] = {}
+        for regex_field in ("opening_regex", "closing_regex"):
+            pattern = mapping.get(regex_field)
+            if not isinstance(pattern, str) or not pattern.strip():
+                raise ValueError(
+                    f"Profile {profile_id} field {mapping_field}.{regex_field} "
+                    "must be a non-empty string"
+                )
+            try:
+                compiled[regex_field] = re.compile(pattern)
+            except re.error as error:
+                raise ValueError(
+                    f"Profile {profile_id} field {mapping_field}.{regex_field} "
+                    "must be a valid regular expression"
+                ) from error
+            if "balance" not in compiled[regex_field].groupindex:
+                raise ValueError(
+                    f"Profile {profile_id} field {mapping_field}.{regex_field} "
+                    "must define a balance group"
+                )
+
+        account_id = mapping.get("account_id")
+        section = mapping.get("section")
+        currency = mapping.get("currency")
+        currency_group = mapping.get("currency_group")
+        if account_id is not None:
+            if (
+                not isinstance(account_id, str)
+                or not account_id.strip()
+                or section is not None
+                or currency_group is not None
+                or not _valid_balance_currency(currency)
+            ):
+                raise ValueError(
+                    f"Profile {profile_id} field {mapping_field} must target "
+                    "account_id and currency, or a known section and currency"
+                )
+            target_account_id = account_id.strip()
+            target_currency = str(currency).strip().upper()
+            mapping["account_id"] = target_account_id
+            mapping["currency"] = target_currency
+            dynamic_target = False
+        else:
+            if (
+                not isinstance(section, str)
+                or not section.strip()
+                or section not in accounts
+                or (currency is None) == (currency_group is None)
+            ):
+                raise ValueError(
+                    f"Profile {profile_id} field {mapping_field} must target "
+                    "account_id and currency, or a known section and currency"
+                )
+            account = accounts[section]
+            if currency_group is not None:
+                if (
+                    not isinstance(currency_group, str)
+                    or not currency_group.strip()
+                    or not isinstance(account, dict)
+                    or not account.get("currency_from_row", False)
+                    or any(
+                        currency_group not in pattern.groupindex
+                        for pattern in compiled.values()
+                    )
+                ):
+                    raise ValueError(
+                        f"Profile {profile_id} field {mapping_field}.currency_group "
+                        "must name a group in both regexes for a dynamic-currency section"
+                    )
+                target_account_id = str(account.get("account_id", ""))
+                target_currency = ""
+                dynamic_target = True
+            else:
+                if (
+                    not _valid_balance_currency(currency)
+                    or not isinstance(account, dict)
+                    or account.get("currency_from_row", False)
+                    or str(account.get("currency", "")).upper() != str(currency).upper()
+                ):
+                    raise ValueError(
+                        f"Profile {profile_id} field {mapping_field}.currency "
+                        "must match the fixed currency for its section"
+                    )
+                target_account_id = str(account.get("account_id", ""))
+                target_currency = str(currency).upper()
+                dynamic_target = False
+        conflicting_index = (
+            dynamic_targets.get(target_account_id)
+            if dynamic_target
+            else fixed_targets.get((target_account_id, target_currency))
+        )
+        if conflicting_index is None and dynamic_target:
+            conflicting_index = next(
+                (
+                    prior_index
+                    for (account, _currency), prior_index in fixed_targets.items()
+                    if account == target_account_id
+                ),
+                None,
+            )
+        if conflicting_index is None and not dynamic_target:
+            conflicting_index = dynamic_targets.get(target_account_id)
+        if conflicting_index is not None:
+            raise ValueError(
+                f"Profile {profile_id} field {mapping_field} conflicts with "
+                f"mapping {conflicting_index}"
+            )
+        if dynamic_target:
+            dynamic_targets[target_account_id] = index
+        else:
+            fixed_targets[(target_account_id, target_currency)] = index
+
+
+def _valid_balance_currency(value: Any) -> bool:
+    return (
+        isinstance(value, str)
+        and re.fullmatch(r"[A-Za-z]{3}", value.strip()) is not None
+    )
 
 
 def _validate_pdf_bounds_map(profile_id: str, field: str, value: Any) -> None:
@@ -1011,6 +1178,7 @@ def _import_pdf(
     identity_records: list[IncomingRecordIdentity] = []
     with _quiet_pdfminer_font_warnings():
         with pdfplumber.open(str(pdf_path)) as pdf:
+            balance_observations = _pdf_balance_observations(pdf, pdf_settings)
             if pdf_settings.get("word_rows") == "sectioned":
                 source_rows = _pdf_sectioned_word_source_rows(
                     pdf, pdf_path, pdf_settings
@@ -1035,6 +1203,7 @@ def _import_pdf(
                                 AllocationLocator(4, (page_number, row_number)),
                             )
                         )
+                _attach_pdf_balances(rows, balance_observations)
                 if include_identity_records:
                     return rows, warnings, tuple(identity_records)
                 return rows, warnings
@@ -1158,11 +1327,273 @@ def _import_pdf(
                                         ),
                                     )
                                 )
+    _attach_pdf_balances(rows, balance_observations)
     if pdf_settings.get("word_rows_only", False) and not rows:
         warnings.append(f"No word transaction table found in {pdf_path.name}")
     if include_identity_records:
         return rows, warnings, tuple(identity_records)
     return rows, warnings
+
+
+def _pdf_balance_observations(
+    pdf: Any, pdf_settings: dict[str, Any]
+) -> dict[tuple[str, str], dict[str, list[Decimal]]]:
+    mappings = pdf_settings.get("balance_mappings")
+    if not isinstance(mappings, list) or not mappings:
+        return {}
+    section_settings = pdf_settings.get("sectioned_word_rows", {})
+    accounts = (
+        section_settings.get("accounts", {})
+        if isinstance(section_settings, dict)
+        else {}
+    )
+    current_sections = {"words": "", "tables": ""}
+    transaction_tables = {"words": False, "tables": False}
+    source_observations: dict[str, dict[tuple[str, str], dict[str, list[Decimal]]]] = {
+        "words": {},
+        "tables": {},
+    }
+    for page in pdf.pages:
+        for source, lines in _pdf_balance_line_sources(page, pdf_settings).items():
+            observations = source_observations[source]
+            current_section = current_sections[source]
+            in_transaction_table = transaction_tables[source]
+            for line in lines:
+                text = line.text
+                folded = " ".join(text.casefold().split())
+                matched_section = _pdf_balance_heading_section(
+                    line,
+                    accounts,
+                    section_settings,
+                    in_transaction_table=in_transaction_table,
+                )
+                if matched_section:
+                    current_section = matched_section
+                    in_transaction_table = False
+                elif _pdf_balance_line_can_change_section(
+                    line,
+                    section_settings,
+                    in_transaction_table=in_transaction_table,
+                ) and _pdf_line_has_marker(
+                    folded, section_settings.get("section_end_markers", [])
+                ):
+                    current_section = ""
+                    in_transaction_table = False
+                saw_opening = False
+                saw_closing = False
+                for mapping in mappings:
+                    if not isinstance(mapping, dict):
+                        continue
+                    section = str(mapping.get("section", ""))
+                    if section and section != current_section:
+                        continue
+                    for kind in ("opening", "closing"):
+                        match = re.search(str(mapping.get(f"{kind}_regex", "")), text)
+                        if match is None:
+                            continue
+                        target = _pdf_balance_target(mapping, accounts, match)
+                        balance = _strict_pdf_balance(match.group("balance"))
+                        observations.setdefault(target, {"opening": [], "closing": []})[
+                            kind
+                        ].append(balance)
+                        if kind == "opening":
+                            saw_opening = True
+                        else:
+                            saw_closing = True
+                if _pdf_line_has_all_markers(
+                    folded, section_settings.get("header_markers", [])
+                ):
+                    in_transaction_table = True
+                if saw_opening:
+                    in_transaction_table = True
+                if saw_closing or _pdf_line_has_marker(
+                    folded, section_settings.get("table_end_descriptions", [])
+                ):
+                    in_transaction_table = False
+            current_sections[source] = current_section
+            transaction_tables[source] = in_transaction_table
+    return _merge_pdf_balance_observations(source_observations.values())
+
+
+def _pdf_balance_lines(page: Any, pdf_settings: dict[str, Any]) -> list[str]:
+    sources = _pdf_balance_line_sources(page, pdf_settings)
+    word_lines = sources["words"]
+    lines = [line.text for line in word_lines]
+    word_line_counts: dict[str, int] = {}
+    for line in word_lines:
+        key = " ".join(line.text.split())
+        word_line_counts[key] = word_line_counts.get(key, 0) + 1
+    for line in sources["tables"]:
+        key = " ".join(line.text.split())
+        if word_line_counts.get(key, 0):
+            word_line_counts[key] -= 1
+            continue
+        lines.append(line.text)
+    return lines
+
+
+def _pdf_balance_line_sources(
+    page: Any, pdf_settings: dict[str, Any]
+) -> dict[str, list[_PdfBalanceLine]]:
+    word_lines: list[_PdfBalanceLine] = []
+    if hasattr(page, "extract_words"):
+        words = page.extract_words(x_tolerance=1, y_tolerance=3) or []
+        word_lines.extend(
+            _PdfBalanceLine(
+                " ".join(str(word.get("text", "")) for word in line).strip()
+            )
+            for line in _pdf_word_lines(
+                words, float(pdf_settings.get("word_y_tolerance", 3))
+            )
+        )
+    table_lines: list[_PdfBalanceLine] = []
+    for table in _pdf_tables(page):
+        for row in table:
+            cell_lines = [str(cell or "").splitlines() or [""] for cell in row]
+            line_count = max((len(value) for value in cell_lines), default=0)
+            for line_index in range(line_count):
+                line = " ".join(
+                    value[line_index].strip()
+                    for value in cell_lines
+                    if line_index < len(value) and value[line_index].strip()
+                )
+                if not line:
+                    continue
+                table_lines.append(
+                    _PdfBalanceLine(line, is_continuation=line_index > 0)
+                )
+    return {
+        "words": [line for line in word_lines if line.text],
+        "tables": table_lines,
+    }
+
+
+def _merge_pdf_balance_observations(
+    sources: Any,
+) -> dict[tuple[str, str], dict[str, list[Decimal]]]:
+    merged: dict[tuple[str, str], dict[str, list[Decimal]]] = {}
+    for observations in sources:
+        for target, balances in observations.items():
+            target_balances = merged.setdefault(target, {"opening": [], "closing": []})
+            for kind in ("opening", "closing"):
+                existing_counts = {
+                    value: target_balances[kind].count(value)
+                    for value in target_balances[kind]
+                }
+                source_counts = {
+                    value: balances[kind].count(value) for value in balances[kind]
+                }
+                for value in balances[kind]:
+                    missing = source_counts[value] - existing_counts.get(value, 0)
+                    if missing > 0:
+                        target_balances[kind].extend([value] * missing)
+                        existing_counts[value] = source_counts[value]
+    return merged
+
+
+def _pdf_balance_heading_section(
+    line: _PdfBalanceLine,
+    accounts: dict[str, Any],
+    settings: dict[str, Any],
+    *,
+    in_transaction_table: bool,
+) -> str:
+    if not _pdf_balance_line_can_change_section(
+        line, settings, in_transaction_table=in_transaction_table
+    ):
+        return ""
+    return _pdf_matching_section(line.text, accounts)
+
+
+def _pdf_balance_line_can_change_section(
+    line: _PdfBalanceLine,
+    settings: dict[str, Any],
+    *,
+    in_transaction_table: bool,
+) -> bool:
+    return (
+        not in_transaction_table
+        and not line.is_continuation
+        and not _pdf_balance_line_has_transaction_shape(line.text, settings)
+    )
+
+
+def _pdf_balance_line_has_transaction_shape(
+    text: str, settings: dict[str, Any]
+) -> bool:
+    date_pattern = str(settings.get("date_regex", ""))
+    if date_pattern and re.search(date_pattern, text):
+        return True
+    amount_pattern = re.compile(
+        str(settings.get("amount_regex", r"^[+-]?\d[\d,]*\.\d{2}$"))
+    )
+    return any(amount_pattern.fullmatch(token) for token in text.split())
+
+
+def _pdf_balance_target(
+    mapping: dict[str, Any],
+    accounts: dict[str, Any],
+    match: re.Match[str],
+) -> tuple[str, str]:
+    section = str(mapping.get("section", ""))
+    if section:
+        account = accounts.get(section, {})
+        account_id = str(account.get("account_id", ""))
+    else:
+        account_id = str(mapping.get("account_id", ""))
+    currency_group = mapping.get("currency_group")
+    currency = (
+        match.group(str(currency_group))
+        if isinstance(currency_group, str) and currency_group
+        else str(mapping.get("currency", ""))
+    )
+    return account_id.strip(), currency.strip().upper()
+
+
+def _strict_pdf_balance(value: str | None) -> Decimal:
+    if value is None:
+        raise ValueError("PDF balance mapping captured an invalid balance")
+    try:
+        balance = Decimal(value.replace(",", "").strip())
+    except (InvalidOperation, ValueError) as error:
+        raise ValueError("PDF balance mapping captured an invalid balance") from error
+    if not balance.is_finite():
+        raise ValueError("PDF balance mapping captured an invalid balance")
+    return balance
+
+
+def _attach_pdf_balances(
+    rows: list[dict[str, str]],
+    observations: dict[tuple[str, str], dict[str, list[Decimal]]],
+) -> None:
+    grouped_rows: dict[tuple[str, str], list[dict[str, str]]] = {}
+    for row in rows:
+        grouped_rows.setdefault(
+            (
+                row.get("account_id", ""),
+                row.get("posted_currency", "").upper(),
+            ),
+            [],
+        ).append(row)
+    for target, balances in observations.items():
+        target_rows = grouped_rows.get(target, [])
+        if not target_rows:
+            continue
+        for kind, target_row in (
+            ("opening", target_rows[0]),
+            ("closing", target_rows[-1]),
+        ):
+            values = set(balances[kind])
+            if len(values) > 1:
+                target_row["flags"] = _append_flag(
+                    target_row.get("flags", ""),
+                    f"statement_{kind}_balance_conflict",
+                )
+                continue
+            if values:
+                target_row[f"statement_{kind}_balance"] = _format_decimal(
+                    next(iter(values))
+                )
 
 
 def _pdf_sectioned_word_source_rows(
@@ -1216,14 +1647,22 @@ def _pdf_sectioned_word_source_rows(
             text = " ".join(str(word.get("text", "")) for word in line).strip()
             folded = " ".join(text.casefold().split())
 
-            matched_account = next(
-                (
-                    account
-                    for marker, account in accounts.items()
-                    if str(marker).casefold() in folded
-                ),
-                None,
+            date_match = date_pattern.match(text)
+            deposits = _pdf_amounts_in_bounds(
+                line, columns.get("deposit"), amount_pattern
             )
+            withdrawals = _pdf_amounts_in_bounds(
+                line, columns.get("withdrawal"), amount_pattern
+            )
+            description = _pdf_words_in_bounds(line, columns.get("description"))
+            has_transaction_shape = bool(
+                in_table
+                and (date_match is not None or deposits or withdrawals or description)
+            )
+            matched_section = (
+                "" if has_transaction_shape else _pdf_matching_section(folded, accounts)
+            )
+            matched_account = accounts.get(matched_section)
             if isinstance(matched_account, dict):
                 current_account = {
                     "account_id": str(matched_account.get("account_id", "")),
@@ -1241,7 +1680,9 @@ def _pdf_sectioned_word_source_rows(
                 description_parts = []
                 continue
 
-            if _pdf_line_has_marker(folded, settings.get("section_end_markers", [])):
+            if not has_transaction_shape and _pdf_line_has_marker(
+                folded, settings.get("section_end_markers", [])
+            ):
                 current_account = None
                 current_currency = ""
                 in_table = False
@@ -1266,12 +1707,10 @@ def _pdf_sectioned_word_source_rows(
                 current_currency = currencies[0]
                 account_currencies[current_account["account_id"]] = current_currency
 
-            date_match = date_pattern.match(text)
             if date_match is not None:
                 current_date = _pdf_sectioned_date(date_match, statement_date)
                 account_dates[current_account["account_id"]] = current_date
 
-            description = _pdf_words_in_bounds(line, columns.get("description"))
             if description:
                 description_parts.append(description)
             joined_description = " ".join(description_parts).strip()
@@ -1284,12 +1723,6 @@ def _pdf_sectioned_word_source_rows(
                     in_table = False
                 continue
 
-            deposits = _pdf_amounts_in_bounds(
-                line, columns.get("deposit"), amount_pattern
-            )
-            withdrawals = _pdf_amounts_in_bounds(
-                line, columns.get("withdrawal"), amount_pattern
-            )
             if not deposits and not withdrawals:
                 continue
             if deposits and withdrawals:
@@ -1384,6 +1817,18 @@ def _pdf_sectioned_date(match: re.Match[str], statement_date: date) -> str:
 
 def _pdf_line_has_marker(text: str, markers: Any) -> bool:
     return any(str(marker).casefold() in text for marker in markers)
+
+
+def _pdf_matching_section(text: str, accounts: dict[str, Any]) -> str:
+    normalized_text = " ".join(text.casefold().split())
+    return next(
+        (
+            str(section)
+            for section in accounts
+            if " ".join(str(section).casefold().split()) in normalized_text
+        ),
+        "",
+    )
 
 
 def _pdf_line_has_all_markers(text: str, markers: Any) -> bool:

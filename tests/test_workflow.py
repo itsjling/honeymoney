@@ -238,6 +238,150 @@ def open(path):
         self.assertEqual(first.returncode, 0, first.stderr)
         return root, fake_modules, statement, config_path
 
+    def _seed_balance_contract_workspace(
+        self, tmp: str, *, repeated: bool
+    ) -> tuple[Path, Path, Path, Path]:
+        root = self._setup_workspace(tmp)
+        fake_modules = root / "fake-balance-modules"
+        fake_modules.mkdir()
+        (fake_modules / "pdfplumber.py").write_text(
+            """
+import builtins
+import json
+
+
+class Page:
+    def __init__(self, table):
+        self._table = table
+
+    def extract_table(self):
+        return self._table
+
+
+class Pdf:
+    def __init__(self, source_path):
+        self.source_path = source_path
+        self.pages = []
+
+    def __enter__(self):
+        data = json.loads(builtins.open(self.source_path, encoding="utf-8").read())
+        self.pages = [Page(page) for page in data["pages"]]
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+
+def open(source_path):
+    return Pdf(source_path)
+""",
+            encoding="utf-8",
+        )
+        statement = root / "contract-statement.pdf"
+        transaction_lines = (
+            [
+                ["01 Apr 02 Apr SYNTHETIC REPEAT +5.00"],
+                ["01 Apr 02 Apr SYNTHETIC REPEAT +5.00"],
+            ]
+            if repeated
+            else [
+                ["01 Apr 02 Apr SYNTHETIC ONE +5.00"],
+                ["02 Apr 03 Apr SYNTHETIC TWO +10.00"],
+            ]
+        )
+        closing_balance = "110.00" if repeated else "115.00"
+        statement.write_text(
+            json.dumps(
+                {
+                    "pages": [
+                        [
+                            ["01 Apr 01 Apr OPENING BALANCE +100.00"],
+                            *transaction_lines,
+                            [f"30 Apr 30 Apr CLOSING BALANCE +{closing_balance}"],
+                        ]
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+        profile_path = root / "profiles" / "balance_contract_pdf.json"
+        profile_path.write_text(
+            json.dumps(
+                {
+                    "id": "balance_contract_pdf",
+                    "account_id": "balance_contract",
+                    "account": "Balance Contract",
+                    "account_type": "bank",
+                    "institution": "Synthetic",
+                    "country": "HK",
+                    "account_currency": "HKD",
+                    "owner": "Household",
+                    "payment_method": "Bank Account",
+                    "date_formats": ["%d %b"],
+                    "statement_year": 2026,
+                    "pdf": {
+                        "has_header": False,
+                        "row_regex": (
+                            r"^(?P<transaction_date>\d{1,2} [A-Za-z]{3})\s+"
+                            r"(?P<posting_date>\d{1,2} [A-Za-z]{3})\s+"
+                            r"(?P<description>.*?)\s+"
+                            r"(?P<amount>[+-]?\d[\d,]*\.\d{2})$"
+                        ),
+                        "columns": {
+                            "transaction_date": "transaction_date",
+                            "posting_date": "posting_date",
+                            "description": "description",
+                            "amount": "amount",
+                        },
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        config_path = root / "config.json"
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+        config["profiles"].append(str(profile_path))
+        config_path.write_text(json.dumps(config), encoding="utf-8")
+        (root / "profile_mappings.json").write_text(
+            json.dumps(
+                {
+                    "filename_patterns": [
+                        {
+                            "pattern": statement.name,
+                            "profile": "balance_contract_pdf",
+                        }
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        first = self._run_cli(
+            ["import", str(statement), "--no-interactive"],
+            cwd=root,
+            extra_pythonpath=fake_modules,
+        )
+        self.assertEqual(first.returncode, 0, first.stderr)
+        return root, fake_modules, statement, profile_path
+
+    def _add_balance_contract_mapping(self, profile_path: Path) -> None:
+        profile = json.loads(profile_path.read_text(encoding="utf-8"))
+        profile["pdf"]["balance_mappings"] = [
+            {
+                "account_id": "balance_contract",
+                "currency": "HKD",
+                "opening_regex": (
+                    r"^\d{1,2} [A-Za-z]{3} \d{1,2} [A-Za-z]{3} "
+                    r"OPENING BALANCE (?P<balance>[+-]?\d[\d,]*\.\d{2})$"
+                ),
+                "closing_regex": (
+                    r"^\d{1,2} [A-Za-z]{3} \d{1,2} [A-Za-z]{3} "
+                    r"CLOSING BALANCE (?P<balance>[+-]?\d[\d,]*\.\d{2})$"
+                ),
+            }
+        ]
+        profile_path.write_text(json.dumps(profile), encoding="utf-8")
+
     def _artifact_bytes(
         self, root: Path, relative_paths: list[str]
     ) -> dict[str, bytes | None]:
@@ -505,6 +649,117 @@ def open(path):
             newline="", encoding="utf-8"
         ) as fh:
             return list(csv.DictReader(fh))
+
+    def test_synthetic_pdf_import_persists_balances_identity_and_report(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._setup_workspace(tmp)
+            statement = root / "mox-synthetic.pdf"
+            fixture = (
+                REPO_ROOT
+                / "tests"
+                / "fixtures"
+                / "import_profiles"
+                / "mox_bank_pdf"
+                / "accepted_statement"
+                / "input.pdf"
+            )
+            statement.write_bytes(fixture.read_bytes())
+            (root / "profile_mappings.json").write_text(
+                json.dumps(
+                    {
+                        "filename_patterns": [
+                            {
+                                "pattern": statement.name,
+                                "profile": "mox_bank_pdf",
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            result = self._run_cli(
+                ["import", str(statement), "--no-interactive", "--json"],
+                cwd=root,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            rows = self._ledger_rows(root)
+            self.assertEqual(len(rows), 5)
+            self.assertTrue(all(row["source_id"] for row in rows))
+            self.assertEqual(rows[0]["statement_opening_balance"], "10000.00")
+            self.assertEqual(rows[-1]["statement_closing_balance"], "45191.75")
+            report = json.loads(
+                (root / "output" / "import_report.json").read_text(encoding="utf-8")
+            )
+            balance = report["reconciliation"]["balance_reconciliation"][
+                "mox_bank_main"
+            ]
+            self.assertEqual(balance["status"], "reconciled")
+            self.assertEqual(balance["result"], "matched")
+            self.assertEqual(balance["statements"][0]["status"], "reconciled")
+            self.assertEqual(balance["statements"][0]["result"], "matched")
+
+    def test_balance_mapping_contract_upgrade_preserves_unique_transaction_ids(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root, fake_modules, statement, profile_path = (
+                self._seed_balance_contract_workspace(tmp, repeated=False)
+            )
+            original_rows = self._ledger_rows(root)
+            original_ids = {
+                row["merchant"]: row["transaction_id"] for row in original_rows
+            }
+            manifest_path = root / "output" / ".honeymoney-identity-manifest.json"
+            original_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            original_contract = original_manifest["sources"][0]["extractor_contract_id"]
+            original_revision = original_manifest["sources"][0]["source_revision"]
+            self._add_balance_contract_mapping(profile_path)
+
+            replacement = self._run_cli(
+                ["import", str(statement), "--replace", "--no-interactive"],
+                cwd=root,
+                extra_pythonpath=fake_modules,
+            )
+
+            self.assertEqual(replacement.returncode, 0, replacement.stderr)
+            replaced_rows = self._ledger_rows(root)
+            self.assertEqual(
+                {row["merchant"]: row["transaction_id"] for row in replaced_rows},
+                original_ids,
+            )
+            self.assertEqual(replaced_rows[0]["statement_opening_balance"], "100.00")
+            self.assertEqual(replaced_rows[-1]["statement_closing_balance"], "115.00")
+            replaced_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            self.assertNotEqual(
+                replaced_manifest["sources"][0]["extractor_contract_id"],
+                original_contract,
+            )
+            self.assertEqual(
+                replaced_manifest["sources"][0]["source_revision"],
+                original_revision,
+            )
+
+    def test_ambiguous_balance_contract_upgrade_fails_without_writes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root, fake_modules, statement, profile_path = (
+                self._seed_balance_contract_workspace(tmp, repeated=True)
+            )
+            before = self._import_artifact_bytes(root)
+            self._add_balance_contract_mapping(profile_path)
+
+            replacement = self._run_cli(
+                ["import", str(statement), "--replace", "--no-interactive"],
+                cwd=root,
+                extra_pythonpath=fake_modules,
+            )
+
+            self.assertEqual(replacement.returncode, 2, replacement.stderr)
+            self.assertIn("identity_record_match_ambiguous", replacement.stderr)
+            self.assertEqual(self._import_artifact_bytes(root), before)
 
     def test_import_loads_identity_state_once(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

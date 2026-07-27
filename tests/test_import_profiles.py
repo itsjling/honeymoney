@@ -8,6 +8,7 @@ import tempfile
 import types
 import unittest
 from dataclasses import replace
+from decimal import Decimal
 from pathlib import Path
 from unittest.mock import patch
 
@@ -21,11 +22,20 @@ from honeymoney.identity import (
     resolve_batch,
     source_namespace_id,
 )
-from honeymoney.importers import _import_pdf, _import_transactions
+from honeymoney.importers import (
+    _import_pdf,
+    _import_transactions,
+    _pdf_balance_lines,
+    _pdf_balance_observations,
+    _validate_profile,
+)
+from honeymoney.reconciliation import reconcile_ledger
 from tests.golden_helpers import (
     FIXTURE_DIR,
     assert_import_case,
     assert_pdf_byte_import_case,
+    base_config,
+    import_profile_case,
     load_json,
     load_profile,
     starter_profile,
@@ -127,6 +137,586 @@ class AccountSemanticsTest(unittest.TestCase):
                 self.assertEqual(
                     load_profile(profile_name)["account_type"], account_type
                 )
+
+
+class PdfBalanceMappingValidationTest(unittest.TestCase):
+    def test_profiles_without_balance_mappings_remain_valid(self) -> None:
+        profile = load_profile("mox_bank_pdf.json")
+        profile["pdf"].pop("balance_mappings", None)
+
+        _validate_profile(profile, Path("profile.json"), base_config())
+
+    def test_balance_mapping_requires_paired_balance_regexes(self) -> None:
+        profile = load_profile("mox_bank_pdf.json")
+        profile["pdf"]["balance_mappings"] = [
+            {
+                "account_id": "mox_bank_main",
+                "currency": "HKD",
+                "opening_regex": r"OPENING (?P<balance>\d+\.\d{2})",
+            }
+        ]
+
+        with self.assertRaisesRegex(
+            ValueError,
+            r"pdf\.balance_mappings\[0\]\.closing_regex must be a non-empty string",
+        ):
+            _validate_profile(profile, Path("profile.json"), base_config())
+
+    def test_balance_mapping_rejects_duplicate_targets(self) -> None:
+        profile = load_profile("mox_bank_pdf.json")
+        mapping = {
+            "account_id": "mox_bank_main",
+            "currency": "HKD",
+            "opening_regex": r"OPENING (?P<balance>\d+\.\d{2})",
+            "closing_regex": r"CLOSING (?P<balance>\d+\.\d{2})",
+        }
+        profile["pdf"]["balance_mappings"] = [mapping, dict(mapping)]
+
+        with self.assertRaisesRegex(
+            ValueError,
+            r"pdf\.balance_mappings\[1\] conflicts with mapping 0",
+        ):
+            _validate_profile(profile, Path("profile.json"), base_config())
+
+    def test_static_balance_mapping_strips_account_and_currency(self) -> None:
+        profile = load_profile("mox_bank_pdf.json")
+        mapping = profile["pdf"]["balance_mappings"][0]
+        mapping["account_id"] = "  mox_bank_main  "
+        mapping["currency"] = "  hkd  "
+
+        _validate_profile(profile, Path("profile.json"), base_config())
+
+        self.assertEqual(mapping["account_id"], "mox_bank_main")
+        self.assertEqual(mapping["currency"], "HKD")
+
+    def test_dynamic_currency_mapping_requires_known_section_and_group(self) -> None:
+        profile = load_profile("hsbc_one_pdf.json")
+        profile["pdf"]["balance_mappings"] = [
+            {
+                "section": "Foreign Currency Savings",
+                "currency_group": "currency",
+                "opening_regex": (
+                    r"^(?P<currency>[A-Z]{3}) B/F "
+                    r"(?P<balance>\d+\.\d{2})$"
+                ),
+                "closing_regex": (
+                    r"^(?P<currency>[A-Z]{3}) C/F "
+                    r"(?P<balance>\d+\.\d{2})$"
+                ),
+            }
+        ]
+
+        _validate_profile(profile, Path("profile.json"), base_config())
+
+    def test_optional_balance_group_fails_with_a_controlled_diagnostic(self) -> None:
+        profile = load_profile("mox_bank_pdf.json")
+        profile["pdf"]["balance_mappings"] = [
+            {
+                "account_id": "mox_bank_main",
+                "currency": "HKD",
+                "opening_regex": r"^OPENING(?: (?P<balance>\d+\.\d{2}))?$",
+                "closing_regex": r"^CLOSING(?: (?P<balance>\d+\.\d{2}))?$",
+            }
+        ]
+        _validate_profile(profile, Path("profile.json"), base_config())
+
+        class Page:
+            def extract_words(self, **kwargs):
+                return [{"text": "OPENING", "x0": 20, "top": 10}]
+
+            def extract_tables(self):
+                return []
+
+        class Pdf:
+            pages = [Page()]
+
+        with self.assertRaisesRegex(
+            ValueError, "PDF balance mapping captured an invalid balance"
+        ):
+            _pdf_balance_observations(Pdf(), profile["pdf"])
+
+    def test_dynamic_mappings_conflict_for_one_account_despite_group_names(
+        self,
+    ) -> None:
+        profile = load_profile("hsbc_one_pdf.json")
+        profile["pdf"]["balance_mappings"] = [
+            {
+                "section": "Foreign Currency Savings",
+                "currency_group": group,
+                "opening_regex": (
+                    rf"^(?P<{group}>[A-Z]{{3}}) B/F "
+                    r"(?P<balance>\d+\.\d{2})$"
+                ),
+                "closing_regex": (
+                    rf"^(?P<{group}>[A-Z]{{3}}) C/F "
+                    r"(?P<balance>\d+\.\d{2})$"
+                ),
+            }
+            for group in ("currency", "ccy")
+        ]
+
+        with self.assertRaisesRegex(
+            ValueError,
+            r"pdf\.balance_mappings\[1\] conflicts with mapping 0",
+        ):
+            _validate_profile(profile, Path("profile.json"), base_config())
+
+    def test_dynamic_mapping_conflicts_with_fixed_target_for_same_account(
+        self,
+    ) -> None:
+        profile = load_profile("hsbc_one_pdf.json")
+        profile["pdf"]["balance_mappings"] = [
+            {
+                "section": "Foreign Currency Savings",
+                "currency_group": "currency",
+                "opening_regex": (
+                    r"^(?P<currency>[A-Z]{3}) B/F "
+                    r"(?P<balance>\d+\.\d{2})$"
+                ),
+                "closing_regex": (
+                    r"^(?P<currency>[A-Z]{3}) C/F "
+                    r"(?P<balance>\d+\.\d{2})$"
+                ),
+            },
+            {
+                "account_id": "hsbc_one_fcy_savings",
+                "currency": "AUD",
+                "opening_regex": r"^AUD OPEN (?P<balance>\d+\.\d{2})$",
+                "closing_regex": r"^AUD CLOSE (?P<balance>\d+\.\d{2})$",
+            },
+        ]
+
+        with self.assertRaisesRegex(
+            ValueError,
+            r"pdf\.balance_mappings\[1\] conflicts with mapping 0",
+        ):
+            _validate_profile(profile, Path("profile.json"), base_config())
+
+    def test_static_and_section_targets_share_duplicate_namespace(self) -> None:
+        profile = load_profile("hsbc_one_pdf.json")
+        profile["pdf"]["balance_mappings"] = [
+            {
+                "section": "HKD Savings",
+                "currency": "HKD",
+                "opening_regex": r"^B/F (?P<balance>\d+\.\d{2})$",
+                "closing_regex": r"^C/F (?P<balance>\d+\.\d{2})$",
+            },
+            {
+                "account_id": "hsbc_one_hkd_savings",
+                "currency": "HKD",
+                "opening_regex": r"^OPEN (?P<balance>\d+\.\d{2})$",
+                "closing_regex": r"^CLOSE (?P<balance>\d+\.\d{2})$",
+            },
+        ]
+
+        with self.assertRaisesRegex(
+            ValueError,
+            r"pdf\.balance_mappings\[1\] conflicts with mapping 0",
+        ):
+            _validate_profile(profile, Path("profile.json"), base_config())
+
+
+class PdfBalanceReconciliationTest(unittest.TestCase):
+    def test_supported_synthetic_statements_reconcile_by_account_and_currency(
+        self,
+    ) -> None:
+        for profile_id in (
+            "hsbc_one_pdf",
+            "hsbc_hk_credit_card_pdf",
+            "mox_bank_pdf",
+            "mox_credit_card_pdf",
+        ):
+            with self.subTest(profile=profile_id):
+                case_dir = (
+                    FIXTURE_DIR / "import_profiles" / profile_id / "accepted_statement"
+                )
+                rows, warnings = import_profile_case(
+                    load_profile(f"{profile_id}.json"), case_dir
+                )
+
+                self.assertEqual(warnings, [])
+                self.assertFalse(
+                    any(
+                        "balance" in row["original_description"].casefold()
+                        for row in rows
+                    )
+                )
+                report = reconcile_ledger(rows, {})["balance_reconciliation"]
+                self.assertTrue(report)
+                self.assertEqual(
+                    {
+                        statement["result"]
+                        for account in report.values()
+                        for statement in account["statements"]
+                    },
+                    {"matched"},
+                )
+
+    def test_conflicting_extracted_balances_mark_rows_and_do_not_fail(self) -> None:
+        profile = load_profile("mox_bank_pdf.json")
+        tables = [
+            [
+                ["01 Apr 02 Apr SYNTHETIC CREDIT +10.00"],
+                ["01 Apr 01 Apr OPENING BALANCE +100.00"],
+                ["02 Apr 02 Apr OPENING BALANCE +101.00"],
+                ["30 Apr 30 Apr CLOSING BALANCE +110.00"],
+            ]
+        ]
+
+        rows, warnings, _ = _import_fake_pdf(profile, tables=tables)
+
+        self.assertEqual(warnings, [])
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["statement_opening_balance"], "")
+        self.assertIn("statement_opening_balance_conflict", rows[0]["flags"])
+        report = reconcile_ledger(rows, {})["balance_reconciliation"]["mox_bank_main"]
+        self.assertEqual(report["status"], "unavailable")
+        self.assertEqual(report["result"], "unavailable")
+        self.assertEqual(
+            report["statements"][0]["reason"], "Opening balances conflict."
+        )
+
+    def test_balance_scanner_reads_table_rows_alongside_words(self) -> None:
+        profile = load_profile("mox_bank_pdf.json")
+        words = [
+            {"text": "Page", "x0": 20, "top": 10},
+            {"text": "1", "x0": 55, "top": 10},
+            {"text": "of", "x0": 70, "top": 10},
+            {"text": "1", "x0": 90, "top": 10},
+            {"text": "OPENING", "x0": 20, "top": 30},
+            {"text": "BALANCE", "x0": 90, "top": 30},
+            {"text": "+100.00", "x0": 170, "top": 30},
+        ]
+        tables = [
+            [
+                ["01 Apr 02 Apr SYNTHETIC CREDIT +10.00"],
+                ["01 Apr 01 Apr OPENING BALANCE +100.00"],
+                ["30 Apr 30 Apr CLOSING BALANCE +110.00"],
+            ]
+        ]
+
+        rows, warnings, _ = _import_fake_pdf(profile, tables=tables, words=words)
+
+        self.assertEqual(warnings, [])
+        self.assertEqual(rows[0]["statement_opening_balance"], "100.00")
+        self.assertEqual(rows[0]["statement_closing_balance"], "110.00")
+
+    def test_balance_scanner_deduplicates_word_and_table_rows(self) -> None:
+        class Page:
+            def extract_words(self, **kwargs):
+                return [
+                    {"text": "OPENING", "x0": 20, "top": 10},
+                    {"text": "BALANCE", "x0": 90, "top": 10},
+                    {"text": "+100.00", "x0": 170, "top": 10},
+                ]
+
+            def extract_tables(self):
+                return [[["OPENING BALANCE +100.00"]]]
+
+        self.assertEqual(_pdf_balance_lines(Page(), {}), ["OPENING BALANCE +100.00"])
+
+    def test_balance_scanner_keeps_identical_lines_in_separate_sections(self) -> None:
+        class Page:
+            def extract_words(self, **kwargs):
+                return [
+                    {"text": "HKD", "x0": 20, "top": 10},
+                    {"text": "Savings", "x0": 50, "top": 10},
+                    {"text": "B/F", "x0": 20, "top": 30},
+                    {"text": "BALANCE", "x0": 50, "top": 30},
+                    {"text": "+100.00", "x0": 120, "top": 30},
+                    {"text": "C/F", "x0": 20, "top": 50},
+                    {"text": "BALANCE", "x0": 50, "top": 50},
+                    {"text": "+110.00", "x0": 120, "top": 50},
+                    {"text": "HKD", "x0": 20, "top": 70},
+                    {"text": "Current", "x0": 50, "top": 70},
+                    {"text": "B/F", "x0": 20, "top": 90},
+                    {"text": "BALANCE", "x0": 50, "top": 90},
+                    {"text": "+100.00", "x0": 120, "top": 90},
+                    {"text": "C/F", "x0": 20, "top": 110},
+                    {"text": "BALANCE", "x0": 50, "top": 110},
+                    {"text": "+110.00", "x0": 120, "top": 110},
+                ]
+
+            def extract_tables(self):
+                return [
+                    [
+                        ["HKD Savings"],
+                        ["B/F BALANCE +100.00"],
+                        ["C/F BALANCE +110.00"],
+                        ["HKD Current"],
+                        ["B/F BALANCE +100.00"],
+                        ["C/F BALANCE +110.00"],
+                    ]
+                ]
+
+        class Pdf:
+            pages = [Page()]
+
+        profile = load_profile("hsbc_one_pdf.json")
+        observations = _pdf_balance_observations(Pdf(), profile["pdf"])
+
+        self.assertEqual(
+            observations,
+            {
+                ("hsbc_one_hkd_savings", "HKD"): {
+                    "opening": [Decimal("100.00")],
+                    "closing": [Decimal("110.00")],
+                },
+                ("hsbc_one_hkd_current", "HKD"): {
+                    "opening": [Decimal("100.00")],
+                    "closing": [Decimal("110.00")],
+                },
+            },
+        )
+
+    def test_balance_scanner_keeps_table_section_context_and_repeated_rows(
+        self,
+    ) -> None:
+        class Page:
+            def extract_words(self, **kwargs):
+                return [
+                    {"text": "Account:", "x0": 20, "top": 10},
+                    {"text": "HKD", "x0": 80, "top": 10},
+                    {"text": "Savings", "x0": 110, "top": 10},
+                    {"text": "Account:", "x0": 20, "top": 70},
+                    {"text": "HKD", "x0": 80, "top": 70},
+                    {"text": "Current", "x0": 110, "top": 70},
+                ]
+
+            def extract_tables(self):
+                return [
+                    [
+                        ["Account: HKD Savings"],
+                        ["B/F BALANCE +100.00"],
+                        ["B/F BALANCE +100.00"],
+                        ["C/F BALANCE +110.00"],
+                        ["Account: HKD Current"],
+                        ["B/F BALANCE +200.00"],
+                        ["C/F BALANCE +210.00"],
+                    ]
+                ]
+
+        class Pdf:
+            pages = [Page()]
+
+        observations = _pdf_balance_observations(
+            Pdf(), load_profile("hsbc_one_pdf.json")["pdf"]
+        )
+
+        self.assertEqual(
+            observations,
+            {
+                ("hsbc_one_hkd_savings", "HKD"): {
+                    "opening": [Decimal("100.00"), Decimal("100.00")],
+                    "closing": [Decimal("110.00")],
+                },
+                ("hsbc_one_hkd_current", "HKD"): {
+                    "opening": [Decimal("200.00")],
+                    "closing": [Decimal("210.00")],
+                },
+            },
+        )
+
+    def test_section_end_stops_balance_scanner_and_transaction_parser(self) -> None:
+        profile = load_profile("hsbc_one_pdf.json")
+        profile["pdf"]["sectioned_word_rows"]["section_end_markers"] = ["END SECTION"]
+        words = [
+            {"text": "Statement", "x0": 20, "top": 10},
+            {"text": "Date", "x0": 75, "top": 10},
+            {"text": "05", "x0": 105, "top": 10},
+            {"text": "January", "x0": 123, "top": 10},
+            {"text": "2026", "x0": 153, "top": 10},
+            {"text": "Foreign", "x0": 20, "top": 30},
+            {"text": "Currency", "x0": 65, "top": 30},
+            {"text": "Savings", "x0": 115, "top": 30},
+            {"text": "Date", "x0": 82, "top": 50},
+            {"text": "Transaction", "x0": 118, "top": 50},
+            {"text": "Details", "x0": 190, "top": 50},
+            {"text": "Deposit", "x0": 350, "top": 50},
+            {"text": "Withdrawal", "x0": 418, "top": 50},
+            {"text": "Balance", "x0": 500, "top": 50},
+            {"text": "AUD", "x0": 59, "top": 70},
+            {"text": "B/F", "x0": 120, "top": 70},
+            {"text": "BALANCE", "x0": 145, "top": 70},
+            {"text": "100.00", "x0": 500, "top": 70},
+            {"text": "AUD", "x0": 59, "top": 90},
+            {"text": "31", "x0": 79, "top": 90},
+            {"text": "Dec", "x0": 85, "top": 90},
+            {"text": "SYNTHETIC", "x0": 120, "top": 90},
+            {"text": "DEBIT", "x0": 185, "top": 90},
+            {"text": "5.00", "x0": 425, "top": 90},
+            {"text": "AUD", "x0": 59, "top": 110},
+            {"text": "C/F", "x0": 120, "top": 110},
+            {"text": "BALANCE", "x0": 145, "top": 110},
+            {"text": "95.00", "x0": 500, "top": 110},
+            {"text": "END", "x0": 20, "top": 130},
+            {"text": "SECTION", "x0": 50, "top": 130},
+            {"text": "AUD", "x0": 59, "top": 150},
+            {"text": "B/F", "x0": 120, "top": 150},
+            {"text": "BALANCE", "x0": 145, "top": 150},
+            {"text": "999.00", "x0": 500, "top": 150},
+        ]
+
+        rows, warnings, _ = _import_fake_pdf(profile, words=words)
+
+        self.assertEqual(warnings, [])
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["statement_opening_balance"], "100.00")
+        self.assertEqual(rows[0]["statement_closing_balance"], "95.00")
+        self.assertNotIn("balance_conflict", rows[0]["flags"])
+
+    def test_section_end_marker_in_description_keeps_account_context(self) -> None:
+        profile = load_profile("hsbc_one_pdf.json")
+        profile["pdf"]["sectioned_word_rows"]["section_end_markers"] = ["END SECTION"]
+        words = [
+            {"text": "Statement", "x0": 20, "top": 10},
+            {"text": "Date", "x0": 75, "top": 10},
+            {"text": "05", "x0": 105, "top": 10},
+            {"text": "January", "x0": 123, "top": 10},
+            {"text": "2026", "x0": 153, "top": 10},
+            {"text": "Foreign", "x0": 20, "top": 30},
+            {"text": "Currency", "x0": 65, "top": 30},
+            {"text": "Savings", "x0": 115, "top": 30},
+            {"text": "Date", "x0": 82, "top": 50},
+            {"text": "Transaction", "x0": 118, "top": 50},
+            {"text": "Details", "x0": 190, "top": 50},
+            {"text": "Deposit", "x0": 350, "top": 50},
+            {"text": "Withdrawal", "x0": 418, "top": 50},
+            {"text": "Balance", "x0": 500, "top": 50},
+            {"text": "AUD", "x0": 59, "top": 70},
+            {"text": "B/F", "x0": 120, "top": 70},
+            {"text": "BALANCE", "x0": 145, "top": 70},
+            {"text": "100.00", "x0": 500, "top": 70},
+            {"text": "AUD", "x0": 59, "top": 90},
+            {"text": "30", "x0": 79, "top": 90},
+            {"text": "Dec", "x0": 85, "top": 90},
+            {"text": "SYNTHETIC", "x0": 120, "top": 90},
+            {"text": "END", "x0": 185, "top": 90},
+            {"text": "SECTION", "x0": 220, "top": 90},
+            {"text": "DEBIT", "x0": 275, "top": 90},
+            {"text": "5.00", "x0": 425, "top": 90},
+            {"text": "AUD", "x0": 59, "top": 110},
+            {"text": "31", "x0": 79, "top": 110},
+            {"text": "Dec", "x0": 85, "top": 110},
+            {"text": "SYNTHETIC", "x0": 120, "top": 110},
+            {"text": "LATER", "x0": 185, "top": 110},
+            {"text": "DEBIT", "x0": 230, "top": 110},
+            {"text": "2.00", "x0": 425, "top": 110},
+            {"text": "AUD", "x0": 59, "top": 130},
+            {"text": "C/F", "x0": 120, "top": 130},
+            {"text": "BALANCE", "x0": 145, "top": 130},
+            {"text": "93.00", "x0": 500, "top": 130},
+        ]
+
+        rows, warnings, _ = _import_fake_pdf(profile, words=words)
+
+        self.assertEqual(warnings, [])
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(
+            [row["original_description"] for row in rows],
+            ["SYNTHETIC END SECTION DEBIT", "SYNTHETIC LATER DEBIT"],
+        )
+        self.assertEqual({row["account_id"] for row in rows}, {"hsbc_one_fcy_savings"})
+        self.assertEqual(rows[0]["statement_opening_balance"], "100.00")
+        self.assertEqual(rows[-1]["statement_closing_balance"], "93.00")
+
+    def test_section_label_in_description_does_not_change_balance_section(
+        self,
+    ) -> None:
+        profile = load_profile("hsbc_one_pdf.json")
+        words = [
+            {"text": "Statement", "x0": 20, "top": 10},
+            {"text": "Date", "x0": 75, "top": 10},
+            {"text": "05", "x0": 105, "top": 10},
+            {"text": "January", "x0": 123, "top": 10},
+            {"text": "2026", "x0": 153, "top": 10},
+            {"text": "Account:", "x0": 5, "top": 30},
+            {"text": "Foreign", "x0": 20, "top": 30},
+            {"text": "Currency", "x0": 65, "top": 30},
+            {"text": "Savings", "x0": 115, "top": 30},
+            {"text": "Date", "x0": 82, "top": 50},
+            {"text": "Transaction", "x0": 118, "top": 50},
+            {"text": "Details", "x0": 190, "top": 50},
+            {"text": "Deposit", "x0": 350, "top": 50},
+            {"text": "Withdrawal", "x0": 418, "top": 50},
+            {"text": "Balance", "x0": 500, "top": 50},
+            {"text": "AUD", "x0": 59, "top": 70},
+            {"text": "B/F", "x0": 120, "top": 70},
+            {"text": "BALANCE", "x0": 145, "top": 70},
+            {"text": "100.00", "x0": 500, "top": 70},
+            {"text": "AUD", "x0": 59, "top": 90},
+            {"text": "31", "x0": 79, "top": 90},
+            {"text": "Dec", "x0": 85, "top": 90},
+            {"text": "SYNTHETIC", "x0": 120, "top": 90},
+            {"text": "TRANSFER", "x0": 185, "top": 90},
+            {"text": "TO", "x0": 245, "top": 90},
+            {"text": "HKD", "x0": 270, "top": 90},
+            {"text": "Savings", "x0": 300, "top": 90},
+            {"text": "5.00", "x0": 425, "top": 90},
+            {"text": "AUD", "x0": 59, "top": 110},
+            {"text": "C/F", "x0": 120, "top": 110},
+            {"text": "BALANCE", "x0": 145, "top": 110},
+            {"text": "95.00", "x0": 500, "top": 110},
+        ]
+
+        rows, warnings, _ = _import_fake_pdf(profile, words=words)
+
+        self.assertEqual(warnings, [])
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["account_id"], "hsbc_one_fcy_savings")
+        self.assertEqual(rows[0]["posted_currency"], "AUD")
+        self.assertEqual(rows[0]["statement_opening_balance"], "100.00")
+        self.assertEqual(rows[0]["statement_closing_balance"], "95.00")
+
+    def test_section_label_in_wrapped_description_keeps_table_balance_section(
+        self,
+    ) -> None:
+        profile = load_profile("hsbc_one_pdf.json")
+        words = [
+            {"text": "Statement", "x0": 20, "top": 10},
+            {"text": "Date", "x0": 75, "top": 10},
+            {"text": "05", "x0": 105, "top": 10},
+            {"text": "January", "x0": 123, "top": 10},
+            {"text": "2026", "x0": 153, "top": 10},
+            {"text": "Account:", "x0": 5, "top": 30},
+            {"text": "Foreign", "x0": 20, "top": 30},
+            {"text": "Currency", "x0": 65, "top": 30},
+            {"text": "Savings", "x0": 115, "top": 30},
+            {"text": "Date", "x0": 82, "top": 50},
+            {"text": "Transaction", "x0": 118, "top": 50},
+            {"text": "Details", "x0": 190, "top": 50},
+            {"text": "Deposit", "x0": 350, "top": 50},
+            {"text": "Withdrawal", "x0": 418, "top": 50},
+            {"text": "Balance", "x0": 500, "top": 50},
+            {"text": "AUD", "x0": 59, "top": 70},
+            {"text": "31", "x0": 79, "top": 70},
+            {"text": "Dec", "x0": 85, "top": 70},
+            {"text": "SYNTHETIC", "x0": 120, "top": 70},
+            {"text": "TRANSFER", "x0": 120, "top": 90},
+            {"text": "TO", "x0": 185, "top": 90},
+            {"text": "HKD", "x0": 215, "top": 90},
+            {"text": "Savings", "x0": 250, "top": 90},
+            {"text": "5.00", "x0": 425, "top": 110},
+        ]
+        tables = [
+            [
+                ["Account: Foreign Currency Savings"],
+                ["AUD B/F BALANCE 100.00"],
+                ["31 Dec SYNTHETIC\nTRANSFER TO HKD Savings", "", "5.00"],
+                ["AUD C/F BALANCE 95.00"],
+            ]
+        ]
+
+        rows, warnings, _ = _import_fake_pdf(profile, tables=tables, words=words)
+
+        self.assertEqual(warnings, [])
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["account_id"], "hsbc_one_fcy_savings")
+        self.assertEqual(
+            rows[0]["original_description"], "SYNTHETIC TRANSFER TO HKD Savings"
+        )
+        self.assertEqual(rows[0]["statement_opening_balance"], "100.00")
+        self.assertEqual(rows[0]["statement_closing_balance"], "95.00")
 
 
 class PdfByteFixtureReviewTest(unittest.TestCase):

@@ -44,6 +44,9 @@
       {"text": "Deposit", "x0": 340, "top": 240},
       {"text": "Withdrawal", "x0": 418, "top": 240},
       {"text": "Balance", "x0": 490, "top": 240},
+      {"text": "B/F", "x0": 100, "top": 250},
+      {"text": "BALANCE", "x0": 130, "top": 250},
+      {"text": "0.00", "x0": 490, "top": 250},
       {"text": "31", "x0": 10, "top": 260},
       {"text": "Dec", "x0": 30, "top": 260},
       {"text": "HOUSEHOLD", "x0": 100, "top": 260},
@@ -72,6 +75,14 @@
       {"text": "Deposit", "x0": 350, "top": 50},
       {"text": "Withdrawal", "x0": 418, "top": 50},
       {"text": "Balance", "x0": 500, "top": 50},
+      {"text": "AUD", "x0": 59, "top": 60},
+      {"text": "B/F", "x0": 120, "top": 60},
+      {"text": "BALANCE", "x0": 145, "top": 60},
+      {"text": "100.00", "x0": 500, "top": 60},
+      {"text": "EUR", "x0": 59, "top": 64},
+      {"text": "B/F", "x0": 120, "top": 64},
+      {"text": "BALANCE", "x0": 145, "top": 64},
+      {"text": "50.00", "x0": 500, "top": 64},
       {"text": "AUD", "x0": 59, "top": 70},
       {"text": "31", "x0": 79, "top": 70},
       {"text": "Dec", "x0": 85, "top": 70},
@@ -90,7 +101,15 @@
     [
       {"text": "SERVICE", "x0": 120, "top": 30},
       {"text": "FEE", "x0": 170, "top": 30},
-      {"text": "1.00", "x0": 425, "top": 30}
+      {"text": "1.00", "x0": 425, "top": 30},
+      {"text": "AUD", "x0": 59, "top": 50},
+      {"text": "C/F", "x0": 120, "top": 50},
+      {"text": "BALANCE", "x0": 145, "top": 50},
+      {"text": "95.00", "x0": 500, "top": 50},
+      {"text": "EUR", "x0": 59, "top": 60},
+      {"text": "C/F", "x0": 120, "top": 60},
+      {"text": "BALANCE", "x0": 145, "top": 60},
+      {"text": "59.00", "x0": 500, "top": 60}
     ]
   ]
 }
