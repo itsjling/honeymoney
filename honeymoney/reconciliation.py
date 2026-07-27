@@ -20,6 +20,14 @@ from honeymoney.duplicates import (
     release_duplicate_review_ownership,
 )
 from honeymoney.identity import ambiguous_legacy_transaction_ids
+from honeymoney.manual_pairs import (
+    MANUAL_PAIR_FLAG_PREFIX,
+    MANUAL_PAIR_INVALID_FLAG,
+    MANUAL_PAIR_INVALID_REASON,
+    ManualPairError,
+    manual_pair_marker,
+    validate_manual_pair_facts,
+)
 from honeymoney.review_state import (
     REVIEW_REASON_ACCOUNTING_FLOW,
     REVIEW_REASON_CATEGORY,
@@ -82,14 +90,33 @@ def reconcile_ledger(
         for row in rows
         if id(row) not in protected and row.get("transaction_id")
     }
+    manual_groups, invalid_manual_rows = _manual_pair_groups(rows)
+    manual_reserved_ids = {
+        row.get("transaction_id", "")
+        for group_rows in manual_groups.values()
+        for row in group_rows
+    }
+    manual_reserved_ids.update(
+        row.get("transaction_id", "") for row in invalid_manual_rows
+    )
+    manual_reserved_ids.discard("")
     for row in rows:
         if id(row) in protected:
             continue
         _reset_reconciliation(row)
         derive_flow_type(row)
 
-    paired: set[str] = set()
-    cross_currency_pairs = _cross_currency_exchange_pairs(rows, config, protected)
+    paired, manual_pair_count = _apply_manual_pairs(
+        manual_groups,
+        invalid_manual_rows,
+        protected,
+    )
+    cross_currency_pairs = _cross_currency_exchange_pairs(
+        rows,
+        config,
+        protected,
+        manual_reserved_ids,
+    )
     for base_row, foreign_row in cross_currency_pairs:
         _pair_cross_currency(base_row, foreign_row)
         paired.update(
@@ -105,6 +132,7 @@ def reconcile_ledger(
         for row in rows
         if id(row) not in protected
         and row.get("transaction_id") not in paired
+        and row.get("transaction_id") not in manual_reserved_ids
         and _eligible(row)
     ]
     for index, left in enumerate(eligible):
@@ -126,7 +154,7 @@ def reconcile_ledger(
             _, other_id, flow_type = nearest[0]
             best[transaction_id] = (other_id, flow_type)
 
-    paired_groups = len(cross_currency_pairs)
+    paired_groups = manual_pair_count + len(cross_currency_pairs)
     for distance, left_id, right_id, flow_type in sorted(candidates):
         if left_id in paired or right_id in paired:
             continue
@@ -167,6 +195,8 @@ def reconcile_ledger(
                 row["flow_type"] = "unresolved"
                 row["flow_source"] = "reconciliation"
             ambiguous += 1
+        elif row.get("reconciliation_status") == "unmatched":
+            unmatched += 1
         elif row.get("flow_type") in TRANSFER_FLOW_TYPES:
             row["reconciliation_status"] = "unmatched"
             unmatched += 1
@@ -288,6 +318,91 @@ def _reset_reconciliation(row: dict[str, str]) -> None:
     if row.get("flow_source") == "reconciliation":
         row["flow_type"] = ""
         row["flow_source"] = ""
+
+
+def _manual_pair_groups(
+    rows: list[dict[str, str]],
+) -> tuple[dict[str, list[dict[str, str]]], list[dict[str, str]]]:
+    groups: dict[str, list[dict[str, str]]] = {}
+    invalid: list[dict[str, str]] = []
+    for row in rows:
+        marker = manual_pair_marker(row)
+        has_marker = any(
+            token.startswith(MANUAL_PAIR_FLAG_PREFIX)
+            for token in _tokens(row.get("flags", ""))
+        )
+        if marker:
+            groups.setdefault(marker, []).append(row)
+        elif has_marker:
+            invalid.append(row)
+    return groups, invalid
+
+
+def _apply_manual_pairs(
+    groups: dict[str, list[dict[str, str]]],
+    invalid_rows: list[dict[str, str]],
+    protected: set[int],
+) -> tuple[set[str], int]:
+    paired: set[str] = set()
+    pair_count = 0
+    for pair_rows in groups.values():
+        if len(pair_rows) != 2 or any(id(row) in protected for row in pair_rows):
+            invalid_rows.extend(row for row in pair_rows if id(row) not in protected)
+            continue
+        left, right = pair_rows
+        try:
+            validate_manual_pair_facts(left, right)
+        except ManualPairError:
+            invalid_rows.extend(pair_rows)
+            continue
+        _pair_manual(left, right)
+        paired.update({left["transaction_id"], right["transaction_id"]})
+        pair_count += 1
+    for row in invalid_rows:
+        if id(row) in protected:
+            continue
+        row["flow_type"] = "unresolved"
+        row["flow_source"] = "reconciliation"
+        row["reconciliation_status"] = "unmatched"
+        row["reconciliation_confidence"] = "0.00"
+        row["flags"] = _append_token(
+            row.get("flags", ""),
+            MANUAL_PAIR_INVALID_FLAG,
+        )
+        row["reason"] = _append_reason(
+            row.get("reason", ""),
+            MANUAL_PAIR_INVALID_REASON,
+        )
+        set_review_reason(row, REVIEW_REASON_ACCOUNTING_FLOW, True)
+    return paired, pair_count
+
+
+def _pair_manual(
+    left: dict[str, str],
+    right: dict[str, str],
+) -> None:
+    group_id = manual_pair_marker(left)
+    if not group_id or manual_pair_marker(right) != group_id:
+        raise AssertionError("manual pair membership validation was skipped")
+    for row, other in ((left, right), (right, left)):
+        row["category"] = "Internal Transfer"
+        row["flow_type"] = "internal_transfer"
+        row["flow_source"] = "correction"
+        row["transfer_group_id"] = group_id
+        row["paired_transaction_id"] = other["transaction_id"]
+        row["reconciliation_status"] = "paired"
+        row["reconciliation_confidence"] = "1.00"
+        row["flags"] = _remove_token(
+            _remove_token(row.get("flags", ""), "uncategorized"),
+            MANUAL_PAIR_INVALID_FLAG,
+        )
+        row["reason"] = _remove_reason(
+            row.get("reason", ""),
+            MANUAL_PAIR_INVALID_REASON,
+        )
+        set_review_reason(row, REVIEW_REASON_CATEGORY, False)
+        set_review_reason(row, REVIEW_REASON_CATEGORY_SUGGESTION, False)
+        set_review_reason(row, REVIEW_REASON_ACCOUNTING_FLOW, False)
 
 
 def derive_flow_type(row: dict[str, str]) -> None:
@@ -434,6 +549,7 @@ def _cross_currency_exchange_pairs(
     rows: list[dict[str, str]],
     config: Config,
     protected: set[int],
+    excluded_transaction_ids: set[str],
 ) -> list[tuple[dict[str, str], dict[str, str]]]:
     """Match statement-labelled HKD exchange debits to foreign deposits."""
     raw_reconciliation = config.get("reconciliation", {})
@@ -457,7 +573,11 @@ def _cross_currency_exchange_pairs(
     base_currency = str(config.get("base_currency", "HKD")).upper()
 
     for row in rows:
-        if id(row) in protected or row.get("account_type") != "bank":
+        if (
+            id(row) in protected
+            or row.get("transaction_id", "") in excluded_transaction_ids
+            or row.get("account_type") != "bank"
+        ):
             continue
         institution = row.get("institution", "").strip()
         account_id = row.get("account_id", "").strip()

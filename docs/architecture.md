@@ -143,6 +143,15 @@ transfer links derived from their existing transaction IDs. Ambiguous candidates
 are never auto-paired. Reports derive old ledgers in memory, and `reconcile`
 provides an explicit inspect/rewrite seam.
 
+Manual same-account cash pairs use a shared `manual_pair_id` in both correction
+rows. Correction projection carries that ID only through proven identity
+mapping. Each reconciliation rebuilds the pair from its two current members and
+checks account, posted currency, amount, sign, and owner. Missing, extra, or
+changed members fail closed as unresolved accounting review. Valid manual pairs
+run before automatic matching and keep `flow_source=correction`. A later
+non-transfer review clears both pair markers atomically and returns the other
+member to review.
+
 PDF profiles may map statement opening and closing balance lines. The importer
 scans raw word or table lines, then puts each balance on the first or last
 transaction for the mapped account, statement section, and posted currency. It

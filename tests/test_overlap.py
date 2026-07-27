@@ -3,6 +3,7 @@ import json
 import unittest
 
 from honeymoney.corrections import apply_corrections
+from honeymoney.manual_pairs import MANUAL_PAIR_FIELD
 from honeymoney.overlap import (
     AMBIGUOUS_COUNT_STATUS,
     EQUAL_POOL_STATUS,
@@ -1162,6 +1163,55 @@ class CanonicalOverlapTest(unittest.TestCase):
             set(projected.removed_transaction_ids),
             set(source_corrections),
         )
+
+    def test_migration_preserves_shared_manual_pair_id_only_for_unique_rows(
+        self,
+    ) -> None:
+        pair_id = "mpair_" + "a" * 32
+        prior = [
+            _occurrence("1", "a", merchant="SYNTHETIC CASH OUT"),
+            _occurrence("2", "a", merchant="SYNTHETIC CASH IN"),
+        ]
+        current = [
+            _occurrence("3", "a", merchant="SYNTHETIC CASH OUT"),
+            _occurrence("4", "a", merchant="SYNTHETIC CASH IN"),
+        ]
+        for row in current:
+            row["account_id"] = "cash_account_v2"
+        result = canonicalize_overlaps(
+            current,
+            [],
+            empty_overlap_manifest(_NAMESPACE_KEY),
+        )
+        prior_corrections = {
+            row["transaction_id"]: {
+                "category": "Internal Transfer",
+                "flow_type": "internal_transfer",
+                MANUAL_PAIR_FIELD: pair_id,
+            }
+            for row in prior
+        }
+
+        projected = project_migration_corrections(
+            result,
+            prior,
+            current,
+            prior_corrections,
+            prior_corrections,
+        )
+
+        self.assertEqual(
+            set(projected.corrections),
+            {row["transaction_id"] for row in result.rows},
+        )
+        self.assertEqual(
+            {
+                correction[MANUAL_PAIR_FIELD]
+                for correction in projected.corrections.values()
+            },
+            {pair_id},
+        )
+        self.assertEqual(projected.ambiguous_transaction_ids, ())
 
     def test_unresolved_legacy_rows_pass_through_without_consolidation(self) -> None:
         legacy = _occurrence("1", "a")

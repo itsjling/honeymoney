@@ -8,7 +8,7 @@ import tempfile
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from honeymoney.csv_artifacts import csv_document
 from honeymoney.identity_state import identity_manifest_path, load_identity_state
@@ -954,6 +954,437 @@ class CashFlowReviewTest(unittest.TestCase):
             self.assertNotEqual(
                 updated["EQUAL OUTFLOW"]["flow_type"], "internal_transfer"
             )
+
+    def test_manual_same_account_pair_survives_reconcile_and_replacement(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._setup_workspace(tmp)
+            statement = root / "cash-movements.csv"
+            statement.write_text(
+                "\n".join(
+                    [
+                        "Date,Description,Amount,Currency",
+                        "2026-05-04,SYNTHETIC CASH OUT,-500.00,HKD",
+                        "2026-05-04,SYNTHETIC CASH IN,500.00,HKD",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            imported = self._run_cli(
+                ["import", str(statement), "--no-interactive"],
+                cwd=root,
+            )
+            self.assertEqual(imported.returncode, 0, imported.stderr)
+            rows = {row["merchant"]: row for row in self._ledger(root)}
+
+            paired = self._run_cli(
+                [
+                    "review",
+                    "pair",
+                    rows["SYNTHETIC CASH OUT"]["transaction_id"],
+                    rows["SYNTHETIC CASH IN"]["transaction_id"],
+                    "--yes",
+                    "--json",
+                ],
+                cwd=root,
+            )
+
+            self.assertEqual(paired.returncode, 0, paired.stderr)
+            payload = json.loads(paired.stdout)
+            self.assertEqual(payload["command"], "review.pair")
+            self.assertEqual(payload["data"]["paired_count"], 2)
+            self.assertFalse(payload["data"]["unchanged"])
+            self.assertNotIn("SYNTHETIC CASH", paired.stdout)
+            self.assertNotIn("cash-movements.csv", paired.stdout)
+            linked = {row["merchant"]: row for row in self._ledger(root)}
+            outgoing = linked["SYNTHETIC CASH OUT"]
+            incoming = linked["SYNTHETIC CASH IN"]
+            self.assertEqual(
+                {row["category"] for row in linked.values()},
+                {"Internal Transfer"},
+            )
+            self.assertEqual(
+                {row["flow_type"] for row in linked.values()},
+                {"internal_transfer"},
+            )
+            self.assertEqual(
+                {row["flow_source"] for row in linked.values()},
+                {"correction"},
+            )
+            self.assertEqual(
+                outgoing["paired_transaction_id"], incoming["transaction_id"]
+            )
+            self.assertEqual(
+                incoming["paired_transaction_id"], outgoing["transaction_id"]
+            )
+            self.assertEqual(
+                outgoing["transfer_group_id"], incoming["transfer_group_id"]
+            )
+            self.assertTrue(outgoing["transfer_group_id"].startswith("mpair_"))
+            self.assertEqual(
+                {row["reconciliation_status"] for row in linked.values()},
+                {"paired"},
+            )
+            self.assertTrue(
+                all("manual_transfer_pair:" in row["flags"] for row in linked.values())
+            )
+            with (root / "corrections.csv").open(
+                newline="", encoding="utf-8"
+            ) as handle:
+                corrections = list(csv.DictReader(handle))
+            self.assertEqual(
+                {row["manual_pair_id"] for row in corrections},
+                {outgoing["transfer_group_id"]},
+            )
+
+            repeated = self._run_cli(
+                [
+                    "review",
+                    "pair",
+                    outgoing["transaction_id"],
+                    incoming["transaction_id"],
+                    "--yes",
+                    "--json",
+                ],
+                cwd=root,
+            )
+            self.assertEqual(repeated.returncode, 0, repeated.stderr)
+            self.assertTrue(json.loads(repeated.stdout)["data"]["unchanged"])
+            reconciled = self._run_cli(["reconcile", "--json"], cwd=root)
+            self.assertEqual(reconciled.returncode, 0, reconciled.stderr)
+            self.assertEqual(json.loads(reconciled.stdout)["data"]["paired_groups"], 1)
+
+            replaced = self._run_cli(
+                [
+                    "import",
+                    str(statement),
+                    "--replace",
+                    "--no-interactive",
+                    "--json",
+                ],
+                cwd=root,
+            )
+            self.assertEqual(replaced.returncode, 0, replaced.stderr)
+            replacement_rows = self._ledger(root)
+            self.assertEqual(
+                {row["transfer_group_id"] for row in replacement_rows},
+                {outgoing["transfer_group_id"]},
+            )
+            self.assertEqual(
+                {row["reconciliation_status"] for row in replacement_rows},
+                {"paired"},
+            )
+
+            report = self._run_cli(
+                ["report", "2026-05", "--no-open"],
+                cwd=root,
+            )
+            self.assertEqual(report.returncode, 0, report.stderr)
+            html = (root / "output" / "report.html").read_text(encoding="utf-8")
+            self.assertIn('id="tile-income">0.00</div>', html)
+            self.assertIn('id="tile-spending">0.00</div>', html)
+
+    def test_review_decision_atomically_supersedes_a_manual_pair(self) -> None:
+        cases = (
+            ("expense", "SYNTHETIC CASH OUT", "expense"),
+            ("income", "SYNTHETIC CASH IN", "income"),
+            ("unresolved", "SYNTHETIC CASH OUT", "unresolved"),
+        )
+        for decision, selected_merchant, expected_flow in cases:
+            with self.subTest(decision=decision), tempfile.TemporaryDirectory() as tmp:
+                root = self._setup_workspace(tmp)
+                self._import_rows(
+                    root,
+                    "superseded-pair.csv",
+                    [
+                        "2026-05-04,SYNTHETIC CASH OUT,-500.00,HKD",
+                        "2026-05-04,SYNTHETIC CASH IN,500.00,HKD",
+                    ],
+                )
+                rows = {row["merchant"]: row for row in self._ledger(root)}
+                paired = self._run_cli(
+                    [
+                        "review",
+                        "pair",
+                        rows["SYNTHETIC CASH OUT"]["transaction_id"],
+                        rows["SYNTHETIC CASH IN"]["transaction_id"],
+                        "--yes",
+                    ],
+                    cwd=root,
+                )
+                self.assertEqual(paired.returncode, 0, paired.stderr)
+
+                reviewed = self._run_cli(
+                    [
+                        "review",
+                        "--transaction",
+                        rows[selected_merchant]["transaction_id"],
+                        "--as",
+                        decision,
+                        "--json",
+                    ],
+                    cwd=root,
+                )
+
+                self.assertEqual(reviewed.returncode, 0, reviewed.stderr)
+                updated = {row["merchant"]: row for row in self._ledger(root)}
+                self.assertEqual(
+                    updated[selected_merchant]["flow_type"],
+                    expected_flow,
+                )
+                for row in updated.values():
+                    self.assertEqual(row["paired_transaction_id"], "")
+                    self.assertEqual(row["transfer_group_id"], "")
+                    self.assertNotIn("manual_transfer_pair:", row["flags"])
+                partner_merchant = (
+                    "SYNTHETIC CASH IN"
+                    if selected_merchant == "SYNTHETIC CASH OUT"
+                    else "SYNTHETIC CASH OUT"
+                )
+                self.assertEqual(updated[partner_merchant]["flow_type"], "unresolved")
+                self.assertEqual(updated[partner_merchant]["needs_review"], "true")
+                with (root / "corrections.csv").open(
+                    newline="",
+                    encoding="utf-8",
+                ) as handle:
+                    corrections = list(csv.DictReader(handle))
+                self.assertEqual(
+                    {row["manual_pair_id"] for row in corrections},
+                    {""},
+                )
+                reconciled = self._run_cli(["reconcile", "--json"], cwd=root)
+                self.assertEqual(reconciled.returncode, 0, reconciled.stderr)
+                self.assertEqual(
+                    json.loads(reconciled.stdout)["data"]["paired_groups"],
+                    0,
+                )
+
+    def test_manual_pair_can_resolve_transfer_candidate_ambiguity(self) -> None:
+        import honeymoney.cli as cli
+
+        left = {
+            "transaction_id": "txn_ambiguous_out",
+            "account_id": "cash_account",
+            "posted_amount": "-100.00",
+            "posted_currency": "HKD",
+            "owner": "Household",
+            "reconciliation_status": "ambiguous",
+            "flags": "reconciliation_ambiguous",
+            "review_reasons": "accounting_flow",
+        }
+        right = {
+            "transaction_id": "txn_same_account_in",
+            "account_id": "cash_account",
+            "posted_amount": "100.00",
+            "posted_currency": "HKD",
+            "owner": "Household",
+            "reconciliation_status": "not_applicable",
+            "flags": "",
+            "review_reasons": "accounting_flow",
+        }
+        result = Mock(remaining_review_count=0)
+
+        with (
+            patch.object(
+                cli,
+                "_load_config",
+                return_value={
+                    "corrections": "corrections.csv",
+                    "paths": {"output": "categorized.csv"},
+                },
+            ),
+            patch.object(cli, "read_ledger", return_value=[left, right]),
+            patch.object(
+                cli,
+                "apply_correction_operation",
+                return_value=result,
+            ) as apply_operation,
+            redirect_stdout(io.StringIO()),
+        ):
+            return_code = cli._manual_pair_review(
+                [
+                    left["transaction_id"],
+                    right["transaction_id"],
+                    "--yes",
+                ]
+            )
+
+        self.assertEqual(return_code, 0)
+        patches = apply_operation.call_args.args[2]
+        self.assertEqual(
+            set(patches), {left["transaction_id"], right["transaction_id"]}
+        )
+        pair_ids = {patch["manual_pair_id"] for patch in patches.values()}
+        self.assertEqual(len(pair_ids), 1)
+        self.assertTrue(next(iter(pair_ids)).startswith("mpair_"))
+
+    def test_manual_pair_fails_closed_when_membership_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._setup_workspace(tmp)
+            statement = root / "membership.csv"
+            original = [
+                "Date,Description,Amount,Currency",
+                "2026-05-04,SYNTHETIC WITHDRAWAL,-100.00,HKD",
+                "2026-05-04,SYNTHETIC REDEPOSIT,100.00,HKD",
+            ]
+            statement.write_text("\n".join(original), encoding="utf-8")
+            imported = self._run_cli(
+                ["import", str(statement), "--no-interactive"],
+                cwd=root,
+            )
+            self.assertEqual(imported.returncode, 0, imported.stderr)
+            first, second = self._ledger(root)
+            confirmed = self._run_cli(
+                [
+                    "review",
+                    "pair",
+                    first["transaction_id"],
+                    second["transaction_id"],
+                    "--yes",
+                ],
+                cwd=root,
+            )
+            self.assertEqual(confirmed.returncode, 0, confirmed.stderr)
+
+            statement.write_text("\n".join(original[:2]), encoding="utf-8")
+            replaced = self._run_cli(
+                ["import", str(statement), "--replace", "--no-interactive"],
+                cwd=root,
+            )
+
+            self.assertEqual(replaced.returncode, 0, replaced.stderr)
+            [remaining] = self._ledger(root)
+            self.assertEqual(remaining["paired_transaction_id"], "")
+            self.assertEqual(remaining["transfer_group_id"], "")
+            self.assertEqual(remaining["flow_type"], "unresolved")
+            self.assertEqual(remaining["reconciliation_status"], "unmatched")
+            self.assertIn("manual_transfer_pair_invalid", remaining["flags"])
+            self.assertIn("accounting_flow", remaining["review_reasons"].split(";"))
+
+            statement.write_text("\n".join(original), encoding="utf-8")
+            restored = self._run_cli(
+                ["import", str(statement), "--replace", "--no-interactive"],
+                cwd=root,
+            )
+            self.assertEqual(restored.returncode, 0, restored.stderr)
+            restored_rows = self._ledger(root)
+            self.assertEqual(
+                {row["reconciliation_status"] for row in restored_rows},
+                {"paired"},
+            )
+            self.assertTrue(
+                all(
+                    "manual_transfer_pair_invalid" not in row["flags"]
+                    for row in restored_rows
+                )
+            )
+
+    def test_manual_pair_rejects_stale_same_sign_and_conflicting_rows_atomically(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._setup_workspace(tmp)
+            self._import_rows(
+                root,
+                "invalid-pairs.csv",
+                [
+                    "2026-05-04,SYNTHETIC POSITIVE A,100.00,HKD",
+                    "2026-05-04,SYNTHETIC POSITIVE B,100.00,HKD",
+                    "2026-05-04,SYNTHETIC NEGATIVE A,-100.00,HKD",
+                    "2026-05-04,SYNTHETIC NEGATIVE B,-100.00,HKD",
+                ],
+            )
+            rows = {row["merchant"]: row for row in self._ledger(root)}
+            before = self._artifacts(root)
+
+            for other_id, code in (
+                (
+                    rows["SYNTHETIC POSITIVE B"]["transaction_id"],
+                    "manual_pair_same_sign",
+                ),
+                ("stale-synthetic-id", "manual_pair_stale_transaction"),
+            ):
+                with self.subTest(code=code):
+                    rejected = self._run_cli(
+                        [
+                            "review",
+                            "pair",
+                            rows["SYNTHETIC POSITIVE A"]["transaction_id"],
+                            other_id,
+                            "--yes",
+                            "--json",
+                        ],
+                        cwd=root,
+                    )
+                    self.assertEqual(rejected.returncode, 2, rejected.stderr)
+                    error = json.loads(rejected.stdout)["errors"][0]
+                    self.assertEqual(error["code"], code)
+                    self.assertNotIn("SYNTHETIC", rejected.stdout)
+                    self.assertNotIn("stale-synthetic-id", rejected.stdout)
+                    self.assertEqual(self._artifacts(root), before)
+
+            first_pair = self._run_cli(
+                [
+                    "review",
+                    "pair",
+                    rows["SYNTHETIC POSITIVE A"]["transaction_id"],
+                    rows["SYNTHETIC NEGATIVE A"]["transaction_id"],
+                    "--yes",
+                ],
+                cwd=root,
+            )
+            self.assertEqual(first_pair.returncode, 0, first_pair.stderr)
+            paired_artifacts = self._artifacts(root)
+            conflict = self._run_cli(
+                [
+                    "review",
+                    "pair",
+                    rows["SYNTHETIC POSITIVE A"]["transaction_id"],
+                    rows["SYNTHETIC NEGATIVE B"]["transaction_id"],
+                    "--yes",
+                    "--json",
+                ],
+                cwd=root,
+            )
+            self.assertEqual(conflict.returncode, 2, conflict.stderr)
+            self.assertEqual(
+                json.loads(conflict.stdout)["errors"][0]["code"],
+                "manual_pair_conflict",
+            )
+            self.assertEqual(self._artifacts(root), paired_artifacts)
+
+    def test_manual_pair_persistence_failure_restores_all_review_artifacts(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._setup_workspace(tmp)
+            self._import_rows(
+                root,
+                "pair-recovery.csv",
+                [
+                    "2026-05-04,SYNTHETIC PAIR OUT,-40.00,HKD",
+                    "2026-05-04,SYNTHETIC PAIR IN,40.00,HKD",
+                ],
+            )
+            left, right = self._ledger(root)
+            before = self._artifacts(root)
+
+            failed = self._run_cli(
+                [
+                    "review",
+                    "pair",
+                    left["transaction_id"],
+                    right["transaction_id"],
+                    "--yes",
+                    "--json",
+                ],
+                cwd=root,
+                filesystem_fault="replace-before:categorized.csv",
+            )
+
+            self.assertEqual(failed.returncode, 2, failed.stderr)
+            self.assertEqual(self._artifacts(root), before)
 
     def test_ollama_income_category_cannot_establish_income_flow(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
