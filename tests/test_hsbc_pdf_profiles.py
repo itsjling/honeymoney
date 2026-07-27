@@ -23,6 +23,10 @@ class HsbcCreditCardPdfProfileConsistencyTest(unittest.TestCase):
                     "The Hongkong and Shanghai Banking Corporation Limited",
                     profile["pdf"]["word_table_end_markers"],
                 )
+                self.assertIn(
+                    "For important information",
+                    profile["pdf"]["word_table_end_markers"],
+                )
 
 
 class HsbcOnePdfProfileConsistencyTest(unittest.TestCase):

@@ -22,6 +22,7 @@ from honeymoney.identity import (
 )
 from honeymoney.ollama import OllamaHttpRequest, apply_ollama_fallback
 from honeymoney.reconciliation import reconcile_ledger
+from honeymoney.review_state import REVIEW_REASON_CATEGORY_SUGGESTION
 from honeymoney.rules import apply_rules
 from honeymoney.schema import CATEGORIZED_COLUMNS
 from tests.golden_helpers import FIXTURE_DIR, assert_rows_match, base_config, load_json
@@ -215,6 +216,37 @@ class LocalCategorizationMemoryTest(unittest.TestCase):
         )
         self.assertEqual(legacy_target["category"], "Unknown")
         self.assertNotIn("local_memory_categorized", legacy_target["flags"])
+
+    def test_memory_below_review_threshold_stays_pending(self) -> None:
+        first, second, target = self._v2_rows(
+            ["Park-N-Shop", "PARK N SHOP", "park.n.shop"]
+        )
+        config = self._config()
+        config["review_confidence_threshold"] = 0.95
+        memory = build_local_categorization_memory(
+            [first, second, target],
+            {
+                first["transaction_id"]: {
+                    "category": "Groceries",
+                    "needs_review": "false",
+                },
+                second["transaction_id"]: {
+                    "category": "Groceries",
+                    "needs_review": "false",
+                },
+            },
+            config,
+        )
+
+        apply_local_categorization_memory([target], memory, config)
+
+        self.assertEqual(target["category"], "Groceries")
+        self.assertEqual(target["confidence"], "0.90")
+        self.assertEqual(target["needs_review"], "true")
+        self.assertEqual(
+            target["review_reasons"],
+            REVIEW_REASON_CATEGORY_SUGGESTION,
+        )
 
     def test_rules_and_exact_corrections_keep_precedence(self) -> None:
         first, second, target = self._v2_rows(
@@ -433,7 +465,14 @@ class OllamaCategorizationTest(unittest.TestCase):
         ) as server:
             report, warnings = apply_ollama_fallback(
                 rows,
-                {**base_config(), "ollama": {"enabled": True, "url": server.url}},
+                {
+                    **base_config(),
+                    "ollama": {
+                        "enabled": True,
+                        "url": server.url,
+                        "calibrated_acceptance_threshold": 0.8,
+                    },
+                },
                 transport=server,
             )
 
@@ -527,6 +566,7 @@ class OllamaCategorizationTest(unittest.TestCase):
                         "enabled": True,
                         "url": server.url,
                         "batch_size": 2,
+                        "calibrated_acceptance_threshold": 0.8,
                     },
                 },
                 transport=server,

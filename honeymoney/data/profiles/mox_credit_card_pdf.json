@@ -18,8 +18,8 @@
       {
         "account_id": "mox_credit_card",
         "currency": "HKD",
-        "opening_regex": "^OPENING BALANCE\\s+(?P<balance>[+-]?\\d[\\d,]*\\.\\d{2})$",
-        "closing_regex": "^CLOSING BALANCE\\s+(?P<balance>[+-]?\\d[\\d,]*\\.\\d{2})$"
+        "opening_regex": "^(?:OPENING|PREVIOUS) BALANCE\\s+(?P<balance>[+-]?\\d[\\d,]*\\.\\d{2})(?:\\s+(?P<balance_sign>CR|DR))?$",
+        "closing_regex": "^(?:CLOSING|STATEMENT) BALANCE\\s+(?P<balance>[+-]?\\d[\\d,]*\\.\\d{2})(?:\\s+(?P<balance_sign>CR|DR))?$"
       }
     ],
     "join_fields": {

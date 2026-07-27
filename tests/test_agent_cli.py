@@ -67,7 +67,7 @@ class AgentCliTest(unittest.TestCase):
                 "errors",
             },
         )
-        self.assertEqual(payload["schema_version"], 1)
+        self.assertEqual(payload["schema_version"], 2)
         self.assertIsInstance(payload["data"], dict)
         self.assertIsInstance(payload["artifacts"], dict)
         self.assertIsInstance(payload["warnings"], list)
@@ -105,7 +105,7 @@ class AgentCliTest(unittest.TestCase):
 
             self.assertEqual(result.returncode, 0, result.stderr)
             payload = self._json(result)
-            self.assertEqual(payload["schema_version"], 1)
+            self.assertEqual(payload["schema_version"], 2)
             self.assertEqual(payload["command"], "setup")
             self.assertEqual(payload["status"], "success")
             self.assertEqual(payload["data"]["root"], str(root.resolve()))
@@ -115,6 +115,314 @@ class AgentCliTest(unittest.TestCase):
             self.assertEqual(payload["warnings"], [])
             self.assertEqual(payload["errors"], [])
             self.assertEqual(result.stdout.count("\n"), 1)
+
+    def test_evaluate_json_reports_aggregate_accuracy_without_transaction_text(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            candidate = root / "candidate.csv"
+            reference = root / "reference.csv"
+            candidate.write_text(
+                "transaction_id,category,merchant,original_description\n"
+                "txn_1,Dining,PRIVATE ONE,PRIVATE TEXT ONE\n"
+                "txn_2,Shopping,PRIVATE TWO,PRIVATE TEXT TWO\n"
+                "txn_3,Unknown,PRIVATE THREE,PRIVATE TEXT THREE\n",
+                encoding="utf-8",
+            )
+            reference.write_text(
+                "transaction_id,category\n"
+                "txn_1,Dining\n"
+                "txn_2,Groceries\n"
+                "txn_3,Transport\n"
+                "txn_4,Health\n",
+                encoding="utf-8",
+            )
+
+            result = self._run_cli(
+                [
+                    "evaluate",
+                    str(candidate),
+                    "--reference",
+                    str(reference),
+                    "--json",
+                ],
+                cwd=root,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            payload = self._json(result)
+            self.assertEqual(payload["command"], "evaluate")
+            self.assertEqual(
+                payload["data"],
+                {
+                    "reference_count": 4,
+                    "candidate_count": 3,
+                    "covered_count": 2,
+                    "coverage": 0.5,
+                    "correct_count": 1,
+                    "exact_category_accuracy": 0.25,
+                    "covered_category_accuracy": 0.5,
+                    "unresolved_count": 1,
+                    "missing_candidate_count": 1,
+                    "confusion_counts": [
+                        {
+                            "reference_category": "Dining",
+                            "candidate_category": "Dining",
+                            "count": 1,
+                        },
+                        {
+                            "reference_category": "Groceries",
+                            "candidate_category": "Shopping",
+                            "count": 1,
+                        },
+                        {
+                            "reference_category": "Health",
+                            "candidate_category": "Missing",
+                            "count": 1,
+                        },
+                        {
+                            "reference_category": "Transport",
+                            "candidate_category": "Unknown",
+                            "count": 1,
+                        },
+                    ],
+                },
+            )
+            self.assertNotIn("PRIVATE", result.stdout)
+
+    def test_learn_builds_private_idempotent_exact_rules_from_active_reviews(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._setup_workspace(tmp)
+            statement = root / "learning.csv"
+            statement.write_text(
+                "Date,Description,Amount,Currency\n"
+                "2026-07-01,SYNTHETIC CONFLICT,-10.0,HKD\n"
+                "2026-07-02,SYNTHETIC CONFLICT,-10.00,HKD\n"
+                "2026-07-03,SYNTHETIC CONFLICT,-20,HKD\n"
+                "2026-07-04,SYNTHETIC CONFLICT,-20.000,HKD\n"
+                "2026-07-05,SYNTHETIC BROAD,-30,HKD\n"
+                "2026-07-06,SYNTHETIC CARE,-40,HKD\n"
+                "2026-07-07,SYNTHETIC CREDIT,50,HKD\n",
+                encoding="utf-8",
+            )
+            imported = self._run_cli(
+                ["import", str(statement), "--no-interactive"], cwd=root
+            )
+            self.assertEqual(imported.returncode, 0, imported.stderr)
+            with (root / "output" / "categorized.csv").open(
+                newline="", encoding="utf-8"
+            ) as handle:
+                rows = list(csv.DictReader(handle))
+            by_date = {row["date"]: row for row in rows}
+            patches = [
+                {
+                    "transaction_id": by_date[f"2026-07-0{day}"]["transaction_id"],
+                    "category": category,
+                    "needs_review": False,
+                }
+                for day, category in (
+                    (1, "Dining"),
+                    (2, "Dining"),
+                    (3, "Shopping"),
+                    (4, "Shopping"),
+                    (5, "Groceries"),
+                    (6, "Health"),
+                    (7, "Income"),
+                )
+            ]
+            corrected = self._run_cli(
+                ["correct", "--file", "-", "--json"],
+                cwd=root,
+                input_text=json.dumps(patches),
+            )
+            self.assertEqual(corrected.returncode, 0, corrected.stderr)
+            corrections_path = root / "corrections.csv"
+            with corrections_path.open(newline="", encoding="utf-8") as handle:
+                correction_reader = csv.DictReader(handle)
+                correction_fields = correction_reader.fieldnames or []
+                correction_rows = list(correction_reader)
+            correction_rows.append(
+                {
+                    "transaction_id": "txn_" + "f" * 32,
+                    "category": "Dining",
+                    "needs_review": "false",
+                }
+            )
+            with corrections_path.open("w", newline="", encoding="utf-8") as handle:
+                correction_writer = csv.DictWriter(handle, fieldnames=correction_fields)
+                correction_writer.writeheader()
+                correction_writer.writerows(correction_rows)
+
+            rules_path = root / "rules.json"
+            rules_document = json.loads(rules_path.read_text(encoding="utf-8"))
+            rules_document["rules"].append(
+                {
+                    "id": "synthetic-manual-precedence",
+                    "enabled": True,
+                    "priority": -10000,
+                    "match_type": "exact",
+                    "fields": ["original_description"],
+                    "patterns": ["SYNTHETIC CARE"],
+                    "category": "Shopping",
+                    "confidence": 1.0,
+                }
+            )
+            rules_path.write_text(
+                json.dumps(rules_document, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            before = rules_path.read_bytes()
+
+            dry_run = self._run_cli(["learn", "--json"], cwd=root)
+
+            self.assertEqual(dry_run.returncode, 0, dry_run.stderr)
+            payload = self._json(dry_run)
+            self.assertEqual(payload["command"], "learn")
+            self.assertEqual(payload["status"], "dry_run")
+            self.assertEqual(
+                payload["data"],
+                {
+                    "candidates": 6,
+                    "broad_rules": 2,
+                    "amount_specific_rules": 2,
+                    "historical_rows_covered": 6,
+                    "conflicts": 1,
+                    "skips": 1,
+                    "projected_coverage": 1.0,
+                },
+            )
+            self.assertEqual(rules_path.read_bytes(), before)
+            combined_output = dry_run.stdout + dry_run.stderr
+            for private_value in (
+                "SYNTHETIC",
+                "-10",
+                "-20",
+                "starter_account",
+                "txn_",
+            ):
+                self.assertNotIn(private_value, combined_output)
+            human_dry_run = self._run_cli(["learn"], cwd=root)
+            self.assertEqual(human_dry_run.returncode, 0, human_dry_run.stderr)
+            self.assertIn("6 candidates", human_dry_run.stdout)
+            self.assertIn("100.0% projected coverage", human_dry_run.stdout)
+            self.assertEqual(rules_path.read_bytes(), before)
+            self.assertNotIn("SYNTHETIC", human_dry_run.stdout)
+            self.assertNotIn("txn_", human_dry_run.stdout)
+
+            learned = self._run_cli(["learn", "--yes", "--json"], cwd=root)
+
+            self.assertEqual(learned.returncode, 0, learned.stderr)
+            learned_document = json.loads(rules_path.read_text(encoding="utf-8"))
+            managed = [
+                rule
+                for rule in learned_document["rules"]
+                if rule.get("managed_by") == "honeymoney.learn.v1"
+            ]
+            self.assertEqual(len(managed), 4)
+            self.assertIn(
+                "synthetic-manual-precedence",
+                {rule["id"] for rule in learned_document["rules"]},
+            )
+            self.assertTrue(
+                all(
+                    "owner" not in rule and "payment_method" not in rule
+                    for rule in managed
+                )
+            )
+            amount_patterns = {
+                condition["patterns"][0]
+                for rule in managed
+                for condition in rule["conditions"]
+                if condition["field"] == "posted_amount"
+            }
+            self.assertEqual(amount_patterns, {"-10", "-20"})
+            learned_bytes = rules_path.read_bytes()
+            repeated = self._run_cli(["learn", "--yes", "--json"], cwd=root)
+            self.assertEqual(repeated.returncode, 0, repeated.stderr)
+            self.assertEqual(rules_path.read_bytes(), learned_bytes)
+
+            changed_review = self._run_cli(
+                ["correct", "--file", "-", "--json"],
+                cwd=root,
+                input_text=json.dumps(
+                    [
+                        {
+                            "transaction_id": by_date["2026-07-05"]["transaction_id"],
+                            "category": "Shopping",
+                            "needs_review": False,
+                        }
+                    ]
+                ),
+            )
+            self.assertEqual(changed_review.returncode, 0, changed_review.stderr)
+            changed = self._run_cli(["learn", "--yes", "--json"], cwd=root)
+            self.assertEqual(changed.returncode, 0, changed.stderr)
+            changed_document = json.loads(rules_path.read_text(encoding="utf-8"))
+            changed_managed = [
+                rule
+                for rule in changed_document["rules"]
+                if rule.get("managed_by") == "honeymoney.learn.v1"
+            ]
+            self.assertFalse(
+                any(rule.get("category") == "Groceries" for rule in changed_managed)
+            )
+            self.assertTrue(
+                any(rule.get("category") == "Shopping" for rule in changed_managed)
+            )
+
+            accounting = self._run_cli(
+                ["correct", "--file", "-", "--json"],
+                cwd=root,
+                input_text=json.dumps(
+                    [
+                        {
+                            "transaction_id": by_date["2026-07-07"]["transaction_id"],
+                            "category": "Income",
+                            "flow_type": "income",
+                            "needs_review": False,
+                        }
+                    ]
+                ),
+            )
+            self.assertEqual(accounting.returncode, 0, accounting.stderr)
+            relearned = self._run_cli(["learn", "--yes", "--json"], cwd=root)
+            self.assertEqual(relearned.returncode, 0, relearned.stderr)
+            self.assertEqual(self._json(relearned)["data"]["broad_rules"], 3)
+
+            config_path = root / "config.json"
+            config = json.loads(config_path.read_text(encoding="utf-8"))
+            config["ollama"] = {
+                "enabled": True,
+                "url": "http://127.0.0.1:1",
+                "model": "synthetic-local-model",
+            }
+            config_path.write_text(json.dumps(config), encoding="utf-8")
+            target = root / "learned-target.csv"
+            target.write_text(
+                "Date,Description,Amount,Currency\n"
+                "2026-07-10,SYNTHETIC CARE,-40.000,HKD\n",
+                encoding="utf-8",
+            )
+            applied = self._run_cli(
+                ["import", str(target), "--no-interactive", "--json"], cwd=root
+            )
+            self.assertEqual(applied.returncode, 0, applied.stderr)
+            with (root / "output" / "categorized.csv").open(
+                newline="", encoding="utf-8"
+            ) as handle:
+                applied_rows = list(csv.DictReader(handle))
+            target_row = next(
+                row for row in applied_rows if row["date"] == "2026-07-10"
+            )
+            self.assertEqual(target_row["category"], "Shopping")
+            self.assertIn(
+                "matched_rule:synthetic-manual-precedence",
+                target_row["flags"].split(";"),
+            )
+            self.assertNotIn("ollama_categorized", target_row["flags"].split(";"))
 
     def test_profile_validate_text_and_pdf_json_are_read_only(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -329,8 +637,12 @@ class AgentCliTest(unittest.TestCase):
                     "merchant",
                     "original_amount",
                     "original_currency",
+                    "posted_amount",
+                    "posted_currency",
                     "source_page",
                     "source_row",
+                    "valuation_source",
+                    "valuation_status",
                 },
             )
             self.assertEqual(payload["data"]["rows"][0]["merchant"], "MERCHANT 01")

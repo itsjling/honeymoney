@@ -8,6 +8,12 @@ from decimal import Decimal, InvalidOperation
 from typing import Mapping
 
 from honeymoney.contracts import Config
+from honeymoney.review_state import (
+    REVIEW_REASON_CATEGORY,
+    REVIEW_REASON_CATEGORY_SUGGESTION,
+    REVIEW_REASON_OWNERSHIP,
+    set_review_reason,
+)
 from honeymoney.schema import allowed_categories
 
 PROTECTED_ACCOUNTING_CATEGORIES = frozenset(
@@ -207,10 +213,12 @@ def _set_structural(
     row["flow_type"] = flow_type
     row["flow_source"] = "structural"
     row["confidence"] = "1.00"
-    row["needs_review"] = (
-        "true"
-        if category == "Other" or row.get("owner") in {"", "Unknown"}
-        else "false"
+    set_review_reason(row, REVIEW_REASON_CATEGORY, False)
+    set_review_reason(row, REVIEW_REASON_CATEGORY_SUGGESTION, category == "Other")
+    set_review_reason(
+        row,
+        REVIEW_REASON_OWNERSHIP,
+        row.get("owner") in {"", "Unknown"},
     )
     row["flags"] = _append(row.get("flags", ""), "structural_classification")
     row["reason"] = _append_reason(
@@ -229,31 +237,45 @@ def evaluate_model_suggestion(
             "rejected", f"Ollama policy rejected category {category}"
         )
     amount = _amount(row)
+    calibrated_threshold = _calibrated_threshold(config)
     if (
         amount is None
         or amount == 0
         or amount >= 0
         or row.get("owner") in {"", "Unknown"}
         or "duplicate_suspected" in set(filter(None, row.get("flags", "").split(";")))
-        or confidence < _threshold(config)
+        or calibrated_threshold is None
+        or confidence < calibrated_threshold
     ):
         return ModelSuggestion("reviewable")
     return ModelSuggestion("accepted")
 
 
-def _threshold(config: Config) -> Decimal:
+def _calibrated_threshold(config: Config) -> Decimal | None:
+    ollama = config.get("ollama", {})
+    if not isinstance(ollama, Mapping):
+        return None
+    value = ollama.get("calibrated_acceptance_threshold")
+    if value is None:
+        return None
     try:
-        return Decimal(str(config.get("review_confidence_threshold", 0.8)))
+        threshold = Decimal(str(value))
     except InvalidOperation:
-        return Decimal("0.8")
+        return None
+    if not threshold.is_finite() or threshold < 0 or threshold > 1:
+        return None
+    return threshold
 
 
 def _amount(row: dict[str, str]) -> Decimal | None:
-    try:
-        amount = Decimal(row.get("amount_hkd", ""))
-    except (InvalidOperation, ValueError):
-        return None
-    return amount if amount.is_finite() else None
+    for field in ("amount_hkd", "posted_amount"):
+        try:
+            amount = Decimal(row.get(field, ""))
+        except (InvalidOperation, ValueError):
+            continue
+        if amount.is_finite():
+            return amount
+    return None
 
 
 def _append(value: str, item: str) -> str:

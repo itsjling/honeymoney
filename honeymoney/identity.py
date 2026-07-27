@@ -553,6 +553,8 @@ def resolve_records(
     *,
     record_id_factory: Callable[[str, AllocationOrigin, str], str] | None = None,
     transaction_id_factory: Callable[[str, str], str] | None = None,
+    allow_unmatched_reallocation: bool = False,
+    allow_parser_upgrade_reallocation: bool = False,
 ) -> RecordResolutionResult:
     """Resolve records for one already-resolved source without mutating inputs.
 
@@ -570,6 +572,10 @@ def resolve_records(
     transaction_id_factory = transaction_id_factory or transaction_id
     if not callable(record_id_factory) or not callable(transaction_id_factory):
         raise IdentityError("identity_manifest_invalid")
+    if not isinstance(allow_unmatched_reallocation, bool):
+        raise IdentityError("identity_manifest_invalid")
+    if not isinstance(allow_parser_upgrade_reallocation, bool):
+        raise IdentityError("identity_manifest_invalid")
 
     rows = tuple(prior_rows)
     if not all(isinstance(row, Mapping) for row in rows):
@@ -582,27 +588,68 @@ def resolve_records(
     active = tuple(record for record in records if record["state"] == "active")
     retired = tuple(record for record in records if record["state"] == "retired")
     _validate_ledger_manifest_agreement(rows, source, assignment, active)
-
     fingerprints = tuple(record_fingerprint(item.row) for item in incoming)
+    parser_upgrade_is_proven = bool(
+        allow_parser_upgrade_reallocation
+        and source is not None
+        and (
+            source["extractor_contract_id"] != assignment.extractor_contract_id
+            or (
+                source["source_revision"] == assignment.source_revision
+                and sorted(record["record_fingerprint"] for record in active)
+                != sorted(fingerprints)
+            )
+        )
+    )
+    reallocation_is_safe = allow_unmatched_reallocation or parser_upgrade_is_proven
+
     origins = _incoming_origins(assignment, incoming, fingerprints)
     exact_current = source is not None and (
         source["source_revision"] == assignment.source_revision
         and source["extractor_contract_id"] == assignment.extractor_contract_id
     )
     if exact_current:
-        resolved = _resolve_exact_records(assignment, incoming, fingerprints, active)
-        return _record_result(
-            assignment,
-            records,
-            resolved,
-            (),
-            (),
-            (),
-        )
+        try:
+            resolved = _resolve_exact_records(
+                assignment, incoming, fingerprints, active
+            )
+        except IdentityError as error:
+            if (
+                error.code != "identity_exact_state_mismatch"
+                or not reallocation_is_safe
+            ):
+                raise
+        else:
+            return _record_result(
+                assignment,
+                records,
+                resolved,
+                (),
+                (),
+                (),
+            )
+
+    proved_active: dict[int, dict[str, Any]] = {}
+    if (
+        reallocation_is_safe
+        and source is not None
+        and source["source_revision"] == assignment.source_revision
+    ):
+        active_by_state = {
+            ownership_exact_state_key(record): record for record in active
+        }
+        if len(active_by_state) != len(active):
+            raise IdentityError("identity_manifest_invalid")
+        for index, (item, fingerprint) in enumerate(zip(incoming, fingerprints)):
+            record = active_by_state.get(exact_state_key(item.locator, fingerprint))
+            if record is not None:
+                proved_active[index] = record
 
     recurrence: dict[int, dict[str, Any]] = {}
     retired_by_origin = {_ownership_origin_key(record): record for record in retired}
     for index, (origin, fingerprint) in enumerate(zip(origins, fingerprints)):
+        if index in proved_active:
+            continue
         record = retired_by_origin.get(_origin_key(origin, fingerprint))
         if record is not None:
             recurrence[index] = record
@@ -634,13 +681,15 @@ def resolve_records(
         )
 
     remaining_indexes = tuple(
-        index for index in range(len(incoming)) if index not in recurrence
+        index
+        for index in range(len(incoming))
+        if index not in proved_active and index not in recurrence
     )
     candidates: list[tuple[str, int, dict[str, Any] | Mapping[str, Any]]] = []
     candidates.extend(
         (record["record_fingerprint"], -index - 1, record)
         for index, record in enumerate(active)
-        if record not in recurrence.values()
+        if record not in proved_active.values() and record not in recurrence.values()
     )
     candidates.extend(
         (record_fingerprint(row), index, row) for index, row in enumerate(legacy_rows)
@@ -671,15 +720,22 @@ def resolve_records(
                 record_id_factory,
                 transaction_id_factory,
             )
-        raise IdentityError("identity_record_match_ambiguous")
+        if not reallocation_is_safe:
+            raise IdentityError("identity_record_match_ambiguous")
 
-    resolved_owners: dict[int, dict[str, Any]] = dict(recurrence)
-    matched_active = {record["source_record_id"] for record in recurrence.values()}
+    resolved_owners: dict[int, dict[str, Any]] = {
+        **proved_active,
+        **recurrence,
+    }
+    matched_active = {
+        record["source_record_id"]
+        for record in (*proved_active.values(), *recurrence.values())
+    }
     retained_legacy: tuple[Mapping[str, Any], ...] = ()
     for incoming_index, candidate in matches.items():
         _, candidate_index, value = candidate
         if candidate_index < 0:
-            owner = copy.deepcopy(value)
+            owner = copy.deepcopy(dict(value))
             matched_active.add(value["source_record_id"])
         else:
             legacy_row = value
@@ -747,6 +803,8 @@ def resolve_batch(
     manifest: Mapping[str, Any],
     sources: list[IncomingSourceIdentity] | tuple[IncomingSourceIdentity, ...],
     intent: str,
+    allow_unmatched_reallocation: bool = False,
+    allow_parser_upgrade_reallocation: bool = False,
 ) -> IdentityResolution:
     """Resolve an import batch without changing the ledger or manifest inputs."""
     action = _source_resolution_action(intent)
@@ -755,6 +813,10 @@ def resolve_batch(
     if not all(isinstance(row, Mapping) for row in rows) or not all(
         isinstance(source, IncomingSourceIdentity) for source in incoming_sources
     ):
+        raise IdentityError("identity_manifest_invalid")
+    if not isinstance(allow_unmatched_reallocation, bool):
+        raise IdentityError("identity_manifest_invalid")
+    if not isinstance(allow_parser_upgrade_reallocation, bool):
         raise IdentityError("identity_manifest_invalid")
     for source in incoming_sources:
         if not isinstance(source.record_data, tuple) or not all(
@@ -822,7 +884,13 @@ def resolve_batch(
 
         if assignment.source_display in targeted_ambiguous_displays:
             result = resolve_records(
-                assignment, incoming.record_data, prior_source, prior_rows, intent
+                assignment,
+                incoming.record_data,
+                prior_source,
+                prior_rows,
+                intent,
+                allow_unmatched_reallocation=allow_unmatched_reallocation,
+                allow_parser_upgrade_reallocation=(allow_parser_upgrade_reallocation),
             )
             protected_legacy[assignment.source_display] = tuple(
                 _protect_legacy_row(row) for row in legacy_group
@@ -842,6 +910,8 @@ def resolve_batch(
                 prior_source,
                 (*prior_rows, *(legacy_group if target_legacy else ())),
                 intent,
+                allow_unmatched_reallocation=allow_unmatched_reallocation,
+                allow_parser_upgrade_reallocation=(allow_parser_upgrade_reallocation),
             )
             if result.retained_legacy_rows:
                 protected_legacy[assignment.source_display] = tuple(
@@ -1324,14 +1394,16 @@ def _unique_fingerprint_matches(
     for index in incoming_indexes:
         incoming_by_fingerprint.setdefault(fingerprints[index], []).append(index)
     matches: dict[int, tuple[str, int, dict[str, Any] | Mapping[str, Any]]] = {}
+    ambiguous = False
     for fingerprint in set(by_fingerprint) | set(incoming_by_fingerprint):
         left = by_fingerprint.get(fingerprint, [])
         right = incoming_by_fingerprint.get(fingerprint, [])
         if left and right and (len(left) != 1 or len(right) != 1):
-            return {}, True
+            ambiguous = True
+            continue
         if left and right:
             matches[right[0]] = left[0]
-    return matches, False
+    return matches, ambiguous
 
 
 def _duplicate_legacy_ids(rows: tuple[Mapping[str, Any], ...]) -> tuple[str, ...]:

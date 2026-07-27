@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import calendar
+import csv
 import hashlib
 import json
 import os
@@ -29,6 +30,7 @@ from honeymoney.classification_policy import (
     validate_category_policies,
 )
 from honeymoney.corrections import (
+    CORRECTION_COLUMNS,
     CORRECTION_FIELDS,
     apply_correction_operation,
     apply_corrections,
@@ -36,9 +38,11 @@ from honeymoney.corrections import (
     load_corrections,
     prepare_corrections_document,
     read_ledger,
+    review_state_correction_updates,
     to_review_row,
     validate_correction,
 )
+from honeymoney.csv_artifacts import canonical_csv_cell
 from honeymoney.duplicates import (
     DUPLICATE_MATCH_TYPE,
     refresh_duplicate_candidates,
@@ -50,6 +54,7 @@ from honeymoney.identity import (
     resolve_batch,
 )
 from honeymoney.identity_state import load_configured_identity_state
+from honeymoney.learning import plan_learned_rules
 from honeymoney.ollama import (
     OllamaProgress,
     apply_ollama_fallback,
@@ -64,6 +69,8 @@ from honeymoney.overlap import (
     enforce_overlap_review,
     list_duplicate_groups,
     project_corrections,
+    project_migration_corrections,
+    project_replacement_corrections,
     release_overlap_review_ownership,
     resolve_duplicate_group,
 )
@@ -74,17 +81,38 @@ from honeymoney.persistence import (
 )
 from honeymoney.reconciliation import (
     reconcile_ledger,
-    reconciliation_date_window,
     transaction_direction,
+    validate_reconciliation_config,
 )
-from honeymoney.report import build_report_html
-from honeymoney.rules import apply_rules, load_rules
+from honeymoney.report import build_report_html, missing_base_currency_count
+from honeymoney.review_state import (
+    REVIEW_REASON_ACCOUNTING_FLOW,
+    REVIEW_REASON_CATEGORY,
+    REVIEW_REASON_CATEGORY_SUGGESTION,
+    REVIEW_REASON_IDENTITY,
+    review_reason_labels,
+    review_reason_tokens,
+    review_summary,
+    set_review_reason,
+    synchronize_review_states,
+)
+from honeymoney.rules import (
+    MANAGED_RULE_MARKER,
+    apply_rules,
+    load_rules,
+    validate_rules,
+)
 from honeymoney.schema import (
     ALLOWED_FLOW_TYPES,
     allowed_categories,
 )
+from honeymoney.valuation import (
+    validate_dated_rates,
+    valuation_summary,
+    value_transactions,
+)
 
-JSON_SCHEMA_VERSION = 1
+JSON_SCHEMA_VERSION = 2
 IDENTITY_MIGRATION_AMBIGUITY_FLAG = "identity_migration_ambiguous"
 PROFILE_PREVIEW_LIMIT = 10
 PROFILE_PREVIEW_FIELDS = [
@@ -93,8 +121,12 @@ PROFILE_PREVIEW_FIELDS = [
     "merchant",
     "original_amount",
     "original_currency",
+    "posted_amount",
+    "posted_currency",
     "source_page",
     "source_row",
+    "valuation_source",
+    "valuation_status",
 ]
 
 
@@ -193,6 +225,10 @@ def main(argv: list[str] | None = None) -> int:
         return _import_command(argv[1:])
     if argv and argv[0] == "profile":
         return _profile_command(argv[1:])
+    if argv and argv[0] == "evaluate":
+        return _evaluate_command(argv[1:])
+    if argv and argv[0] == "learn":
+        return _learn_command(argv[1:])
     if argv and argv[0] == "status":
         return _status_command(argv[1:])
     if argv and argv[0] == "pending":
@@ -250,6 +286,39 @@ def _run_pipeline(
     profiles = importers._load_profiles(config)
     profile_mappings = importers._load_profile_mappings(config)
     identity_state = load_configured_identity_state(categorized_path, config)
+    corrections = load_corrections(config)
+    migration_source_corrections: dict[str, dict[str, str]] = {}
+    migration_correction_updates: dict[str, dict[str, str]] = {}
+    prior_canonical_rows = identity_state.rows
+    prior_overlap_manifest = identity_state.overlap_manifest
+    if (
+        identity_state.canonical_migration_required
+        and not identity_state.bootstrap_required
+    ):
+        migration_source_corrections = {
+            identifier: dict(patch) for identifier, patch in corrections.items()
+        }
+        migration_baseline = canonicalize_overlaps(
+            identity_state.source_rows,
+            [],
+            identity_state.overlap_manifest,
+        )
+        migration_projection = project_corrections(
+            migration_baseline,
+            corrections,
+        )
+        migration_correction_updates = migration_projection.corrections
+        corrections = {
+            **corrections,
+            **migration_correction_updates,
+        }
+        apply_corrections(migration_baseline.rows, migration_projection.corrections)
+        apply_history_ambiguity(
+            migration_baseline.rows,
+            migration_projection.ambiguous_transaction_ids,
+        )
+        prior_canonical_rows = migration_baseline.rows
+        prior_overlap_manifest = migration_baseline.manifest
     transactions, import_warnings, file_reports, identity_sources = (
         importers._import_transactions(
             input_files,
@@ -270,6 +339,16 @@ def _run_pipeline(
         requested_action = "replace"
     else:
         requested_action = "import"
+    prior_replacement_overlap = (
+        canonicalize_overlaps(
+            identity_state.source_rows,
+            identity_state.rows,
+            identity_state.overlap_manifest,
+        )
+        if requested_action == "replace"
+        and not identity_state.canonical_migration_required
+        else None
+    )
     candidate_source_ids = importers._candidate_source_ids(
         input_files, input_path, config
     )
@@ -294,6 +373,11 @@ def _run_pipeline(
         manifest=identity_state.manifest,
         sources=identity_sources,
         intent=requested_action,
+        allow_unmatched_reallocation=(
+            identity_state.canonical_migration_required
+            and requested_action in {"replace", "reset"}
+        ),
+        allow_parser_upgrade_reallocation=requested_action in {"replace", "reset"},
     )
     source_transactions = [dict(row) for row in resolution.resolved_rows]
     resolved_source_ids = {
@@ -310,21 +394,19 @@ def _run_pipeline(
     )
     reset_ids = set(resolution.reset_transaction_ids)
     removed_correction_ids = set(reset_ids)
-    corrections = load_corrections(config)
-    correction_documents: dict[Path, str] = {}
     retained_source_rows = [dict(row) for row in resolution.retained_ledger_rows]
     source_rows = [*retained_source_rows, *source_transactions]
     overlap_result = canonicalize_overlaps(
         source_rows,
-        identity_state.rows,
-        identity_state.overlap_manifest,
+        prior_canonical_rows,
+        prior_overlap_manifest,
     )
     ledger_rows = overlap_result.rows
     if args.reset and config.get("corrections"):
         prior_overlap = canonicalize_overlaps(
             identity_state.source_rows,
-            identity_state.rows,
-            identity_state.overlap_manifest,
+            prior_canonical_rows,
+            prior_overlap_manifest,
         )
         prior_source_by_transaction = {
             row["transaction_id"]: row["source_id"]
@@ -358,20 +440,17 @@ def _run_pipeline(
                 removed_correction_ids.update(
                     slot["transaction_id"] for slot in group["slots"]
                 )
-        corrections_path, corrections_content, corrections = (
-            prepare_corrections_document(
-                config, removed_transaction_ids=removed_correction_ids
-            )
-        )
-        correction_documents[corrections_path] = corrections_content
+        for transaction_id in removed_correction_ids:
+            corrections.pop(transaction_id, None)
+            migration_correction_updates.pop(transaction_id, None)
         overlap_result = canonicalize_overlaps(
             source_rows,
             [
                 row
-                for row in identity_state.rows
+                for row in prior_canonical_rows
                 if row.get("transaction_id") not in removed_correction_ids
             ],
-            identity_state.overlap_manifest,
+            prior_overlap_manifest,
         )
         ledger_rows = overlap_result.rows
     if not has_processed_source:
@@ -392,7 +471,38 @@ def _run_pipeline(
         if row.get("canonical_group_id") in affected_group_ids
     ]
     release_overlap_review_ownership(transactions)
-    correction_projection = project_corrections(overlap_result, corrections)
+    parser_upgrade_source_ids = _parser_upgrade_rekeyed_source_ids(
+        identity_state.manifest,
+        resolution.next_manifest,
+        set(resolution.replaced_source_ids),
+    )
+    if migration_source_corrections:
+        migration_projection = project_migration_corrections(
+            overlap_result,
+            identity_state.source_rows,
+            source_rows,
+            migration_source_corrections,
+            corrections,
+        )
+        migration_correction_updates = migration_projection.corrections
+        corrections.update(migration_correction_updates)
+        removed_correction_ids.update(migration_projection.removed_transaction_ids)
+        correction_projection = migration_projection
+    elif prior_replacement_overlap is not None and parser_upgrade_source_ids:
+        replacement_projection = project_replacement_corrections(
+            prior_replacement_overlap,
+            overlap_result,
+            identity_state.source_rows,
+            source_rows,
+            corrections,
+            parser_upgrade_source_ids,
+        )
+        migration_correction_updates = replacement_projection.corrections
+        corrections.update(migration_correction_updates)
+        removed_correction_ids.update(replacement_projection.removed_transaction_ids)
+        correction_projection = replacement_projection
+    else:
+        correction_projection = project_corrections(overlap_result, corrections)
     canonical_corrections = correction_projection.corrections
     local_memory = build_local_categorization_memory(
         ledger_rows, canonical_corrections, config
@@ -437,6 +547,7 @@ def _run_pipeline(
         refresh_duplicate_candidates(ledger_rows, final_review_ids=final_review_ids)
         enforce_overlap_review(ledger_rows, overlap_result)
     _enforce_identity_review(ledger_rows)
+    synchronize_review_states(ledger_rows, legacy=False)
     review_rows = [row for row in transactions if row["needs_review"] == "true"]
     duplicate_count, duplicate_group_count, duplicate_candidates = (
         _duplicate_compatibility(overlap_result.diagnostic)
@@ -460,7 +571,10 @@ def _run_pipeline(
         "duplicate_count": duplicate_count,
         "duplicate_group_count": duplicate_group_count,
         "duplicate_candidates": duplicate_candidates,
-        "categorization": {"structural_count": structural_count},
+        "categorization": {
+            "structural_count": structural_count,
+            "provenance": _categorization_provenance(transactions),
+        },
         "strict": args.strict,
         "interactive": interactive,
         "replace": args.replace or args.reset,
@@ -478,6 +592,8 @@ def _run_pipeline(
                 1 for row in ledger_rows if row.get("needs_review") == "true"
             ),
             "uncategorized_count": _uncategorized_count(ledger_rows),
+            "review_reason_counts": review_summary(ledger_rows),
+            "valuation": valuation_summary(ledger_rows),
         },
         "files": file_reports,
         "transaction_flags": _transaction_flags(ledger_rows),
@@ -496,14 +612,26 @@ def _run_pipeline(
         overlap_manifest=overlap_result.manifest,
     )
     files[import_report_path] = json.dumps(report, indent=2, sort_keys=True) + "\n"
-    files.update(correction_documents)
-    files.update(
-        _interactive_correction_documents(
-            categorized_interactively,
+    correction_updates = dict(migration_correction_updates)
+    correction_updates.update(
+        {
+            transaction["transaction_id"]: {
+                "category": transaction["category"],
+                "confidence": "1.00",
+                "reason": "Categorized interactively",
+                "needs_review": "false",
+            }
+            for transaction in categorized_interactively
+        }
+    )
+    correction_updates.update(review_state_correction_updates(corrections, ledger_rows))
+    if config.get("corrections") and (correction_updates or removed_correction_ids):
+        corrections_path, corrections_content, _ = prepare_corrections_document(
             config,
+            correction_updates,
             removed_transaction_ids=removed_correction_ids,
         )
-    )
+        files[corrections_path] = corrections_content
     persist_generation(categorized_path, files)
     _status.clear()
 
@@ -524,6 +652,49 @@ def _run_pipeline(
     return 0
 
 
+def _parser_upgrade_rekeyed_source_ids(
+    prior_manifest: Mapping[str, object],
+    next_manifest: Mapping[str, object],
+    replaced_source_ids: set[str],
+) -> set[str]:
+    prior_sources = {
+        str(source.get("source_id", "")): source
+        for source in prior_manifest.get("sources", [])
+        if isinstance(source, dict)
+    }
+    next_sources = {
+        str(source.get("source_id", "")): source
+        for source in next_manifest.get("sources", [])
+        if isinstance(source, dict)
+    }
+    upgraded: set[str] = set()
+    for source_id in replaced_source_ids:
+        prior = prior_sources.get(source_id)
+        next_source = next_sources.get(source_id)
+        if prior is None or next_source is None:
+            continue
+        if prior.get("extractor_contract_id") != next_source.get(
+            "extractor_contract_id"
+        ):
+            upgraded.add(source_id)
+            continue
+        if prior.get("source_revision") != next_source.get("source_revision"):
+            continue
+        prior_fingerprints = sorted(
+            str(record.get("record_fingerprint", ""))
+            for record in prior.get("records", [])
+            if isinstance(record, dict) and record.get("state") == "active"
+        )
+        next_fingerprints = sorted(
+            str(record.get("record_fingerprint", ""))
+            for record in next_source.get("records", [])
+            if isinstance(record, dict) and record.get("state") == "active"
+        )
+        if prior_fingerprints != next_fingerprints:
+            upgraded.add(source_id)
+    return upgraded
+
+
 def _help_text() -> str:
     return """Honeymoney
 
@@ -539,6 +710,9 @@ Commands:
   honeymoney review --transaction ID --as income
                                    Apply one human accounting decision
   honeymoney profile validate ... Validate a profile and optionally preview input
+  honeymoney evaluate LEDGER --reference CORRECTIONS
+                                   Report category coverage and exact accuracy
+  honeymoney learn [--yes]          Build exact rules from active reviews
   honeymoney status [MONTH]        Show processed/categorized counts for a period
   honeymoney pending [MONTH]       List transactions that need review
   honeymoney duplicates            List unresolved exact-overlap count groups
@@ -572,6 +746,216 @@ Review filters and decisions:
   --remember --yes                 Save an exact, directional income rule
   --json                           Valid only for a fully specified one-shot review
 """
+
+
+def _learn_command(argv: list[str]) -> int:
+    parser = _command_parser(
+        argv,
+        prog="honeymoney learn",
+        description="Build safe exact rules from active human reviews.",
+    )
+    parser.add_argument("--config", dest="config_path")
+    parser.add_argument("--yes", action="store_true")
+    parser.add_argument("--json", action="store_true")
+    args = parser.parse_args(argv)
+
+    config = _load_config(args.config_path)
+    categorized_path = Path(config["paths"]["output"])
+    state = load_configured_identity_state(categorized_path, config)
+    if state.canonical_migration_required:
+        raise ValueError("The active ledger must be migrated before learning rules")
+    plan = plan_learned_rules(state.rows, load_corrections(config))
+
+    rules_value = config.get("rules")
+    if not isinstance(rules_value, str) or not rules_value.strip():
+        raise ValueError("Config must define a rules JSON path")
+    rules_path = Path(rules_value)
+    if not rules_path.exists():
+        raise ValueError("The configured rules file does not exist")
+    with rules_path.open(encoding="utf-8") as handle:
+        document = json.load(handle)
+    if not isinstance(document, dict) or not isinstance(document.get("rules"), list):
+        raise ValueError("Rules document field rules must be a list")
+    if not all(isinstance(rule, dict) for rule in document["rules"]):
+        raise ValueError("Rules document entries must be objects")
+    manual_rules = [
+        rule
+        for rule in document["rules"]
+        if rule.get("managed_by") != MANAGED_RULE_MARKER
+    ]
+    next_rules = [*manual_rules, *plan.rules]
+    validate_rules(next_rules, config)
+    next_document = dict(document)
+    next_document["rules"] = next_rules
+    next_content = json.dumps(next_document, indent=2, sort_keys=True) + "\n"
+
+    if args.yes and next_content != rules_path.read_text(encoding="utf-8"):
+        persist_generation(
+            categorized_path,
+            {
+                rules_path: next_content,
+                categorized_path: categorized_path.read_text(encoding="utf-8"),
+            },
+        )
+
+    counts = plan.counts()
+    if args.json:
+        _emit_json(
+            "learn",
+            "success" if args.yes else "dry_run",
+            data=counts,
+        )
+        return 0
+    mode = "Updated" if args.yes else "Dry run"
+    print(
+        f"{mode}: {counts['candidates']} candidates, "
+        f"{counts['broad_rules']} broad rules, "
+        f"{counts['amount_specific_rules']} amount-specific rules, "
+        f"{counts['historical_rows_covered']} historical rows covered, "
+        f"{counts['conflicts']} conflicts, {counts['skips']} skips, "
+        f"{counts['projected_coverage']:.1%} projected coverage."
+    )
+    if not args.yes:
+        print("Run again with --yes to update managed rules.")
+    return 0
+
+
+def _evaluate_command(argv: list[str]) -> int:
+    parser = _command_parser(
+        argv,
+        prog="honeymoney evaluate",
+        description=(
+            "Compare candidate categories with an exact local reference without "
+            "printing transaction text."
+        ),
+    )
+    parser.add_argument("candidate_path", metavar="LEDGER")
+    parser.add_argument("--reference", required=True, dest="reference_path")
+    parser.add_argument("--json", action="store_true")
+    args = parser.parse_args(argv)
+
+    candidate = _category_rows(Path(args.candidate_path))
+    reference = _category_rows(Path(args.reference_path))
+    reference = {
+        identifier: category
+        for identifier, category in reference.items()
+        if category and category != "Unknown"
+    }
+    confusion: dict[tuple[str, str], int] = {}
+    covered = 0
+    correct = 0
+    unresolved = 0
+    missing = 0
+    for identifier, reference_category in reference.items():
+        candidate_category = candidate.get(identifier)
+        if candidate_category is None:
+            label = "Missing"
+            missing += 1
+        elif not candidate_category or candidate_category == "Unknown":
+            label = "Unknown"
+            unresolved += 1
+        else:
+            label = candidate_category
+            covered += 1
+            if candidate_category == reference_category:
+                correct += 1
+        key = (reference_category, label)
+        confusion[key] = confusion.get(key, 0) + 1
+    reference_count = len(reference)
+    data = {
+        "reference_count": reference_count,
+        "candidate_count": len(candidate),
+        "covered_count": covered,
+        "coverage": covered / reference_count if reference_count else 0.0,
+        "correct_count": correct,
+        "exact_category_accuracy": (
+            correct / reference_count if reference_count else 0.0
+        ),
+        "covered_category_accuracy": correct / covered if covered else 0.0,
+        "unresolved_count": unresolved,
+        "missing_candidate_count": missing,
+        "confusion_counts": [
+            {
+                "reference_category": reference_category,
+                "candidate_category": candidate_category,
+                "count": count,
+            }
+            for (reference_category, candidate_category), count in sorted(
+                confusion.items()
+            )
+        ],
+    }
+    if args.json:
+        _emit_json("evaluate", "success", data=data)
+        return 0
+    print(
+        f"Coverage: {covered}/{reference_count}; "
+        f"exact category accuracy: {correct}/{reference_count}; "
+        f"covered category accuracy: {correct}/{covered}"
+    )
+    for item in data["confusion_counts"]:
+        print(
+            f"{item['reference_category']} -> {item['candidate_category']}: "
+            f"{item['count']}"
+        )
+    return 0
+
+
+def _category_rows(path: Path) -> dict[str, str]:
+    if not path.exists() or not path.is_file():
+        raise ValueError("Category comparison input does not exist or is not a file")
+    with path.open(newline="", encoding="utf-8-sig") as handle:
+        reader = csv.DictReader(handle)
+        fields = set(reader.fieldnames or ())
+        if not {"transaction_id", "category"} <= fields:
+            raise ValueError(
+                "Category comparison input must contain transaction_id and category"
+            )
+        rows: dict[str, str] = {}
+        for row in reader:
+            identifier = canonical_csv_cell(
+                "transaction_id", row.get("transaction_id") or ""
+            ).strip()
+            if not identifier:
+                continue
+            if identifier in rows:
+                raise ValueError(
+                    "Category comparison input contains a duplicate transaction_id"
+                )
+            rows[identifier] = canonical_csv_cell(
+                "category", row.get("category") or ""
+            ).strip()
+    return rows
+
+
+def _categorization_provenance(rows: list[dict[str, str]]) -> dict[str, int]:
+    counts = {
+        "total_count": len(rows),
+        "deterministic_count": 0,
+        "memory_count": 0,
+        "exact_correction_count": 0,
+        "accepted_model_count": 0,
+        "reviewable_model_count": 0,
+        "unresolved_count": 0,
+    }
+    for row in rows:
+        flags = set(filter(None, row.get("flags", "").split(";")))
+        if "manual_correction" in flags:
+            counts["exact_correction_count"] += 1
+        elif "local_memory_categorized" in flags:
+            counts["memory_count"] += 1
+        elif "ollama_categorized" in flags:
+            key = (
+                "accepted_model_count"
+                if row.get("needs_review") == "false"
+                else "reviewable_model_count"
+            )
+            counts[key] += 1
+        elif row.get("category") in {"", "Unknown"}:
+            counts["unresolved_count"] += 1
+        else:
+            counts["deterministic_count"] += 1
+    return counts
 
 
 def _duplicates_command(argv: list[str]) -> int:
@@ -893,6 +1277,7 @@ def _validate_config_document(config: dict[str, Any]) -> None:
             _validate_finite_number(
                 f"exchange_rates.{currency}", rate, minimum=Decimal("0"), exclusive=True
             )
+    validate_dated_rates(config)
 
     threshold = config.get("review_confidence_threshold")
     if threshold is not None:
@@ -938,6 +1323,14 @@ def _validate_config_document(config: dict[str, Any]) -> None:
                 minimum=Decimal("0"),
                 exclusive=True,
             )
+        if "calibrated_acceptance_threshold" in ollama:
+            _validate_finite_number(
+                "ollama.calibrated_acceptance_threshold",
+                ollama["calibrated_acceptance_threshold"],
+                minimum=Decimal("0"),
+                maximum=Decimal("1"),
+                range_message="must be a number from 0 to 1",
+            )
         if "think" in ollama and not isinstance(ollama["think"], (bool, str)):
             raise ValueError("Config field ollama.think must be a boolean or string")
 
@@ -945,7 +1338,7 @@ def _validate_config_document(config: dict[str, Any]) -> None:
     if reconciliation is not None:
         if not isinstance(reconciliation, dict):
             raise ValueError("Config field reconciliation must be a JSON object")
-        reconciliation_date_window(config)
+    validate_reconciliation_config(config)
 
     categorization_memory = config.get("categorization_memory")
     if categorization_memory is not None:
@@ -1675,11 +2068,12 @@ def _accounting_decision_patch(
 ) -> dict[str, str]:
     if decision == "income" and transaction_direction(transaction) != "inflow":
         raise ValueError("Income can be confirmed only for a normalized inflow")
-    patch = {
-        "confidence": "1.00",
-        "reason": reason,
-        "needs_review": "false",
-    }
+    remaining_reasons = [
+        item
+        for item in review_reason_tokens(transaction.get("review_reasons", ""))
+        if item != REVIEW_REASON_ACCOUNTING_FLOW
+    ]
+    patch = {"confidence": "1.00", "reason": reason}
     mappings = {
         "income": {"category": "Income", "flow_type": "income"},
         "refund": {"flow_type": "refund"},
@@ -1696,9 +2090,19 @@ def _accounting_decision_patch(
             "flow_type": "investment_transfer",
         },
         "expense": {"flow_type": "expense"},
-        "unresolved": {"flow_type": "unresolved", "needs_review": "true"},
+        "unresolved": {"flow_type": "unresolved"},
     }
     patch.update(mappings[decision])
+    if "category" in patch:
+        remaining_reasons = [
+            item
+            for item in remaining_reasons
+            if item not in {REVIEW_REASON_CATEGORY, REVIEW_REASON_CATEGORY_SUGGESTION}
+        ]
+    if decision == "unresolved":
+        remaining_reasons.append(REVIEW_REASON_ACCOUNTING_FLOW)
+    patch["review_reasons"] = ";".join(dict.fromkeys(remaining_reasons))
+    patch["needs_review"] = str(bool(remaining_reasons)).lower()
     return patch
 
 
@@ -1721,16 +2125,18 @@ def _accounting_review_line(transaction: dict[str, str]) -> str:
     merchant_label = merchant
     if description and description != merchant:
         merchant_label += f" / {description}"
-    return "  ".join(
-        [
-            transaction.get("date", ""),
-            amount_label,
-            transaction.get("account", "") or transaction.get("account_id", ""),
-            merchant_label,
-            f"category={transaction.get('category', '')}",
-            f"flow={transaction.get('flow_type', '')}",
-        ]
-    )
+    parts = [
+        transaction.get("date", ""),
+        amount_label,
+        transaction.get("account", "") or transaction.get("account_id", ""),
+        merchant_label,
+        f"category={transaction.get('category', '')}",
+        f"flow={transaction.get('flow_type', '')}",
+    ]
+    labels = review_reason_labels(transaction.get("review_reasons", ""))
+    if labels:
+        parts.append("review=" + ", ".join(labels))
+    return "  ".join(parts)
 
 
 def _can_remember_income(transaction: dict[str, str]) -> bool:
@@ -1884,7 +2290,10 @@ def _overlap_diagnostic_for_rows(
     }
 
 
-def _normalize_loaded_rows(rows: list[dict[str, str]]) -> list[dict[str, str]]:
+def _normalize_loaded_rows(
+    rows: list[dict[str, str]],
+    config: Mapping[str, object] | None = None,
+) -> list[dict[str, str]]:
     normalized = [dict(row) for row in rows]
     for row in normalized:
         if not row.get("account_type") and not row.get("canonical_group_id"):
@@ -1893,6 +2302,9 @@ def _normalize_loaded_rows(rows: list[dict[str, str]]) -> list[dict[str, str]]:
                 "Credit Card": "credit_card",
                 "Brokerage": "investment",
             }.get(row.get("payment_method", ""), "unknown")
+    if config is not None:
+        value_transactions(normalized, config)
+    synchronize_review_states(normalized, legacy=True)
     return normalized
 
 
@@ -1960,7 +2372,7 @@ def _status_command(argv: list[str]) -> int:
     config = _load_config(args.config_path)
     categorized_path = Path(config["paths"]["output"])
     state = load_configured_identity_state(categorized_path, config)
-    ledger_rows = _normalize_loaded_rows(state.rows)
+    ledger_rows = _normalize_loaded_rows(state.rows, config)
     if not ledger_rows:
         if args.json:
             _emit_json(
@@ -1973,6 +2385,8 @@ def _status_command(argv: list[str]) -> int:
                     "categorized": 0,
                     "uncategorized": 0,
                     "needs_review": 0,
+                    "review_reason_counts": review_summary([]),
+                    "valuation": valuation_summary([]),
                     "source_occurrence_count": 0,
                     "canonical_occurrence_count": 0,
                     "consolidated_occurrence_count": 0,
@@ -2055,6 +2469,8 @@ def _status_command(argv: list[str]) -> int:
                 "categorized": len(categorized),
                 "uncategorized": len(rows) - len(categorized),
                 "needs_review": len(review),
+                "review_reason_counts": review_summary(rows),
+                "valuation": valuation_summary(rows),
                 "overlap": overlap,
                 "duplicate_count": duplicate_count,
                 "duplicate_group_count": duplicate_group_count,
@@ -2078,6 +2494,8 @@ def _status_command(argv: list[str]) -> int:
     print(f"  Categorized:          {len(categorized)}")
     print(f"  Uncategorized:        {len(rows) - len(categorized)}")
     print(f"  Needs review:         {len(review)}")
+    missing_valuation = valuation_summary(rows)["missing_count"]
+    print(f"  Missing HKD values:   {missing_valuation}")
     print(f"  Consolidated overlap: {len(source_rows) - len(rows)}")
     print(f"  Ambiguous groups:     {overlap['ambiguous_group_count']}")
     print(f"  Unresolved inflows:   {unresolved_inflows}")
@@ -2111,7 +2529,7 @@ def _report_command(argv: list[str]) -> int:
     config = _load_config(args.config_path)
     categorized_path = Path(config["paths"]["output"])
     state = load_configured_identity_state(categorized_path, config)
-    ledger_rows = _normalize_loaded_rows(state.rows)
+    ledger_rows = _normalize_loaded_rows(state.rows, config)
     current_overlap = (
         None
         if state.canonical_migration_required
@@ -2156,6 +2574,9 @@ def _report_command(argv: list[str]) -> int:
             data={
                 "period": {"start": start.isoformat(), "end": end.isoformat()},
                 "transaction_count": len(rows),
+                "missing_base_currency_count": missing_base_currency_count(rows),
+                "valuation": valuation_summary(rows),
+                "review_reason_counts": review_summary(rows),
                 "overlap": period_overlap,
                 "duplicate_count": duplicate_count,
                 "duplicate_group_count": duplicate_group_count,
@@ -2185,6 +2606,8 @@ def _reconcile_command(argv: list[str]) -> int:
     config = _load_config(args.config_path)
     categorized_path = Path(args.output_path or config["paths"]["output"])
     corrections = load_corrections(config)
+    effective_corrections = corrections
+    removed_correction_ids: set[str] = set()
     final_review_ids = _final_review_ids(corrections)
     state = load_configured_identity_state(categorized_path, config)
     if (
@@ -2195,14 +2618,19 @@ def _reconcile_command(argv: list[str]) -> int:
         overlap_result = canonicalize_overlaps(
             state.source_rows, [], state.overlap_manifest
         )
-        rows = _normalize_loaded_rows(overlap_result.rows)
-        correction_projection = project_corrections(
-            overlap_result, load_corrections(config)
-        )
+        rows = _normalize_loaded_rows(overlap_result.rows, config)
+        correction_projection = project_corrections(overlap_result, corrections)
+        effective_corrections = correction_projection.corrections
+        removed_correction_ids = {
+            row.get("transaction_id", "")
+            for row in state.source_rows
+            if row.get("transaction_id", "") in corrections
+        }
+        final_review_ids = _final_review_ids(effective_corrections)
         apply_corrections(rows, correction_projection.corrections)
         apply_history_ambiguity(rows, correction_projection.ambiguous_transaction_ids)
     else:
-        rows = _normalize_loaded_rows(state.rows)
+        rows = _normalize_loaded_rows(state.rows, config)
         overlap_result = (
             None
             if state.canonical_migration_required
@@ -2217,12 +2645,33 @@ def _reconcile_command(argv: list[str]) -> int:
             state.source_rows, rows, overlap_result.manifest
         )
         rows = overlap_result.rows
+        summary = reconcile_ledger(rows, config, statement_rows=state.source_rows)
+        enforce_overlap_review(rows, overlap_result)
     overlap_diagnostic = (
         _unmigrated_overlap(rows)
         if overlap_result is None
         else overlap_result.diagnostic
     )
     if not args.dry_run:
+        correction_document: tuple[Path, str] | None = None
+        if config.get("corrections"):
+            correction_updates = (
+                {
+                    transaction_id: dict(patch)
+                    for transaction_id, patch in effective_corrections.items()
+                }
+                if removed_correction_ids
+                else {}
+            )
+            correction_updates.update(
+                review_state_correction_updates(effective_corrections, rows)
+            )
+            correction_path, correction_content, _ = prepare_corrections_document(
+                config,
+                correction_updates,
+                removed_transaction_ids=removed_correction_ids,
+            )
+            correction_document = (correction_path, correction_content)
         _write_ledger_outputs(
             categorized_path,
             rows,
@@ -2236,6 +2685,7 @@ def _reconcile_command(argv: list[str]) -> int:
             ),
             overlap_result=overlap_result,
             identity_manifest_document=state.manifest_document,
+            correction_document=correction_document,
         )
 
     artifacts = {"categorized_csv": str(categorized_path.resolve())}
@@ -2291,7 +2741,7 @@ def _pending_command(argv: list[str]) -> int:
     config = _load_config(args.config_path)
     categorized_path = Path(config["paths"]["output"])
     state = load_configured_identity_state(categorized_path, config)
-    ledger_rows = _normalize_loaded_rows(state.rows)
+    ledger_rows = _normalize_loaded_rows(state.rows, config)
     refresh_duplicate_candidates(
         ledger_rows,
         final_review_ids=_final_review_ids(load_corrections(config)),
@@ -2304,7 +2754,10 @@ def _pending_command(argv: list[str]) -> int:
         )
     )
     pending_rows = [
-        to_review_row(row)
+        {
+            **to_review_row(row),
+            "review_reason_labels": review_reason_labels(row.get("review_reasons", "")),
+        }
         for row in _rows_in_period(ledger_rows, start, end)
         if row.get("needs_review") == "true"
     ]
@@ -2328,6 +2781,7 @@ def _pending_command(argv: list[str]) -> int:
                 "period": {"start": start.isoformat(), "end": end.isoformat()},
                 "count": len(pending_rows),
                 "transactions": pending_rows,
+                "review_reason_counts": review_summary(pending_rows),
                 "overlap": pending_overlap,
                 "duplicate_count": duplicate_count,
                 "duplicate_group_count": duplicate_group_count,
@@ -2354,7 +2808,10 @@ def _pending_command(argv: list[str]) -> int:
     if pending_overlap["ambiguous_group_count"]:
         print(f"  Ambiguous overlap groups: {pending_overlap['ambiguous_group_count']}")
     for row in pending_rows:
-        print(f"  {row['transaction_id']}  {row['date']}  {row['merchant']}")
+        labels = ", ".join(row["review_reason_labels"])
+        print(
+            f"  {row['transaction_id']}  {row['date']}  {row['merchant']}  [{labels}]"
+        )
     return 0
 
 
@@ -2597,20 +3054,21 @@ def _write_ledger_outputs(
     overlap_manifest: dict[str, object] | None = None,
     overlap_result: CanonicalizationResult | None = None,
     identity_manifest_document: str | None = None,
+    correction_document: tuple[Path, str] | None = None,
 ) -> None:
     refresh_duplicate_candidates(ledger_rows, final_review_ids=final_review_ids)
     enforce_overlap_review(ledger_rows, overlap_result)
-    persist_generation(
+    documents = ledger_output_documents(
         categorized_path,
-        ledger_output_documents(
-            categorized_path,
-            ledger_rows,
-            source_occurrences=source_rows,
-            source_evidence=source_evidence,
-            overlap_manifest=overlap_manifest,
-            identity_manifest_document=identity_manifest_document,
-        ),
+        ledger_rows,
+        source_occurrences=source_rows,
+        source_evidence=source_evidence,
+        overlap_manifest=overlap_manifest,
+        identity_manifest_document=identity_manifest_document,
     )
+    if correction_document is not None:
+        documents[correction_document[0]] = correction_document[1]
+    persist_generation(categorized_path, documents)
 
 
 def _active_source_ids_by_fingerprint(
@@ -2755,6 +3213,9 @@ def _transaction_prompt_line(transaction: dict[str, str]) -> str:
     parts = [transaction.get("date", ""), f"{amount} {currency}".strip(), name]
     if description and description != name:
         parts.append(description)
+    labels = review_reason_labels(transaction.get("review_reasons", ""))
+    if labels:
+        parts.append("Review: " + ", ".join(labels))
     return "  ".join(part for part in parts if part)
 
 
@@ -2816,7 +3277,7 @@ def _write_starter_workspace(root: Path, force: bool) -> None:
     _write_json_file(rules_path, _starter_rules(), force)
     _write_text_file(
         corrections_path,
-        "transaction_id,category,flow_type,owner,payment_method,confidence,reason,notes,needs_review\n",
+        ",".join(CORRECTION_COLUMNS) + "\n",
         force,
     )
     _write_json_file(
@@ -3002,9 +3463,18 @@ def _transaction_diagnostics(
             continue
         diagnostics[transaction["transaction_id"]] = {
             "needs_review": transaction.get("needs_review") == "true",
+            "review_reasons": transaction.get("review_reasons", "").split(";")
+            if transaction.get("review_reasons")
+            else [],
+            "review_reason_labels": review_reason_labels(
+                transaction.get("review_reasons", "")
+            ),
             "reason": transaction.get("reason", ""),
             "category": transaction.get("category", ""),
             "owner": transaction.get("owner", ""),
+            "amount_hkd": transaction.get("amount_hkd", ""),
+            "valuation_source": transaction.get("valuation_source", ""),
+            "valuation_status": transaction.get("valuation_status", ""),
         }
     return diagnostics
 
@@ -3015,7 +3485,7 @@ def _enforce_identity_review(transactions: list[dict[str, str]]) -> None:
         if IDENTITY_MIGRATION_AMBIGUITY_FLAG not in flags:
             continue
         release_duplicate_review_ownership(transaction)
-        transaction["needs_review"] = "true"
+        set_review_reason(transaction, REVIEW_REASON_IDENTITY, True)
         transaction["reason"] = (
             "Identity migration is ambiguous; explicit resolution is required"
         )

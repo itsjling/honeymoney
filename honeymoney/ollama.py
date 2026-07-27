@@ -21,6 +21,11 @@ from honeymoney.duplicates import (
     DUPLICATE_FLAG,
     release_duplicate_review_ownership,
 )
+from honeymoney.review_state import (
+    REVIEW_REASON_CATEGORY,
+    REVIEW_REASON_CATEGORY_SUGGESTION,
+    set_review_reason,
+)
 from honeymoney.schema import allowed_categories
 
 _TICK_INTERVAL_SECONDS = 1.0
@@ -421,6 +426,9 @@ def apply_ollama_fallback(
     rejected = 0
     invalid = 0
     processed = 0
+    retry_candidate_count = 0
+    retry_recovered_count = 0
+    retry_invalid_count = 0
     details: list[str] = []
     for batch_number, batch in enumerate(chunks, start=1):
         start_index = processed + 1
@@ -486,9 +494,66 @@ def apply_ollama_fallback(
                 "invalid_count": invalid,
             }, [warning]
 
-        batch_counts, batch_invalid, batch_details = _apply_ollama_response(
-            batch, response_body, config
+        batch_counts, batch_invalid, batch_details, retry_batch = (
+            _apply_ollama_response(batch, response_body, config)
         )
+        retry_candidate_count += len(retry_batch)
+        if retry_batch:
+            try:
+                retry_response = _request_ollama(
+                    retry_batch,
+                    ollama_config,
+                    config,
+                    transport=transport,
+                )
+            except (
+                OSError,
+                urllib.error.URLError,
+                TimeoutError,
+                json.JSONDecodeError,
+            ) as error:
+                error_text = _error_text(error)
+                for transaction in retry_batch:
+                    transaction["flags"] = _append_flag(
+                        transaction["flags"], "ollama_unavailable"
+                    )
+                    transaction["reason"] = _append_reason(
+                        transaction["reason"], "Ollama retry unavailable"
+                    )
+                return {
+                    "status": "unavailable",
+                    "error": error_text,
+                    "candidate_count": len(unresolved),
+                    "skipped_exact_category_correction_count": (
+                        skipped_exact_category_correction_count
+                    ),
+                    "accepted_count": accepted + batch_counts["accepted"],
+                    "reviewable_count": reviewable + batch_counts["reviewable"],
+                    "rejected_count": rejected + batch_counts["rejected"],
+                    "applied_count": (
+                        accepted
+                        + reviewable
+                        + batch_counts["accepted"]
+                        + batch_counts["reviewable"]
+                    ),
+                    "invalid_count": invalid + batch_invalid,
+                    "retry_candidate_count": retry_candidate_count,
+                    "retry_recovered_count": retry_recovered_count,
+                    "unresolved_count": sum(
+                        row.get("category") == "Unknown" for row in unresolved
+                    ),
+                }, [f"Ollama unavailable: {error_text}"]
+            (
+                retry_counts,
+                retry_invalid,
+                retry_details,
+                retry_unresolved,
+            ) = _apply_ollama_response(retry_batch, retry_response, config)
+            retry_recovered_count += len(retry_batch) - len(retry_unresolved)
+            for outcome in ("accepted", "reviewable", "rejected"):
+                batch_counts[outcome] += retry_counts[outcome]
+            retry_invalid_count += retry_invalid
+            batch_details.extend(retry_details)
         accepted += batch_counts["accepted"]
         reviewable += batch_counts["reviewable"]
         rejected += batch_counts["rejected"]
@@ -496,14 +561,17 @@ def apply_ollama_fallback(
         details.extend(batch_details)
 
     applied = accepted + reviewable
-    status = "success" if not invalid else "invalid_response"
+    status = (
+        "success" if not invalid and not retry_invalid_count else "invalid_response"
+    )
     warnings = []
-    if invalid:
+    if invalid or retry_invalid_count:
         warnings = ["Ollama returned invalid categorizations"]
-        warnings.extend(details[:5])
-        if len(details) > 5:
+        unique_details = list(dict.fromkeys(details))
+        warnings.extend(unique_details[:5])
+        if len(unique_details) > 5:
             warnings.append(
-                f"...and {len(details) - 5} more invalid Ollama categorizations"
+                f"...and {len(unique_details) - 5} more invalid Ollama categorizations"
             )
         applied_ids = {
             transaction["transaction_id"]
@@ -530,6 +598,10 @@ def apply_ollama_fallback(
         "rejected_count": rejected,
         "applied_count": applied,
         "invalid_count": invalid,
+        "retry_invalid_count": retry_invalid_count,
+        "retry_candidate_count": retry_candidate_count,
+        "retry_recovered_count": retry_recovered_count,
+        "unresolved_count": sum(row.get("category") == "Unknown" for row in unresolved),
     }, warnings
 
 
@@ -679,6 +751,8 @@ def _ollama_transaction_payload(transaction: dict[str, str]) -> dict[str, str]:
         "posted_amount": transaction["posted_amount"],
         "posted_currency": transaction["posted_currency"],
         "amount_hkd": transaction["amount_hkd"],
+        "valuation_source": transaction.get("valuation_source", ""),
+        "valuation_status": transaction.get("valuation_status", ""),
         "institution": transaction["institution"],
         "payment_method": transaction["payment_method"],
     }
@@ -688,7 +762,12 @@ def _apply_ollama_response(
     unresolved: list[dict[str, str]],
     response_body: dict[str, Any],
     config: dict[str, Any],
-) -> tuple[dict[str, int], int, list[str]]:
+) -> tuple[
+    dict[str, int],
+    int,
+    list[str],
+    list[dict[str, str]],
+]:
     raw_response = response_body.get("response", "")
     try:
         categorizations = json.loads(raw_response)
@@ -698,6 +777,7 @@ def _apply_ollama_response(
             {"accepted": 0, "reviewable": 0, "rejected": 0},
             len(unresolved),
             [detail],
+            list(unresolved),
         )
     if isinstance(categorizations, dict):
         categorizations = categorizations.get("categorizations")
@@ -707,6 +787,7 @@ def _apply_ollama_response(
             {"accepted": 0, "reviewable": 0, "rejected": 0},
             len(unresolved),
             [detail],
+            list(unresolved),
         )
 
     by_id = {transaction["transaction_id"]: transaction for transaction in unresolved}
@@ -781,8 +862,11 @@ def _apply_ollama_response(
             transaction, category, confidence, config
         ):
             release_duplicate_review_ownership(transaction)
-        transaction["needs_review"] = (
-            "false" if outcome.outcome == "accepted" else "true"
+        set_review_reason(transaction, REVIEW_REASON_CATEGORY, False)
+        set_review_reason(
+            transaction,
+            REVIEW_REASON_CATEGORY_SUGGESTION,
+            outcome.outcome == "reviewable",
         )
         counts[outcome.outcome] += 1
 
@@ -792,7 +876,12 @@ def _apply_ollama_response(
         details.append(
             f"Ollama returned no categorization for {unanswered} transaction(s)"
         )
-    return counts, invalid, details
+    retry_rows = [
+        transaction
+        for transaction_id, transaction in by_id.items()
+        if transaction_id not in handled_ids
+    ]
+    return counts, invalid, details, retry_rows
 
 
 def _model_requires_independent_review(

@@ -47,6 +47,9 @@ This narrows these ADR 0001 rules:
 
 All other ADR 0001 privacy, no-guessing, source replacement, reset, hash
 conflict, and recoverable persistence rules remain in force.
+This includes ADR 0001's narrow parser-upgrade replacement exception: repeated
+source rows may reallocate without a guessed pairing, while canonical review
+history moves only when it is unique or fully agreed.
 
 ADR 0002 required source identity-v2 fields on each local-memory observation.
 After this migration, reviewed choices belong to stable canonical transaction
@@ -328,6 +331,24 @@ copies the old rows into source-occurrence evidence, creates a random namespace
 and canonical groups and slots, clears generated duplicate-candidate state,
 applies only proven mutable-state assignments, and publishes all new state
 together. Thus read-only commands never show temporary canonical IDs.
+
+If that first write replaces or resets a source, it builds the canonical
+baseline before source-record matching. Exact locator and fingerprint matches
+keep their source owners, followed by unique fingerprint matches. Repeated
+unmatched records retire and receive new source owners without pairing old and
+new occurrences. Compatible corrections and review history remain on the
+stable canonical slots.
+
+If a parser repair changes account or currency fields during that first write,
+correction projection may compare old and new rows within the same `source_id`.
+The comparison uses normalized dates, original and posted amounts, merchant,
+and description; it does not use the repaired account or currency fields. A
+unique old and new row may carry one correction. A repeated group may carry a
+correction only when its counts match, every old row has a correction, and all
+patches agree. Partial or conflicting groups stay pooled and require review.
+Corrections never choose source owners or canonical slots. The published
+correction file uses final canonical IDs and removes the retired source-ID
+aliases.
 
 Any partial canonical state fails before persistence. Repeated migration,
 import, replacement, reset, correction, and reconciliation are idempotent.

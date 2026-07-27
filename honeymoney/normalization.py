@@ -6,6 +6,10 @@ from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Mapping
 
+_REVIEW_REASON_CATEGORY = "category_decision"
+_REVIEW_REASON_ACCOUNTING_FLOW = "accounting_flow"
+_REVIEW_REASON_SOURCE_DATA = "source_data_issue"
+
 
 def _normalized_row(
     source_row: dict[str, str],
@@ -31,16 +35,15 @@ def _normalized_row(
     ).upper()
     invalid_amount_columns: list[str] = []
     original_amount = _signed_amount(source_row, columns, invalid_amount_columns)
+    explicit_posted_amount = _value(source_row, columns.get("posted_amount"))
     posted_currency = (
         _value(source_row, columns.get("posted_currency"))
+        or (str(profile.get("account_currency", "")) if explicit_posted_amount else "")
         or original_currency
         or str(profile.get("account_currency", ""))
     ).upper()
     posted_amount = _posted_amount(
         source_row, columns, original_amount, invalid_amount_columns
-    )
-    amount_hkd, amount_flags, amount_reason = _amount_hkd(
-        posted_amount, posted_currency, config
     )
     statement_opening_balance = _optional_decimal_value(
         source_row, columns.get("statement_opening_balance")
@@ -50,8 +53,7 @@ def _normalized_row(
     )
 
     flags = ["uncategorized"]
-    if amount_flags:
-        flags.extend(amount_flags)
+    amount_reason = ""
     if invalid_amount_columns:
         flags.append("invalid_amount")
         amount_reason = _append_reason(
@@ -59,7 +61,10 @@ def _normalized_row(
             f"Invalid amount in {', '.join(_unique(invalid_amount_columns))}",
         )
 
-    return {
+    review_reasons = [_REVIEW_REASON_CATEGORY, _REVIEW_REASON_ACCOUNTING_FLOW]
+    if invalid_amount_columns:
+        review_reasons.append(_REVIEW_REASON_SOURCE_DATA)
+    normalized = {
         "transaction_id": "",
         "source_id": "",
         "source_namespace_id": "",
@@ -82,7 +87,9 @@ def _normalized_row(
         "original_currency": original_currency,
         "posted_amount": _format_decimal(posted_amount),
         "posted_currency": posted_currency,
-        "amount_hkd": _format_decimal(amount_hkd) if amount_hkd is not None else "",
+        "amount_hkd": "",
+        "valuation_source": "",
+        "valuation_status": "",
         "statement_opening_balance": statement_opening_balance,
         "statement_closing_balance": statement_closing_balance,
         "merchant": merchant,
@@ -98,6 +105,7 @@ def _normalized_row(
         "payment_method": str(profile.get("payment_method", "Unknown")),
         "confidence": "0.00",
         "needs_review": "true",
+        "review_reasons": ";".join(review_reasons),
         "reason": amount_reason or "No categorization rules have been applied",
         "flags": ";".join(flags),
         "notes": "Imported from PDF" if source_page else "",
@@ -105,6 +113,7 @@ def _normalized_row(
         "source_page": source_page,
         "source_row": str(row_number),
     }
+    return normalized
 
 
 def _normalized_match_text(value: object) -> str:

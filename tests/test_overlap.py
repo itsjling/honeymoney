@@ -17,6 +17,7 @@ from honeymoney.overlap import (
     overlap_manifest_document,
     parse_overlap_manifest,
     project_corrections,
+    project_migration_corrections,
     release_overlap_review_ownership,
     resolve_duplicate_group,
     validate_overlap_agreement,
@@ -1096,6 +1097,72 @@ class CanonicalOverlapTest(unittest.TestCase):
         self.assertNotIn(second_id, projected.corrections)
         self.assertEqual(projected.ambiguous_transaction_ids, (second_id,))
 
+    def test_migration_rekeys_unique_history_and_retires_conflicting_aliases(
+        self,
+    ) -> None:
+        prior = [
+            _occurrence("1", "a", merchant="SYNTHETIC REPEAT"),
+            _occurrence("2", "a", merchant="SYNTHETIC REPEAT"),
+            _occurrence("5", "a", merchant="SYNTHETIC UNIQUE"),
+        ]
+        current = [
+            _occurrence("3", "a", merchant="SYNTHETIC REPEAT"),
+            _occurrence("4", "a", merchant="SYNTHETIC REPEAT"),
+            _occurrence("6", "a", merchant="SYNTHETIC UNIQUE"),
+        ]
+        for row in current:
+            row["account_id"] = "household_card_v2"
+        result = canonicalize_overlaps(
+            current, [], empty_overlap_manifest(_NAMESPACE_KEY)
+        )
+        source_corrections = {
+            prior[0]["transaction_id"]: {
+                "category": "Dining",
+                "needs_review": "false",
+            },
+            prior[1]["transaction_id"]: {
+                "category": "Groceries",
+                "needs_review": "false",
+            },
+            prior[2]["transaction_id"]: {
+                "category": "Transport",
+                "needs_review": "false",
+            },
+        }
+
+        projected = project_migration_corrections(
+            result,
+            prior,
+            current,
+            source_corrections,
+            source_corrections,
+        )
+
+        unique_id = next(
+            row["transaction_id"]
+            for row in result.rows
+            if row["merchant"] == "SYNTHETIC UNIQUE"
+        )
+        repeated_ids = {
+            row["transaction_id"]
+            for row in result.rows
+            if row["merchant"] == "SYNTHETIC REPEAT"
+        }
+        self.assertEqual(
+            projected.corrections,
+            {
+                unique_id: {
+                    "category": "Transport",
+                    "needs_review": "false",
+                }
+            },
+        )
+        self.assertEqual(set(projected.ambiguous_transaction_ids), repeated_ids)
+        self.assertEqual(
+            set(projected.removed_transaction_ids),
+            set(source_corrections),
+        )
+
     def test_unresolved_legacy_rows_pass_through_without_consolidation(self) -> None:
         legacy = _occurrence("1", "a")
         legacy.update(
@@ -1143,6 +1210,53 @@ class CanonicalOverlapTest(unittest.TestCase):
                 corrupted[0][field] = value
                 with self.assertRaisesRegex(ValueError, "overlap_manifest_invalid"):
                     validate_overlap_agreement(corrupted, [legacy], result.manifest)
+
+    def test_agreement_accepts_only_matched_exchange_valuation_without_source_hkd(
+        self,
+    ) -> None:
+        occurrence = _occurrence("1", "a")
+        occurrence.update(
+            {
+                "original_amount": "100.00",
+                "original_currency": "EUR",
+                "posted_amount": "100.00",
+                "posted_currency": "EUR",
+                "amount_hkd": "",
+                "valuation_source": "missing",
+                "valuation_status": "missing",
+            }
+        )
+        result = canonicalize_overlaps(
+            [occurrence], [], empty_overlap_manifest(_NAMESPACE_KEY)
+        )
+        matched = copy.deepcopy(result.rows)
+        matched[0]["amount_hkd"] = "850.00"
+        matched[0]["valuation_source"] = "matched_exchange_leg"
+        matched[0]["valuation_status"] = "actual"
+
+        validate_overlap_agreement(matched, [occurrence], result.manifest)
+
+        unsupported = copy.deepcopy(matched)
+        unsupported[0]["valuation_source"] = "configured_fixed_rate"
+        with self.assertRaisesRegex(ValueError, "overlap_manifest_invalid"):
+            validate_overlap_agreement(unsupported, [occurrence], result.manifest)
+
+        configured_source = copy.deepcopy(occurrence)
+        configured_source["amount_hkd"] = "780.00"
+        configured_source["valuation_source"] = "configured_fixed_rate"
+        configured_source["valuation_status"] = "estimated"
+        configured_result = canonicalize_overlaps(
+            [configured_source], [], empty_overlap_manifest(_NAMESPACE_KEY)
+        )
+        preferred_match = copy.deepcopy(configured_result.rows)
+        preferred_match[0]["amount_hkd"] = "850.00"
+        preferred_match[0]["valuation_source"] = "matched_exchange_leg"
+        preferred_match[0]["valuation_status"] = "actual"
+        validate_overlap_agreement(
+            preferred_match,
+            [configured_source],
+            configured_result.manifest,
+        )
 
     def test_agreement_rejects_public_source_display_and_balance_evidence(self) -> None:
         occurrences = [_occurrence("1", "a"), _occurrence("2", "b")]

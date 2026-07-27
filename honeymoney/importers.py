@@ -40,12 +40,20 @@ from honeymoney.schema import (
     allowed_owners,
     allowed_payment_methods,
 )
+from honeymoney.valuation import value_transaction
 
 
 @dataclass(frozen=True)
 class _PdfBalanceLine:
     text: str
     is_continuation: bool = False
+
+
+@dataclass(frozen=True)
+class _PdfBalanceCandidate:
+    page_number: int
+    line_number: int
+    value: Decimal
 
 
 def _relative_source(path: Path, input_root: Path) -> str:
@@ -388,6 +396,7 @@ def _validate_pdf_balance_mappings(profile_id: str, settings: dict[str, Any]) ->
         "currency_group",
         "opening_regex",
         "closing_regex",
+        "closing_requires_opening",
     }
     for index, mapping in enumerate(mappings):
         mapping_field = f"{field}[{index}]"
@@ -400,6 +409,13 @@ def _validate_pdf_balance_mappings(profile_id: str, settings: dict[str, Any]) ->
             raise ValueError(
                 f"Profile {profile_id} field {mapping_field} has unsupported fields: "
                 + ", ".join(unknown)
+            )
+        if "closing_requires_opening" in mapping and not isinstance(
+            mapping["closing_requires_opening"], bool
+        ):
+            raise ValueError(
+                f"Profile {profile_id} field {mapping_field}."
+                "closing_requires_opening must be a boolean"
             )
         compiled: dict[str, re.Pattern[str]] = {}
         for regex_field in ("opening_regex", "closing_regex"):
@@ -1123,6 +1139,7 @@ def _import_csv(
                 columns=columns,
                 source_file=_relative_source(csv_path, input_root),
             )
+            value_transaction(normalized, config)
             if _row_is_skipped(normalized, skip_patterns):
                 row_number += 1
                 continue
@@ -1194,6 +1211,7 @@ def _import_pdf(
                         source_file=_relative_source(pdf_path, input_root),
                         source_page=str(page_number),
                     )
+                    value_transaction(normalized, config)
                     if _row_is_skipped(normalized, skip_patterns):
                         continue
                     rows.append(normalized)
@@ -1238,6 +1256,7 @@ def _import_pdf(
                             source_file=_relative_source(pdf_path, input_root),
                             source_page=str(page_number),
                         )
+                        value_transaction(normalized, config)
                         if _row_is_skipped(normalized, skip_patterns):
                             continue
                         rows.append(normalized)
@@ -1310,6 +1329,7 @@ def _import_pdf(
                                 source_file=_relative_source(pdf_path, input_root),
                                 source_page=str(page_number),
                             )
+                            value_transaction(normalized, config)
                             if _row_is_skipped(normalized, skip_patterns):
                                 continue
                             rows.append(normalized)
@@ -1350,16 +1370,21 @@ def _pdf_balance_observations(
     )
     current_sections = {"words": "", "tables": ""}
     transaction_tables = {"words": False, "tables": False}
-    source_observations: dict[str, dict[tuple[str, str], dict[str, list[Decimal]]]] = {
+    source_observations: dict[
+        str,
+        dict[tuple[str, str], dict[str, list[_PdfBalanceCandidate]]],
+    ] = {
         "words": {},
         "tables": {},
     }
-    for page in pdf.pages:
+    for page_number, page in enumerate(pdf.pages, start=1):
         for source, lines in _pdf_balance_line_sources(page, pdf_settings).items():
             observations = source_observations[source]
-            current_section = current_sections[source]
-            in_transaction_table = transaction_tables[source]
-            for line in lines:
+            current_section = "" if source == "tables" else current_sections[source]
+            in_transaction_table = (
+                False if source == "tables" else transaction_tables[source]
+            )
+            for line_number, line in enumerate(lines, start=1):
                 text = line.text
                 folded = " ".join(text.casefold().split())
                 matched_section = _pdf_balance_heading_section(
@@ -1389,14 +1414,38 @@ def _pdf_balance_observations(
                     if section and section != current_section:
                         continue
                     for kind in ("opening", "closing"):
-                        match = re.search(str(mapping.get(f"{kind}_regex", "")), text)
+                        match = re.search(
+                            str(mapping.get(f"{kind}_regex", "")),
+                            text,
+                            flags=re.IGNORECASE,
+                        )
                         if match is None:
                             continue
                         target = _pdf_balance_target(mapping, accounts, match)
-                        balance = _strict_pdf_balance(match.group("balance"))
-                        observations.setdefault(target, {"opening": [], "closing": []})[
-                            kind
-                        ].append(balance)
+                        target_candidates = observations.setdefault(
+                            target, {"opening": [], "closing": []}
+                        )
+                        if (
+                            kind == "closing"
+                            and mapping.get("closing_requires_opening", False)
+                            and (
+                                not target_candidates["opening"]
+                                or target_candidates["closing"]
+                            )
+                        ):
+                            continue
+                        balance = _strict_pdf_balance(
+                            match.groupdict().get("balance")
+                            or match.groupdict().get("total_balance"),
+                            match.groupdict().get("balance_sign"),
+                        )
+                        target_candidates[kind].append(
+                            _PdfBalanceCandidate(
+                                page_number,
+                                line_number,
+                                balance,
+                            )
+                        )
                         if kind == "opening":
                             saw_opening = True
                         else:
@@ -1413,7 +1462,10 @@ def _pdf_balance_observations(
                     in_transaction_table = False
             current_sections[source] = current_section
             transaction_tables[source] = in_transaction_table
-    return _merge_pdf_balance_observations(source_observations.values())
+    return _merge_pdf_balance_observations(
+        _reduce_pdf_balance_observations(observations)
+        for observations in source_observations.values()
+    )
 
 
 def _pdf_balance_lines(page: Any, pdf_settings: dict[str, Any]) -> list[str]:
@@ -1492,6 +1544,94 @@ def _merge_pdf_balance_observations(
     return merged
 
 
+def _reduce_pdf_balance_observations(
+    observations: dict[
+        tuple[str, str],
+        dict[str, list[_PdfBalanceCandidate]],
+    ],
+) -> dict[tuple[str, str], dict[str, list[Decimal]]]:
+    reduced: dict[tuple[str, str], dict[str, list[Decimal]]] = {}
+    for target, candidates in observations.items():
+        openings = sorted(
+            candidates["opening"],
+            key=lambda item: (item.page_number, item.line_number),
+        )
+        closings = sorted(
+            candidates["closing"],
+            key=lambda item: (item.page_number, item.line_number),
+        )
+        raw = {
+            "opening": [candidate.value for candidate in openings],
+            "closing": [candidate.value for candidate in closings],
+        }
+        if (
+            not openings
+            or not closings
+            or len({candidate.value for candidate in openings}) <= 1
+            and len({candidate.value for candidate in closings}) <= 1
+        ):
+            reduced[target] = raw
+            continue
+
+        page_openings = _single_pdf_balance_per_page(openings)
+        page_closings = _single_pdf_balance_per_page(closings)
+        if (
+            page_openings is None
+            or page_closings is None
+            or max(page_closings) < max(page_openings)
+        ):
+            reduced[target] = raw
+            continue
+
+        first_opening_page = min(page_openings)
+        final_closing_page = max(page_closings)
+        unmatched_closing_pages = {
+            page for page in page_closings if page != final_closing_page
+        }
+        rollover_valid = True
+        for page in sorted(page_openings):
+            if page == first_opening_page:
+                continue
+            prior_page = next(
+                (
+                    candidate_page
+                    for candidate_page in sorted(
+                        unmatched_closing_pages,
+                        reverse=True,
+                    )
+                    if candidate_page < page
+                    and page_closings[candidate_page] == page_openings[page]
+                ),
+                None,
+            )
+            if prior_page is None:
+                rollover_valid = False
+                break
+            unmatched_closing_pages.remove(prior_page)
+        if rollover_valid and not unmatched_closing_pages:
+            reduced[target] = {
+                "opening": [page_openings[first_opening_page]],
+                "closing": [page_closings[final_closing_page]],
+            }
+        else:
+            reduced[target] = raw
+    return reduced
+
+
+def _single_pdf_balance_per_page(
+    candidates: list[_PdfBalanceCandidate],
+) -> dict[int, Decimal] | None:
+    values: dict[int, set[Decimal]] = {}
+    for candidate in candidates:
+        values.setdefault(candidate.page_number, set()).add(candidate.value)
+    if any(len(page_values) != 1 for page_values in values.values()):
+        return None
+    return {
+        page_number: next(iter(page_values))
+        for page_number, page_values in values.items()
+    }
+
+
 def _pdf_balance_heading_section(
     line: _PdfBalanceLine,
     accounts: dict[str, Any],
@@ -1499,11 +1639,34 @@ def _pdf_balance_heading_section(
     *,
     in_transaction_table: bool,
 ) -> str:
+    exact_section = _pdf_exact_section_heading(line, accounts, settings)
+    if exact_section:
+        return exact_section
     if not _pdf_balance_line_can_change_section(
         line, settings, in_transaction_table=in_transaction_table
     ):
         return ""
     return _pdf_matching_section(line.text, accounts)
+
+
+def _pdf_exact_section_heading(
+    line: _PdfBalanceLine,
+    accounts: dict[str, Any],
+    settings: dict[str, Any],
+) -> str:
+    if line.is_continuation or _pdf_balance_line_has_transaction_shape(
+        line.text, settings
+    ):
+        return ""
+    normalized_text = " ".join(line.text.casefold().split())
+    return next(
+        (
+            str(section)
+            for section in accounts
+            if normalized_text == " ".join(str(section).casefold().split())
+        ),
+        "",
+    )
 
 
 def _pdf_balance_line_can_change_section(
@@ -1551,7 +1714,7 @@ def _pdf_balance_target(
     return account_id.strip(), currency.strip().upper()
 
 
-def _strict_pdf_balance(value: str | None) -> Decimal:
+def _strict_pdf_balance(value: str | None, balance_sign: str | None = None) -> Decimal:
     if value is None:
         raise ValueError("PDF balance mapping captured an invalid balance")
     try:
@@ -1560,6 +1723,8 @@ def _strict_pdf_balance(value: str | None) -> Decimal:
         raise ValueError("PDF balance mapping captured an invalid balance") from error
     if not balance.is_finite():
         raise ValueError("PDF balance mapping captured an invalid balance")
+    if balance_sign:
+        balance = abs(balance) if balance_sign.casefold() == "cr" else -abs(balance)
     return balance
 
 
@@ -1660,9 +1825,7 @@ def _pdf_sectioned_word_source_rows(
                 in_table
                 and (date_match is not None or deposits or withdrawals or description)
             )
-            matched_section = (
-                "" if has_transaction_shape else _pdf_matching_section(folded, accounts)
-            )
+            matched_section = _pdf_exact_matching_section(folded, accounts)
             matched_account = accounts.get(matched_section)
             if isinstance(matched_account, dict):
                 current_account = {
@@ -1827,6 +1990,22 @@ def _pdf_matching_section(text: str, accounts: dict[str, Any]) -> str:
             str(section)
             for section in accounts
             if " ".join(str(section).casefold().split()) in normalized_text
+        ),
+        "",
+    )
+
+
+def _pdf_exact_matching_section(text: str, accounts: dict[str, Any]) -> str:
+    normalized_text = " ".join(text.casefold().split())
+    return next(
+        (
+            str(section)
+            for section in accounts
+            if normalized_text
+            in {
+                " ".join(str(section).casefold().split()),
+                f"account: {' '.join(str(section).casefold().split())}",
+            }
         ),
         "",
     )

@@ -137,7 +137,12 @@ honeymoney review --flow unresolved --direction inflow --month 2026-05
 honeymoney review --transaction TRANSACTION_ID --as income
 ```
 
-With no filter, interactively categorizes only transactions already marked as needing review in `categorized.csv`. Pass `--category CATEGORY` to revisit all ledger rows currently in that category even when they are not marked for review. Repeat the option to review the union of multiple categories. Category names must match the configured category vocabulary exactly.
+With no filter, interactively categorizes only transactions with one or more
+typed `review_reasons` in `categorized.csv`. `pending`, JSON, the review CSV,
+and the HTML report show why each row needs a choice. Pass `--category CATEGORY`
+to revisit all ledger rows currently in that category even when they are not
+marked for review. Repeat the option to review the union of multiple
+categories. Category names must match the configured category vocabulary.
 
 The legacy no-filter and category-only forms keep the category prompt. Period
 forms (`MONTH`, `--month`, or `--start`/`--end`) compose with `--category`,
@@ -163,6 +168,19 @@ normalized description, and inflow direction; it never matches by amount. The
 rule and correction are validated and persisted together, and deterministic
 rules run before the optional local Ollama fallback.
 
+```bash
+honeymoney learn
+honeymoney learn --yes
+honeymoney learn --json
+```
+
+Builds exact deterministic rules from active reviewed corrections. The command
+is a dry run unless you pass `--yes`. It learns a broad rule only when every
+active row with the same institution, account ID, normalized description, and
+direction has an agreeing review. Conflicting groups may split by exact posted
+amount and currency. Managed rules never set owner or payment method, and
+hand-written rules stay first. Output contains counts only.
+
 ## Accounting-safe Ollama categorization
 
 Ollama is an optional local merchant-category suggester, never an accounting
@@ -177,7 +195,8 @@ establish their flows.
 Optional `category_policies` entries give a category a `kind` and model
 description. Kinds are `spending`, `accounting`, and `manual_only`; custom
 categories default to manual-only, and protected built-ins cannot become
-spending. Import reports include additive structural and Ollama outcome metrics.
+spending. Import reports count deterministic, memory, exact-correction,
+accepted-model, reviewable-model, and unresolved results.
 
 ```bash
 honeymoney config
@@ -199,11 +218,19 @@ exactly one CSV or PDF parser definition, usable date and amount mappings, and
 valid parser-specific settings. A selected CSV profile must map only headers
 present in the statement.
 
+`exchange_rates` holds fixed fallbacks. `dated_exchange_rates` maps a currency
+to exact ISO dates and rates, for example
+`{"EUR": {"2026-07-02": 8.90}}`. A same-row posted HKD amount wins, followed by
+a matched exchange leg, an exact-date rate, and a fixed fallback. A missing
+rate leaves `amount_hkd` empty and adds a valuation-completeness item, not a
+category-review item.
+
 Prints or edits the active `config.json`; pass `--config PATH` to target another file. `config edit` validates a temporary editor copy before replacing the original and uses `$VISUAL`, then `$EDITOR`, then `vi`. With no Ollama edit option, the guided editor lists models installed at the configured local endpoint. Selecting or passing a model also enables the Ollama fallback; `--enable` verifies that the configured model is installed before enabling it. Direct `--model`, `--enable`, and `--disable` edits can use `--json`.
 
 ## Structured agent commands
 
 `setup`, `run`, `import`, `status`, `report`, `config`, `profile validate`,
+`evaluate`, `learn`,
 and fully specified one-shot `review` accept `--json`. JSON mode prints exactly
 one versioned document to stdout, never prompts, and never opens a browser.
 Exit code `0` is success, `1` is strict partial success, and `2` is an input,
@@ -223,7 +250,13 @@ honeymoney config --config ./money/config.json --json
 honeymoney config edit ollama --config ./money/config.json --model qwen3.5:4b --json
 honeymoney profile validate ./money/profiles/starter_csv.json \
   --config ./money/config.json --json
+honeymoney evaluate ./money/output/categorized.csv \
+  --reference ./money/corrections.csv --json
 ```
+
+`evaluate` joins rows by exact transaction ID. It reports category coverage,
+exact accuracy across the full reference set, accuracy among labeled rows, and
+confusion counts. It does not print merchant or statement text.
 
 `pending` returns transactions requiring review. Apply reviewed corrections as
 one validated JSON batch:
@@ -254,7 +287,14 @@ honeymoney report
 honeymoney report june --no-open
 ```
 
-Writes a self-contained `output/report.html` with transactions for the selected period and a pie chart of the category distribution with per-category sums, then opens it in your browser. Headline income includes only confirmed `income`; spending includes confirmed `expense` net of `refund`. Transfers, card payments, and investment movements are excluded, while unresolved inflows and outflows have separate visible tiles. Accepts the same period arguments and default as `status` (default: the current calendar month); `--no-open` writes the file without opening it. The page loads nothing from the network.
+Writes a self-contained `output/report.html` with transactions for the selected
+period and a category chart, then opens it in your browser. Headline income
+includes only confirmed `income`; spending includes confirmed `expense` net of
+`refund`. Transfers, card payments, and investment movements are excluded.
+Rows without HKD valuation stay out of totals and trigger a visible warning.
+Each row shows the original amount and currency, HKD reporting value, valuation
+source, and actual, estimated, or missing status. The page loads nothing from
+the network.
 
 ```bash
 honeymoney reconcile
@@ -262,7 +302,13 @@ honeymoney reconcile --dry-run
 honeymoney reconcile --json
 ```
 
-Recomputes cash-flow treatment and transfer pairing across the entire cumulative ledger. Matching uses opposite signs, equal absolute base-currency amounts, distinct owned `account_id` values, account types, and `reconciliation.date_window_days` (default `3`). Only a unique mutual best match is paired; ambiguous candidates remain reviewable. `--dry-run` inspects without rewriting the ledger.
+Recomputes cash-flow treatment and transfer pairing across the full ledger.
+Same-currency matching uses opposite signs, equal absolute HKD amounts, distinct
+owned `account_id` values, account types, and
+`reconciliation.date_window_days` (default `3`). Cross-currency matching uses
+same-date, same-institution exchange-debit and foreign-deposit evidence. Paired
+currency-conversion legs become internal transfers, so reports do not count
+either leg as spending. `--dry-run` inspects without writing.
 
 Useful run options:
 
@@ -281,9 +327,11 @@ Each run writes three public files next to the configured categorized CSV:
 
 - `categorized.csv`: canonical transactions with `canonical_group_id`,
   `canonical_slot`, `provenance_status`, and `source_occurrence_count`, plus
-  categories, flow treatment, transfer links, owners, confidence, and flags.
+  categories, flow treatment, transfer links, owners, confidence, typed review
+  reasons, and HKD valuation source and status.
   Source identity, display, and statement-balance cells are empty here.
-- `review_needed.csv`: only ledger rows that need review, with editable correction columns.
+- `review_needed.csv`: only ledger rows that need review, with typed reasons,
+  plain reason labels, and editable correction columns.
 - `import_report.json`: processed files, selected profiles, warnings, source and
   canonical counts, overlap provenance, compatibility duplicate counts, review
   counts, ledger totals, and Ollama status.
@@ -392,8 +440,11 @@ Set `ollama.enabled` to `true` to categorize remaining unknown transactions with
 - `timeout_seconds`: request timeout per batch (default 120).
 - `batch_size`: transactions per request (default 5). Local inference is generation-bound, so total time is roughly constant regardless of batch size (~1-2s per transaction); a smaller batch just means the status line updates more often and any one request has less to lose if it fails.
 - `think`: allow thinking models to reason before answering (default `false`; slower and unnecessary since responses are schema-constrained).
+- `calibrated_acceptance_threshold`: an optional threshold from `0` to `1`
+  backed by a local accuracy check. Without it, model labels stay in review
+  even when the model reports high confidence.
 
-Requests constrain the response to model-eligible spending categories, with definitions and accounting-boundary guidance; they never include owners. The status line shows which batch is in flight (`batch 2/20 (transactions 6-10 of 98, 4s)`) and ticks up every second while waiting, so a slow local model doesn't look stuck. If Ollama is unreachable, the model is missing, or a categorization is rejected, the import prints a warning explaining why and the affected rows stay uncategorized for interactive or manual review.
+Requests constrain the response to model-eligible spending categories, with definitions and accounting-boundary guidance; they never include owners. When a response omits a row or gives an invalid item, Honeymoney retries only those rows once and keeps valid results. The status line shows which batch is in flight (`batch 2/20 (transactions 6-10 of 98, 4s)`) and ticks up every second while waiting, so a slow local model doesn't look stuck. If Ollama is unreachable, the model is missing, or a categorization is rejected, the import prints a warning explaining why and the affected rows stay uncategorized for interactive or manual review.
 When an interactive import reaches uncategorized rows while the fallback is disabled, the prompt explains that `ollama.enabled` must be set to `true` in `config.json`.
 
 The repo also includes fuller examples:
@@ -435,12 +486,17 @@ directory for manual approval and repeatable local checks.
 1. Run Honeymoney.
 2. Run `honeymoney review` to categorize transactions needing review, or use `honeymoney review --flow unresolved --direction inflow` for human cash-flow decisions.
 3. For manual review, open `review_needed.csv`.
-4. Fill correction fields such as `category`, `flow_type`, `owner`, `payment_method`, `confidence`, `reason`, or `notes`. Blank cells are omitted patches; use structured `correct` with `"notes": ""` to explicitly clear notes.
+4. Fill correction fields such as `category`, `flow_type`, `owner`,
+   `payment_method`, `confidence`, `reason`, `review_reasons`, or `notes`.
+   `reason` records provenance; `review_reasons` records any choice that must
+   remain pending. Blank cells are omitted patches; use structured `correct`
+   with `"notes": ""` to clear notes.
 5. Save those rows as `corrections.csv` or point config at the edited file.
 6. Run Honeymoney again.
 
-Corrections apply by exact `transaction_id`. Omitted fields, including review
-state, remain unchanged.
+Corrections apply by exact `transaction_id`. A valid category clears stale
+category review. Other current review reasons, such as an identity conflict,
+remain.
 
 ## Tests
 

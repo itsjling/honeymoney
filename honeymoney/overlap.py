@@ -33,7 +33,16 @@ from honeymoney.overlap_contracts import (
     OverlapSlot,
     OverlapWarning,
 )
+from honeymoney.reconciliation import derive_flow_type
+from honeymoney.review_state import (
+    REVIEW_REASON_ACCOUNTING_FLOW,
+    REVIEW_REASON_CATEGORY,
+    REVIEW_REASON_IDENTITY,
+    set_review_reason,
+    synchronize_review_state,
+)
 from honeymoney.schema import CATEGORIZED_COLUMNS
+from honeymoney.valuation import VALUATION_SOURCE_MATCHED_EXCHANGE
 
 OVERLAP_MANIFEST_SCHEMA_VERSION = 2
 OVERLAP_MANIFEST_NAME = ".honeymoney-overlap-manifest.json"
@@ -116,6 +125,7 @@ _MUTABLE_FIELDS = (
     "payment_method",
     "confidence",
     "needs_review",
+    "review_reasons",
     "reason",
     "flags",
     "notes",
@@ -141,6 +151,15 @@ class CorrectionProjection:
 
     corrections: dict[str, dict[str, str]]
     ambiguous_transaction_ids: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class MigrationCorrectionProjection:
+    """Final canonical corrections after a proven source-record rekey."""
+
+    corrections: dict[str, dict[str, str]]
+    ambiguous_transaction_ids: tuple[str, ...]
+    removed_transaction_ids: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -256,6 +275,7 @@ def validate_overlap_agreement(
         if any(
             str(actual.get(field, "")) != expected_row[field]
             for field in _IMMUTABLE_SOURCE_FIELDS
+            if field != "amount_hkd"
         ):
             raise ValueError("overlap_manifest_invalid")
         if any(
@@ -318,6 +338,224 @@ def project_corrections(
     return CorrectionProjection(projected, tuple(sorted(ambiguous)))
 
 
+def project_migration_corrections(
+    result: CanonicalizationResult,
+    prior_source_rows: Sequence[Mapping[str, object]],
+    next_source_rows: Sequence[Mapping[str, object]],
+    source_corrections: Mapping[str, Mapping[str, str]],
+    current_corrections: Mapping[str, Mapping[str, str]],
+) -> MigrationCorrectionProjection:
+    """Carry review history across a unique parser-driven source rekey."""
+    prior_by_key = _migration_rows_by_key(prior_source_rows)
+    next_by_key = _migration_rows_by_key(next_source_rows)
+    next_aliases: dict[str, dict[str, str]] = {}
+    ambiguous_occurrence_ids: set[str] = set()
+
+    for key in sorted(set(prior_by_key) & set(next_by_key)):
+        prior_rows = prior_by_key[key]
+        next_rows = next_by_key[key]
+        patches = [
+            {
+                str(field): str(value)
+                for field, value in source_corrections[identifier].items()
+            }
+            for row in prior_rows
+            if (identifier := str(row.get("transaction_id", ""))) in source_corrections
+        ]
+        if not patches:
+            continue
+        unique_patches = {tuple(sorted(patch.items())): patch for patch in patches}
+        if (
+            len(prior_rows) == len(next_rows)
+            and len(patches) == len(prior_rows)
+            and len(unique_patches) == 1
+        ):
+            patch = next(iter(unique_patches.values()))
+            for row in next_rows:
+                next_aliases[str(row.get("transaction_id", ""))] = dict(patch)
+            continue
+        ambiguous_occurrence_ids.update(
+            str(row.get("transaction_id", "")) for row in next_rows
+        )
+
+    projected = project_corrections(
+        result,
+        {**current_corrections, **next_aliases},
+    )
+    ambiguous_canonical_ids = set(projected.ambiguous_transaction_ids)
+    for group in result.diagnostic["groups"]:
+        occurrence_ids = {
+            str(identifier)
+            for pool in group["source_occurrence_pools"]
+            for identifier in pool
+        }
+        if occurrence_ids & ambiguous_occurrence_ids:
+            ambiguous_canonical_ids.update(
+                str(identifier) for identifier in group["canonical_transaction_ids"]
+            )
+    prior_ids = {
+        str(row.get("transaction_id", ""))
+        for row in prior_source_rows
+        if row.get("transaction_id")
+    }
+    return MigrationCorrectionProjection(
+        projected.corrections,
+        tuple(sorted(ambiguous_canonical_ids)),
+        tuple(sorted(prior_ids & set(source_corrections))),
+    )
+
+
+def project_replacement_corrections(
+    prior_result: CanonicalizationResult,
+    next_result: CanonicalizationResult,
+    prior_source_rows: Sequence[Mapping[str, object]],
+    next_source_rows: Sequence[Mapping[str, object]],
+    corrections: Mapping[str, Mapping[str, str]],
+    replaced_source_ids: set[str],
+) -> MigrationCorrectionProjection:
+    """Carry canonical review history across a parser-driven source rekey."""
+    prior_by_id = {
+        str(row.get("transaction_id", "")): row
+        for row in prior_source_rows
+        if row.get("transaction_id")
+    }
+    targeted_prior_keys = {
+        _migration_row_key(row)
+        for row in prior_source_rows
+        if str(row.get("source_id", "")) in replaced_source_ids
+        and has_stable_v2_identity(row)
+    }
+    targeted_next_rows = [
+        row
+        for row in next_source_rows
+        if str(row.get("source_id", "")) in replaced_source_ids
+        and has_stable_v2_identity(row)
+    ]
+    next_by_key: dict[tuple[str, ...], list[Mapping[str, object]]] = {}
+    for row in targeted_next_rows:
+        next_by_key.setdefault(_migration_row_key(row), []).append(row)
+
+    safe_by_key: dict[tuple[str, ...], dict[str, str]] = {}
+    ambiguous_keys: set[tuple[str, ...]] = set()
+    removed_ids: set[str] = set()
+    next_canonical_ids = {row["transaction_id"] for row in next_result.rows}
+
+    for group in prior_result.diagnostic["groups"]:
+        canonical_ids = [
+            str(identifier) for identifier in group["canonical_transaction_ids"]
+        ]
+        patches = [
+            {str(field): str(value) for field, value in corrections[identifier].items()}
+            for identifier in canonical_ids
+            if identifier in corrections
+        ]
+        if not patches:
+            continue
+        occurrence_ids = {
+            str(identifier)
+            for pool in group["source_occurrence_pools"]
+            for identifier in pool
+        }
+        keys: set[tuple[str, ...]] = set()
+        for identifier in occurrence_ids:
+            prior_row = prior_by_id.get(identifier)
+            if prior_row is None:
+                continue
+            key = _migration_row_key(prior_row)
+            if (
+                str(prior_row.get("source_id", "")) in replaced_source_ids
+                and key in targeted_prior_keys
+            ):
+                keys.add(key)
+        if not keys:
+            continue
+        removed_ids.update(
+            identifier
+            for identifier in canonical_ids
+            if identifier in corrections and identifier not in next_canonical_ids
+        )
+        unique = {tuple(sorted(patch.items())): patch for patch in patches}
+        fully_agreed = len(patches) == len(canonical_ids) and len(unique) == 1
+        if not fully_agreed:
+            ambiguous_keys.update(keys)
+            continue
+        agreed_patch = next(iter(unique.values()))
+        for key in keys:
+            existing = safe_by_key.get(key)
+            if existing is not None and existing != agreed_patch:
+                ambiguous_keys.add(key)
+                safe_by_key.pop(key, None)
+            elif key not in ambiguous_keys:
+                safe_by_key[key] = dict(agreed_patch)
+
+    aliases: dict[str, dict[str, str]] = {}
+    ambiguous_occurrence_ids: set[str] = set()
+    prior_counts: dict[tuple[str, ...], int] = {}
+    for row in prior_source_rows:
+        if str(
+            row.get("source_id", "")
+        ) in replaced_source_ids and has_stable_v2_identity(row):
+            key = _migration_row_key(row)
+            prior_counts[key] = prior_counts.get(key, 0) + 1
+    for key, rows in next_by_key.items():
+        if key in ambiguous_keys or (
+            key in safe_by_key and prior_counts.get(key, 0) != len(rows)
+        ):
+            ambiguous_occurrence_ids.update(
+                str(row.get("transaction_id", "")) for row in rows
+            )
+            continue
+        candidate_patch = safe_by_key.get(key)
+        if candidate_patch is None:
+            continue
+        for row in rows:
+            aliases[str(row.get("transaction_id", ""))] = dict(candidate_patch)
+
+    projected = project_corrections(next_result, {**corrections, **aliases})
+    ambiguous_canonical_ids = set(projected.ambiguous_transaction_ids)
+    for group in next_result.diagnostic["groups"]:
+        occurrence_ids = {
+            str(identifier)
+            for pool in group["source_occurrence_pools"]
+            for identifier in pool
+        }
+        if occurrence_ids & ambiguous_occurrence_ids:
+            ambiguous_canonical_ids.update(
+                str(identifier) for identifier in group["canonical_transaction_ids"]
+            )
+    return MigrationCorrectionProjection(
+        projected.corrections,
+        tuple(sorted(ambiguous_canonical_ids)),
+        tuple(sorted(removed_ids)),
+    )
+
+
+def _migration_rows_by_key(
+    rows: Sequence[Mapping[str, object]],
+) -> dict[tuple[str, ...], list[Mapping[str, object]]]:
+    grouped: dict[tuple[str, ...], list[Mapping[str, object]]] = {}
+    for row in rows:
+        if not has_stable_v2_identity(row):
+            continue
+        key = _migration_row_key(row)
+        grouped.setdefault(key, []).append(row)
+    return grouped
+
+
+def _migration_row_key(row: Mapping[str, object]) -> tuple[str, ...]:
+    identity = normalized_record_identity(row)
+    return (
+        str(row.get("source_id", "")),
+        identity["date"],
+        identity["transaction_date"],
+        identity["posting_date"],
+        identity["original_amount"],
+        identity["posted_amount"],
+        identity["merchant"],
+        identity["original_description"],
+    )
+
+
 def apply_history_ambiguity(
     rows: list[dict[str, str]], transaction_ids: set[str] | tuple[str, ...]
 ) -> None:
@@ -331,7 +569,7 @@ def apply_history_ambiguity(
             flags.append(OVERLAP_HISTORY_FLAG)
         row["flags"] = ";".join(flags)
         row["reason"] = _append_reason(row.get("reason", ""), OVERLAP_HISTORY_REASON)
-        row["needs_review"] = "true"
+        set_review_reason(row, REVIEW_REASON_IDENTITY, True)
 
 
 def clear_history_ambiguity(
@@ -348,6 +586,7 @@ def clear_history_ambiguity(
             if item and item != OVERLAP_HISTORY_FLAG
         )
         row["reason"] = _remove_reason(row.get("reason", ""), OVERLAP_HISTORY_REASON)
+        set_review_reason(row, REVIEW_REASON_IDENTITY, False)
 
 
 def enforce_overlap_review(
@@ -369,7 +608,7 @@ def enforce_overlap_review(
             resolved=row.get("canonical_group_id") in resolved_group_ids,
         )
         if OVERLAP_HISTORY_FLAG in row.get("flags", "").split(";"):
-            row["needs_review"] = "true"
+            set_review_reason(row, REVIEW_REASON_IDENTITY, True)
 
 
 def release_overlap_review_ownership(rows: list[dict[str, str]]) -> None:
@@ -863,6 +1102,8 @@ def _agreed_canonical_template(
     row["amount_hkd"] = _agreed_value(
         bucket, "amount_hkd", next(iter(amount_hkd_values))
     )
+    row["valuation_source"] = _agreed_value(bucket, "valuation_source", "")
+    row["valuation_status"] = _agreed_value(bucket, "valuation_status", "")
     for field in _DISPLAY_FIELDS:
         row[field] = _agreed_value(bucket, field, "")
 
@@ -886,6 +1127,9 @@ def _agreed_canonical_template(
                 "payment_method": _agreed_value(bucket, "payment_method", "Unknown"),
                 "confidence": "0.00",
                 "needs_review": "true",
+                "review_reasons": (
+                    f"{REVIEW_REASON_CATEGORY};{REVIEW_REASON_ACCOUNTING_FLOW}"
+                ),
                 "reason": "Canonical occurrence requires review",
                 "flags": "uncategorized",
             }
@@ -968,10 +1212,12 @@ def _apply_overlap_review(
             flags.append(OVERLAP_PRIOR_REVIEW_FLAG)
         flags.append(OVERLAP_AMBIGUITY_FLAG)
         reason = _append_reason(reason, OVERLAP_AMBIGUITY_REASON)
-        row["needs_review"] = "true"
+        set_review_reason(row, REVIEW_REASON_IDENTITY, True)
     elif had_ambiguity and "manual_correction" not in flags:
-        row["needs_review"] = (
-            "true" if prior_review or OVERLAP_HISTORY_FLAG in flags else "false"
+        set_review_reason(
+            row,
+            REVIEW_REASON_IDENTITY,
+            prior_review or OVERLAP_HISTORY_FLAG in flags,
         )
     row["flags"] = ";".join(dict.fromkeys(flags))
     row["reason"] = reason
@@ -1009,7 +1255,25 @@ def _validate_canonical_amount_hkd(
         canonical_amount = normalized_decimal(canonical_row.get("amount_hkd", ""))
     except IdentityError as error:
         raise ValueError("overlap_manifest_invalid") from error
-    if len(source_amounts) != 1 or canonical_amount not in source_amounts:
+    matched_exchange = (
+        canonical_row.get("valuation_source") == VALUATION_SOURCE_MATCHED_EXCHANGE
+        and bool(canonical_amount)
+        and all(
+            str(row.get("valuation_source", ""))
+            in {
+                "",
+                "missing",
+                "configured_dated_rate",
+                "configured_fixed_rate",
+            }
+            for row in source_occurrences
+            if has_stable_v2_identity(row)
+            and record_fingerprint(row) == group_fingerprint
+        )
+    )
+    if not matched_exchange and (
+        len(source_amounts) != 1 or canonical_amount not in source_amounts
+    ):
         raise ValueError("overlap_manifest_invalid")
 
 
@@ -1341,21 +1605,26 @@ def _project_correction(
         "reason",
         "notes",
         "needs_review",
+        "review_reasons",
     ):
         if field in patch:
             projected[field] = str(patch[field])
     if "flow_type" in patch:
         projected["flow_source"] = "correction"
+    elif "category" in patch and projected.get("flow_source", "") in {
+        "",
+        "deterministic",
+    }:
+        derive_flow_type(projected)
     flags = [item for item in projected.get("flags", "").split(";") if item]
     if "manual_correction" not in flags:
         flags.append("manual_correction")
     projected["flags"] = ";".join(flags)
+    synchronize_review_state(projected)
     return projected
 
 
-def _protected_history(
-    row: Mapping[str, object], *, ignored_fields: set[str] | None = None
-) -> tuple[tuple[str, str], ...]:
+def _protected_history(row: Mapping[str, object]) -> tuple[tuple[str, str], ...]:
     values = {field: str(row.get(field, "")) for field in _MUTABLE_FIELDS}
     values["flags"] = ";".join(
         item
@@ -1363,11 +1632,7 @@ def _protected_history(
         if item and item not in {OVERLAP_AMBIGUITY_FLAG, OVERLAP_PRIOR_REVIEW_FLAG}
     )
     values["reason"] = _without_owned_reason(values["reason"], OVERLAP_AMBIGUITY_REASON)
-    return tuple(
-        (field, values[field])
-        for field in _MUTABLE_FIELDS
-        if field not in (ignored_fields or set())
-    )
+    return tuple((field, values[field]) for field in _MUTABLE_FIELDS)
 
 
 def _without_owned_reason(value: str, owned_reason: str) -> str:

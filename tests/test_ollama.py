@@ -76,6 +76,7 @@ class OllamaTest(unittest.TestCase):
             "enabled": True,
             "url": "http://localhost:11434/api/generate",
             "model": "qwen2.5:7b-instruct",
+            "calibrated_acceptance_threshold": 0.8,
         }
         ollama.update(overrides)
         return {"ollama": ollama}
@@ -343,6 +344,8 @@ class OllamaTest(unittest.TestCase):
 
         self.assertEqual(report["status"], "invalid_response")
         self.assertEqual(report["invalid_count"], 2)
+        self.assertEqual(report["retry_invalid_count"], 2)
+        self.assertEqual(report["retry_candidate_count"], 2)
         self.assertIn(
             "Ollama categorization rejected (MYSTERY): missing reason", warnings
         )
@@ -351,6 +354,100 @@ class OllamaTest(unittest.TestCase):
         )
         for transaction in transactions:
             self.assertIn("ollama_invalid_response", transaction["flags"])
+
+    def test_retry_requests_only_invalid_candidates_and_keeps_valid_results(
+        self,
+    ) -> None:
+        calls = 0
+
+        def handler(request: OllamaHttpRequest) -> bytes:
+            nonlocal calls
+            calls += 1
+            [first_id, *rest] = [
+                row["id"] for row in prompt_for(request)["transactions"]
+            ]
+            if calls == 1:
+                return model_response(
+                    [
+                        {
+                            "id": first_id,
+                            "category": "Dining",
+                            "confidence": 0.95,
+                            "reason": "Valid first result",
+                        },
+                        {
+                            "id": first_id,
+                            "category": "Shopping",
+                            "confidence": 0.99,
+                            "reason": "Duplicate must not overwrite",
+                        },
+                        {
+                            "id": rest[0],
+                            "category": "Transport",
+                            "confidence": 0.9,
+                        },
+                        {
+                            "id": "txn_unknown",
+                            "category": "Shopping",
+                            "confidence": 0.9,
+                            "reason": "Unknown id",
+                        },
+                    ]
+                )
+            self.assertEqual(rest, [])
+            return model_response(
+                [
+                    {
+                        "id": first_id,
+                        "category": "Transport",
+                        "confidence": 0.9,
+                        "reason": "Recovered retry",
+                    }
+                ]
+            )
+
+        first = unresolved_transaction("txn_1")
+        second = unresolved_transaction("txn_2")
+        transport = FakeTransport(handler)
+
+        report, warnings = apply_ollama_fallback(
+            [first, second], self.config(), transport=transport
+        )
+
+        self.assertEqual(
+            [
+                [row["id"] for row in prompt_for(request)["transactions"]]
+                for request in transport.requests
+            ],
+            [["txn_1", "txn_2"], ["txn_2"]],
+        )
+        self.assertEqual(first["category"], "Dining")
+        self.assertEqual(second["category"], "Transport")
+        self.assertEqual(report["retry_candidate_count"], 1)
+        self.assertEqual(report["retry_recovered_count"], 1)
+        self.assertEqual(report["unresolved_count"], 0)
+        self.assertEqual(report["applied_count"], 2)
+        self.assertIn("Ollama returned invalid categorizations", warnings)
+
+    def test_raw_model_confidence_requires_an_explicit_calibrated_threshold(
+        self,
+    ) -> None:
+        transaction = unresolved_transaction()
+        config = self.config()
+        del config["ollama"]["calibrated_acceptance_threshold"]
+
+        report, warnings = apply_ollama_fallback(
+            [transaction],
+            config,
+            transport=FakeTransport(successful_handler),
+        )
+
+        self.assertEqual(warnings, [])
+        self.assertEqual(report["accepted_count"], 0)
+        self.assertEqual(report["reviewable_count"], 1)
+        self.assertEqual(transaction["category"], "Dining")
+        self.assertEqual(transaction["needs_review"], "true")
+        self.assertEqual(transaction["review_reasons"], "category_suggestion")
 
     def test_invalid_ollama_json_shape_is_reported_not_raised(self) -> None:
         for response in [

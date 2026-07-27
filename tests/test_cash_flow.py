@@ -9,7 +9,7 @@ import unittest
 from pathlib import Path
 
 from honeymoney.identity_state import LEGACY_CATEGORIZED_COLUMNS
-from honeymoney.reconciliation import reconcile_ledger
+from honeymoney.reconciliation import reconcile_ledger, transaction_direction
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -151,6 +151,83 @@ class CashFlowWorkflowTest(unittest.TestCase):
             self.assertEqual(
                 rows["txn_bank"]["transfer_group_id"],
                 rows["txn_card"]["transfer_group_id"],
+            )
+
+    def test_missing_base_conversion_gives_direction_without_cross_currency_pairing(
+        self,
+    ) -> None:
+        rows = [
+            {
+                "transaction_id": "txn_synthetic_out",
+                "date": "2026-07-01",
+                "account_id": "synthetic_one",
+                "account_type": "bank",
+                "posted_amount": "-10.00",
+                "posted_currency": "USD",
+                "amount_hkd": "",
+                "category": "Other",
+            },
+            {
+                "transaction_id": "txn_synthetic_in",
+                "date": "2026-07-01",
+                "account_id": "synthetic_two",
+                "account_type": "bank",
+                "posted_amount": "10.00",
+                "posted_currency": "EUR",
+                "amount_hkd": "",
+                "category": "Other",
+            },
+        ]
+
+        self.assertEqual(transaction_direction(rows[0]), "outflow")
+        self.assertEqual(transaction_direction(rows[1]), "inflow")
+        summary = reconcile_ledger(rows, {"reconciliation": {"date_window_days": 3}})
+
+        self.assertEqual(summary["paired_groups"], 0)
+        self.assertEqual({row.get("paired_transaction_id", "") for row in rows}, {""})
+        self.assertTrue(all(row["flow_type"] == "unresolved" for row in rows))
+
+    def test_report_warns_when_base_currency_rows_are_omitted(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._workspace(
+                tmp,
+                [
+                    {
+                        "transaction_id": "txn_synthetic_out",
+                        "date": "2026-07-01",
+                        "account_id": "synthetic_one",
+                        "account_type": "bank",
+                        "posted_amount": "-10.00",
+                        "posted_currency": "USD",
+                        "amount_hkd": "",
+                        "category": "Other",
+                    },
+                    {
+                        "transaction_id": "txn_synthetic_in",
+                        "date": "2026-07-02",
+                        "account_id": "synthetic_two",
+                        "account_type": "bank",
+                        "posted_amount": "10.00",
+                        "posted_currency": "EUR",
+                        "amount_hkd": "",
+                        "category": "Other",
+                    },
+                ],
+            )
+
+            result = self._run_cli(
+                ["report", "--month", "2026-07", "--no-open", "--json"], cwd=root
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(
+                json.loads(result.stdout)["data"]["missing_base_currency_count"], 2
+            )
+            report = (root / "output" / "report.html").read_text(encoding="utf-8")
+            self.assertIn(
+                "2 rows are omitted from period totals because HKD valuation "
+                "is missing.",
+                report,
             )
 
     def test_reconcile_classifies_owned_account_transfer_types(self) -> None:
@@ -397,7 +474,7 @@ class CashFlowWorkflowTest(unittest.TestCase):
             for row in rows.values():
                 self.assertNotIn("reconciliation_ambiguous", row["flags"])
                 self.assertNotIn("Ambiguous transfer candidates", row["reason"])
-            self.assertEqual(rows["txn_out"]["needs_review"], "true")
+            self.assertEqual(rows["txn_out"]["needs_review"], "false")
             self.assertEqual(rows["txn_out"]["flags"], "")
             self.assertEqual(rows["txn_out"]["reason"], "")
             self.assertEqual(rows["txn_unique_in"]["needs_review"], "false")
@@ -406,10 +483,7 @@ class CashFlowWorkflowTest(unittest.TestCase):
                 newline="", encoding="utf-8"
             ) as fh:
                 review_rows = list(csv.DictReader(fh))
-            self.assertEqual(
-                [row["transaction_id"] for row in review_rows],
-                [self._legacy_id("txn_out")],
-            )
+            self.assertEqual(review_rows, [])
 
     def test_equal_salary_and_expense_are_not_hidden_as_transfer(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

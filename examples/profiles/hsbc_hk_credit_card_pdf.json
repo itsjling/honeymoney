@@ -16,7 +16,7 @@
     "word_rows": true,
     "word_rows_only": true,
     "word_header_markers": ["Post date", "Trans date", "Description", "Amount"],
-    "word_table_end_markers": ["Note:", "REWARDCASH", "The Hongkong and Shanghai Banking Corporation Limited"],
+    "word_table_end_markers": ["Note:", "REWARDCASH", "For important information", "The Hongkong and Shanghai Banking Corporation Limited"],
     "word_columns": {
       "Post date": [50, 95],
       "Trans date": [95, 135],
@@ -35,8 +35,8 @@
       {
         "account_id": "hsbc_hk_credit_card",
         "currency": "HKD",
-        "opening_regex": "^PREVIOUS BALANCE\\s+(?P<balance>[+-]?\\d[\\d,]*\\.\\d{2})$",
-        "closing_regex": "^CLOSING BALANCE\\s+(?P<balance>[+-]?\\d[\\d,]*\\.\\d{2})$"
+        "opening_regex": "^(?:PREVIOUS|OPENING) BALANCE\\s+(?P<balance>[+-]?\\d[\\d,]*\\.\\d{2})(?:\\s+(?P<balance_sign>CR|DR))?$",
+        "closing_regex": "^(?:CLOSING|STATEMENT) BALANCE\\s+(?P<balance>[+-]?\\d[\\d,]*\\.\\d{2})(?:\\s+(?P<balance_sign>CR|DR))?$"
       }
     ],
     "columns": {

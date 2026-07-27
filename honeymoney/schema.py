@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from honeymoney.contracts import Config
 
-SOURCE_OCCURRENCE_COLUMNS = [
+PREVIOUS_SOURCE_OCCURRENCE_COLUMNS = [
     "transaction_id",
     "source_id",
     "source_namespace_id",
@@ -44,6 +44,24 @@ SOURCE_OCCURRENCE_COLUMNS = [
     "source_row",
 ]
 
+SOURCE_OCCURRENCE_COLUMNS = [
+    *PREVIOUS_SOURCE_OCCURRENCE_COLUMNS[:18],
+    "valuation_source",
+    "valuation_status",
+    *PREVIOUS_SOURCE_OCCURRENCE_COLUMNS[18:33],
+    "review_reasons",
+    *PREVIOUS_SOURCE_OCCURRENCE_COLUMNS[33:],
+]
+
+PREVIOUS_CATEGORIZED_COLUMNS = [
+    "transaction_id",
+    "canonical_group_id",
+    "canonical_slot",
+    "provenance_status",
+    "source_occurrence_count",
+    *PREVIOUS_SOURCE_OCCURRENCE_COLUMNS[1:],
+]
+
 CATEGORIZED_COLUMNS = [
     "transaction_id",
     "canonical_group_id",
@@ -53,7 +71,7 @@ CATEGORIZED_COLUMNS = [
     *SOURCE_OCCURRENCE_COLUMNS[1:],
 ]
 
-REVIEW_NEEDED_COLUMNS = [
+PREVIOUS_REVIEW_NEEDED_COLUMNS = [
     "transaction_id",
     "canonical_group_id",
     "canonical_slot",
@@ -98,6 +116,16 @@ REVIEW_NEEDED_COLUMNS = [
     "source_file",
     "source_page",
     "source_row",
+]
+
+REVIEW_NEEDED_COLUMNS = [
+    *PREVIOUS_REVIEW_NEEDED_COLUMNS[:22],
+    "valuation_source",
+    "valuation_status",
+    *PREVIOUS_REVIEW_NEEDED_COLUMNS[22:38],
+    "review_reasons",
+    "review_reason_labels",
+    *PREVIOUS_REVIEW_NEEDED_COLUMNS[38:],
 ]
 
 

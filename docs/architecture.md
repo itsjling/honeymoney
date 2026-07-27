@@ -43,6 +43,11 @@ resolver uses the hidden manifest, not `source_file`, to find sources for
 replacement and reset. `source_file` is display provenance only. Corrections
 are persistent overrides keyed by `transaction_id`; rules and Ollama
 suggestions run before corrections, so reviewed choices win.
+`honeymoney learn` can turn active exact corrections into managed deterministic
+rules. It writes only after `--yes`, replaces only its own managed rules, and
+never learns owner or payment method. Broad rules require full agreement for an
+exact institution, account, normalized description, and direction. Conflicting
+groups may split only by exact posted amount and currency.
 
 ## Filesystem persistence
 
@@ -103,6 +108,19 @@ source fails, while the authoritative ledger, its derived review rows, and saved
 corrections remain on the prior financial generation. Ollama is an optional
 post-parse categorizer: its unavailability leaves parsed rows pending review and
 does not turn a successfully processed statement into a failed reset.
+An invalid response triggers one follow-up request for only missing or invalid
+rows. Valid results stay fixed. Raw model confidence does not clear review
+unless the config names a locally calibrated acceptance threshold. Import
+reports split category provenance into deterministic, memory, exact-correction,
+accepted-model, reviewable-model, and unresolved counts.
+
+`needs_review` is derived from the stable tokens in `review_reasons`; it cannot
+remain true with no current human decision. The free-text `reason` field keeps
+categorization and processing provenance. HKD valuation completeness stays
+separate from transaction review. `valuation_source` and `valuation_status`
+distinguish statement amounts, matched exchange legs, dated or fixed rate
+estimates, and missing values. See
+[`ADR 0004`](adr/0004-review-state-and-hkd-valuation.md).
 
 `category` is the merchant/budget classification. `flow_type` is the accounting
 treatment used by cash-flow totals. Ollama is limited to configured spending
@@ -131,6 +149,10 @@ per-source multiplicity sets the canonical count for each exact overlap group.
 Equal counts consolidate. Different counts keep that maximum, stay pooled, and
 force review. JSON keeps the old duplicate count fields as derived compatibility
 data, while `overlap` is the full provenance contract.
+Direction uses the base-currency amount when present. If conversion is missing,
+it may use a valid non-zero posted amount for direction only. Transfer matching
+and report totals still require base-currency amounts. Reports count rows omitted
+from totals and show that count without transaction text.
 
 ## Transaction identity
 
@@ -167,6 +189,18 @@ Retired records keep their ownership, so they cannot pass a correction to a
 later similar transaction. Legacy IDs survive only when migration proves one
 owner; shared legacy IDs stay unowned and require review. The full contract is
 in [`ADR 0001`](adr/0001-stable-transaction-identity.md).
+
+The one-time move from an identity-v2 ledger to the canonical overlap ledger
+binds proven review history to canonical slots before a replacement or reset.
+Exact locator and fingerprint matches keep their source owners, followed by
+unique fingerprint matches. Repeated unmatched records retire and receive new
+source owners as a pool, without pairing old and new occurrences. Compatible
+corrections and review history stay on the canonical slots.
+When a parser repair changes account or currency identity during this move,
+the migration joins old and new source rows only on one unique normalized
+source-local record shape. A repeated group moves only when every old row has
+the same correction. Conflicts stay in review. The published correction file
+keeps final active canonical IDs and drops retired source aliases.
 
 ## Persistence authority and recovery
 
@@ -223,6 +257,8 @@ changing it.
 - `honeymoney/persistence.py`: staged filesystem generation commits, authoritative
   ledger replacement, directory synchronization, and retained-state recovery.
 - `honeymoney/rules.py`: deterministic rule validation and application.
+- `honeymoney/learning.py`: conservative managed-rule planning from active exact
+  human corrections.
 - `honeymoney/categorization_memory.py`: opt-in, correction-derived local
   spending-category matches rebuilt from validated identity state.
 - `honeymoney/ollama.py`: optional local-only categorization fallback. Its
@@ -234,6 +270,10 @@ changing it.
 - `honeymoney/report.py`: offline HTML report generation.
 - `honeymoney/reconciliation.py`: deterministic flow derivation, transfer pairing,
   and optional statement balance checks.
+- `honeymoney/review_state.py`: review-reason tokens, plain labels, and the
+  boolean invariant.
+- `honeymoney/valuation.py`: HKD value source, dated and fixed rates, and
+  completeness counts.
 - `honeymoney/data/profiles/`: bundled institution profiles copied by setup.
 - `tests/fixtures/`: synthetic golden inputs and expected behavior.
 
@@ -256,7 +296,8 @@ form.
 
 Remembered income rules are deterministic exact matches on institution,
 account identity, normalized description, and the virtual inflow direction.
-Direction is derived from `amount_hkd` and is not part of transaction identity.
+Direction uses `amount_hkd` when present, then the posted amount. It is not part
+of transaction identity.
 Human corrections, deterministic rules, and conservative structural matching
 may establish protected flows; reconciliation may establish owned-account
 transfers. Refunds and owned-account flows remain distinct, and Ollama cannot

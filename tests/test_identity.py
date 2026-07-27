@@ -342,14 +342,16 @@ class RecordResolutionTest(unittest.TestCase):
         self.first_revision = source_revision(b"first synthetic revision")
         self.second_revision = source_revision(b"second synthetic revision")
 
-    def _assignment(self, revision: str | None = None) -> ResolvedSourceIdentity:
+    def _assignment(
+        self, revision: str | None = None, contract: str | None = None
+    ) -> ResolvedSourceIdentity:
         return ResolvedSourceIdentity(
             "synthetic",
             "synthetic.csv",
             self.source,
             self.namespace,
             revision or self.first_revision,
-            self.contract,
+            contract or self.contract,
             "reused",
         )
 
@@ -410,6 +412,34 @@ class RecordResolutionTest(unittest.TestCase):
             )
         self.assertEqual(raised.exception.code, "identity_exact_state_mismatch")
 
+    def test_canonical_migration_reallocates_unproved_exact_state_repeats(
+        self,
+    ) -> None:
+        original = self._first_result(self._incoming(2), self._incoming(3))
+
+        migrated = resolve_records(
+            self._assignment(),
+            [self._incoming(8), self._incoming(9)],
+            original.source_ownership,
+            [item.row for item in original.resolved_rows],
+            "replace",
+            allow_unmatched_reallocation=True,
+        )
+
+        old_ids = {item.transaction_id for item in original.resolved_rows}
+        new_ids = {item.transaction_id for item in migrated.resolved_rows}
+        self.assertTrue(old_ids.isdisjoint(new_ids))
+        states = {
+            record["transaction_id"]: record["state"]
+            for record in migrated.source_ownership["records"]
+        }
+        self.assertTrue(
+            all(states[transaction_id] == "retired" for transaction_id in old_ids)
+        )
+        self.assertTrue(
+            all(states[transaction_id] == "active" for transaction_id in new_ids)
+        )
+
     def test_changed_revision_reuses_unique_rows_and_retires_unmatched(self) -> None:
         original = self._first_result(
             self._incoming(2, "ONE"), self._incoming(3, "TWO")
@@ -445,6 +475,42 @@ class RecordResolutionTest(unittest.TestCase):
                 original.source_ownership,
                 [item.row for item in original.resolved_rows],
                 "replace",
+            )
+        self.assertEqual(raised.exception.code, "identity_record_match_ambiguous")
+
+    def test_parser_upgrade_reallocates_ambiguous_repeats_without_pairing(self) -> None:
+        original = self._first_result(self._incoming(2), self._incoming(3))
+        upgraded_contract = "ext_" + "c" * 64
+
+        upgraded = resolve_records(
+            self._assignment(self.second_revision, upgraded_contract),
+            [self._incoming(8)],
+            original.source_ownership,
+            [item.row for item in original.resolved_rows],
+            "replace",
+            allow_parser_upgrade_reallocation=True,
+        )
+
+        old_ids = {item.transaction_id for item in original.resolved_rows}
+        [replacement] = upgraded.resolved_rows
+        self.assertNotIn(replacement.transaction_id, old_ids)
+        self.assertEqual(
+            {
+                record["transaction_id"]
+                for record in upgraded.source_ownership["records"]
+                if record["state"] == "retired"
+            },
+            old_ids,
+        )
+
+        with self.assertRaises(IdentityError) as raised:
+            resolve_records(
+                self._assignment(self.second_revision),
+                [self._incoming(8)],
+                original.source_ownership,
+                [item.row for item in original.resolved_rows],
+                "replace",
+                allow_parser_upgrade_reallocation=True,
             )
         self.assertEqual(raised.exception.code, "identity_record_match_ambiguous")
 

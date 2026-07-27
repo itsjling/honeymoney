@@ -17,6 +17,7 @@ from honeymoney.corrections import (
     CORRECTION_COLUMNS,
     apply_correction_operation,
     ledger_output_documents,
+    load_corrections,
     read_ledger,
 )
 from honeymoney.csv_artifacts import csv_document
@@ -42,7 +43,12 @@ from honeymoney.overlap import (
     source_occurrences_path,
 )
 from honeymoney.persistence import persist_generation
-from honeymoney.schema import CATEGORIZED_COLUMNS, SOURCE_OCCURRENCE_COLUMNS
+from honeymoney.schema import (
+    CATEGORIZED_COLUMNS,
+    PREVIOUS_CATEGORIZED_COLUMNS,
+    PREVIOUS_SOURCE_OCCURRENCE_COLUMNS,
+    SOURCE_OCCURRENCE_COLUMNS,
+)
 
 
 def _source_row(
@@ -214,6 +220,74 @@ class OverlapWorkspaceStateTest(unittest.TestCase):
                 CATEGORIZED_COLUMNS,
             )
 
+    def test_previous_public_schema_reconciles_once_then_stays_stable(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            path = root / "categorized.csv"
+            self._write_issue_31_state(path)
+            migrated = load_identity_state(path)
+            canonical = canonicalize_overlaps(
+                migrated.source_rows, [], migrated.overlap_manifest
+            )
+            persist_generation(
+                path,
+                ledger_output_documents(
+                    path,
+                    canonical.rows,
+                    identity_manifest=migrated.manifest,
+                    source_occurrences=migrated.source_rows,
+                    overlap_manifest=canonical.manifest,
+                ),
+            )
+            path.write_text(
+                csv_document(PREVIOUS_CATEGORIZED_COLUMNS, canonical.rows),
+                encoding="utf-8",
+            )
+            source_occurrences_path(path).write_text(
+                csv_document(
+                    PREVIOUS_SOURCE_OCCURRENCE_COLUMNS,
+                    migrated.source_rows,
+                ),
+                encoding="utf-8",
+            )
+            config_path = root / "config.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "base_currency": "HKD",
+                        "paths": {"output": str(path)},
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            old = load_identity_state(path)
+            self.assertTrue(old.ledger_schema_migration_required)
+            with redirect_stdout(io.StringIO()):
+                self.assertEqual(
+                    _reconcile_command(["--config", str(config_path), "--json"]),
+                    0,
+                )
+            first = {
+                item: item.read_bytes()
+                for item in (
+                    path,
+                    source_occurrences_path(path),
+                    identity_manifest_path(path),
+                    overlap_manifest_path(path),
+                )
+            }
+            self.assertFalse(load_identity_state(path).ledger_schema_migration_required)
+            with redirect_stdout(io.StringIO()):
+                self.assertEqual(
+                    _reconcile_command(["--config", str(config_path), "--json"]),
+                    0,
+                )
+            self.assertEqual(
+                first,
+                {item: item.read_bytes() for item in first},
+            )
+
     def test_reconcile_migrates_saved_source_correction_to_canonical_row(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -252,6 +326,17 @@ class OverlapWorkspaceStateTest(unittest.TestCase):
             [canonical] = load_identity_state(path).rows
             self.assertEqual(canonical["category"], "Groceries")
             self.assertEqual(canonical["needs_review"], "false")
+            saved = load_corrections({"corrections": str(corrections_path)})
+            self.assertEqual(set(saved), {canonical["transaction_id"]})
+            self.assertNotIn(source_transaction_id, saved)
+            self.assertEqual(
+                saved[canonical["transaction_id"]]["category"],
+                "Groceries",
+            )
+            first_corrections = corrections_path.read_bytes()
+
+            self.assertEqual(_reconcile_command(["--config", str(config_path)]), 0)
+            self.assertEqual(corrections_path.read_bytes(), first_corrections)
 
     def test_validated_canonical_account_type_conflict_stays_empty(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

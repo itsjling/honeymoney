@@ -8,6 +8,11 @@ from typing import Mapping
 
 from honeymoney.classification_policy import category_policies
 from honeymoney.identity import has_stable_v2_identity
+from honeymoney.review_state import (
+    REVIEW_REASON_CATEGORY,
+    REVIEW_REASON_CATEGORY_SUGGESTION,
+    set_review_reason,
+)
 
 LOCAL_MEMORY_FLAG = "local_memory_categorized"
 LOCAL_MEMORY_CONFIDENCE = "0.90"
@@ -104,7 +109,12 @@ def apply_local_categorization_memory(
             continue
         transaction["category"] = category
         transaction["confidence"] = LOCAL_MEMORY_CONFIDENCE
-        transaction["needs_review"] = str(confidence < threshold).lower()
+        set_review_reason(transaction, REVIEW_REASON_CATEGORY, False)
+        set_review_reason(
+            transaction,
+            REVIEW_REASON_CATEGORY_SUGGESTION,
+            confidence < threshold,
+        )
         transaction["reason"] = (
             "Matched local categorization memory from "
             f"{int(match['observation_count'])} reviewed transactions"

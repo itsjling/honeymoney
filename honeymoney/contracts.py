@@ -41,4 +41,8 @@ class ReconciliationSummary(TypedDict):
     ambiguous_transactions: int
     unmatched_transactions: int
     unresolved_transactions: int
+    cross_currency_paired_groups: int
+    matched_exchange_valuations: int
+    missing_valuation_transactions: int
+    estimated_valuation_transactions: int
     balance_reconciliation: BalanceReconciliation

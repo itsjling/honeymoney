@@ -8,6 +8,11 @@ from typing import Mapping, Sequence, TypedDict
 
 from honeymoney.identity import has_stable_v2_identity, record_fingerprint
 from honeymoney.identity_contracts import IdentityRow
+from honeymoney.review_state import (
+    REVIEW_REASON_IDENTITY,
+    has_identity_review_evidence,
+    set_review_reason,
+)
 
 DUPLICATE_FLAG = "duplicate_suspected"
 DUPLICATE_REVIEW_PROMOTED_FLAG = "duplicate_review_promoted"
@@ -169,7 +174,7 @@ def apply_duplicate_candidates(
                     row.get("flags", ""), DUPLICATE_REVIEW_PROMOTED_FLAG
                 )
             if occurrence_id not in final_review_ids:
-                row["needs_review"] = "true"
+                set_review_reason(row, REVIEW_REASON_IDENTITY, True)
             row["flags"] = _append_flag(row.get("flags", ""), DUPLICATE_FLAG)
             diagnostic = evaluation.diagnostic_for(occurrence_id)
             if diagnostic is None:
@@ -198,7 +203,6 @@ def release_duplicate_review_ownership(row: dict[str, str]) -> None:
 
 def _clear_duplicate_state(row: dict[str, str]) -> None:
     flags = [item for item in row.get("flags", "").split(";") if item]
-    promoted = DUPLICATE_REVIEW_PROMOTED_FLAG in flags
     row["flags"] = ";".join(
         item
         for item in flags
@@ -212,8 +216,11 @@ def _clear_duplicate_state(row: dict[str, str]) -> None:
         and not item.startswith(DUPLICATE_REASON_PREFIX)
     ]
     row["reason"] = "; ".join(reasons)
-    if promoted:
-        row["needs_review"] = "false"
+    set_review_reason(
+        row,
+        REVIEW_REASON_IDENTITY,
+        has_identity_review_evidence(row),
+    )
 
 
 def _duplicate_reason(diagnostic: DuplicateOccurrenceDiagnostic) -> str:

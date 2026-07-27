@@ -118,6 +118,11 @@ transaction for the same account and posted currency. Balance lines stay out
 of the ledger. Profiles without `balance_mappings` still work; their statement
 balance check stays unavailable.
 
+A mapping may set `closing_requires_opening` to `true`. The importer then
+accepts a closing value for an account and currency only after it has found
+that target's opening value, and it accepts only one such close. This keeps
+portfolio totals and totals for another currency out of a transaction account.
+
 Keep the patterns narrow enough to match one kind of balance line. Validation
 rejects missing pairs, bad patterns, unknown sections, missing named groups,
 fixed mappings for the same account and currency, and any dynamic mapping that

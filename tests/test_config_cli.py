@@ -289,6 +289,31 @@ class ConfigCliTest(unittest.TestCase):
                 "number from 0 to 1",
             ),
             (
+                "exchange markers type",
+                {"reconciliation": {"exchange_debit_markers": "exchange"}},
+                "must be a JSON array",
+            ),
+            (
+                "empty exchange markers",
+                {"reconciliation": {"exchange_debit_markers": []}},
+                "must not be empty",
+            ),
+            (
+                "duplicate deposit markers",
+                {"reconciliation": {"foreign_deposit_markers": ["Deposit", "deposit"]}},
+                "must not contain duplicates",
+            ),
+            (
+                "exchange rate tolerance",
+                {"reconciliation": {"exchange_rate_spread_tolerance": float("nan")}},
+                "number from 0 to 1",
+            ),
+            (
+                "exchange rate tolerance string",
+                {"reconciliation": {"exchange_rate_spread_tolerance": "0.10"}},
+                "number from 0 to 1",
+            ),
+            (
                 "ollama batch",
                 {"ollama": {"batch_size": 0}},
                 "positive integer",

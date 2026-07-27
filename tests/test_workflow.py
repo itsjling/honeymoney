@@ -18,14 +18,16 @@ from honeymoney.cli import (
     _starter_csv_profile,
     _StatusLine,
 )
-from honeymoney.corrections import ledger_output_documents
+from honeymoney.corrections import CORRECTION_COLUMNS, ledger_output_documents
+from honeymoney.csv_artifacts import csv_document
 from honeymoney.duplicates import DUPLICATE_MATCH_TYPE
+from honeymoney.identity import manifest_document
 from honeymoney.identity_state import (
     load_configured_identity_state,
     load_identity_state,
 )
 from honeymoney.ollama import OllamaHttpRequest, apply_ollama_fallback
-from honeymoney.schema import ALLOWED_CATEGORIES
+from honeymoney.schema import ALLOWED_CATEGORIES, SOURCE_OCCURRENCE_COLUMNS
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -774,12 +776,15 @@ def open(source_path):
                 original_revision,
             )
 
-    def test_ambiguous_balance_contract_upgrade_fails_without_writes(self) -> None:
+    def test_repeated_balance_contract_upgrade_reallocates_without_pairing(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root, fake_modules, statement, profile_path = (
                 self._seed_balance_contract_workspace(tmp, repeated=True)
             )
-            before = self._import_artifact_bytes(root)
+            before = load_identity_state(root / "output" / "categorized.csv")
+            old_ids = {row["transaction_id"] for row in before.rows}
             self._add_balance_contract_mapping(profile_path)
 
             replacement = self._run_cli(
@@ -788,9 +793,325 @@ def open(source_path):
                 extra_pythonpath=fake_modules,
             )
 
-            self.assertEqual(replacement.returncode, 2, replacement.stderr)
-            self.assertIn("identity_record_match_ambiguous", replacement.stderr)
-            self.assertEqual(self._import_artifact_bytes(root), before)
+            self.assertEqual(replacement.returncode, 0, replacement.stderr)
+            replaced = load_identity_state(root / "output" / "categorized.csv")
+            self.assertEqual(len(replaced.rows), 2)
+            self.assertEqual({row["transaction_id"] for row in replaced.rows}, old_ids)
+            self.assertEqual(
+                replaced.source_rows[0]["statement_opening_balance"], "100.00"
+            )
+            self.assertEqual(
+                replaced.source_rows[-1]["statement_closing_balance"], "110.00"
+            )
+
+    def test_identity_v2_replace_migrates_reviewed_repeated_rows_in_place(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root, fake_modules, statement, profile_path = (
+                self._seed_balance_contract_workspace(tmp, repeated=True)
+            )
+            categorized_path = root / "output" / "categorized.csv"
+            state = load_identity_state(categorized_path)
+            source_rows = [dict(row) for row in state.source_rows]
+            for row in source_rows:
+                row.update(
+                    {
+                        "category": "Dining",
+                        "flow_type": "expense",
+                        "flow_source": "correction",
+                        "confidence": "1.00",
+                        "needs_review": "false",
+                        "reason": "Synthetic legacy review",
+                    }
+                )
+            categorized_path.write_text(
+                csv_document(SOURCE_OCCURRENCE_COLUMNS, source_rows),
+                encoding="utf-8",
+            )
+            (root / "output" / ".honeymoney-source-occurrences.csv").unlink()
+            (root / "output" / ".honeymoney-overlap-manifest.json").unlink()
+
+            manifest_path = root / "output" / ".honeymoney-identity-manifest.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            for record in manifest["sources"][0]["records"]:
+                locator = record["current_locator"]
+                locator["components"][-1] += 10
+            manifest_path.write_text(
+                manifest_document(manifest),
+                encoding="utf-8",
+            )
+            source_ids = [row["transaction_id"] for row in source_rows]
+            (root / "corrections.csv").write_text(
+                csv_document(
+                    CORRECTION_COLUMNS,
+                    [
+                        {
+                            "transaction_id": transaction_id,
+                            "category": "Dining",
+                            "flow_type": "expense",
+                            "confidence": "1.00",
+                            "reason": "Synthetic legacy review",
+                            "needs_review": "false",
+                        }
+                        for transaction_id in source_ids
+                    ],
+                ),
+                encoding="utf-8",
+            )
+            self._add_balance_contract_mapping(profile_path)
+            upgraded_profile = json.loads(profile_path.read_text(encoding="utf-8"))
+            upgraded_profile["account_id"] = "balance_contract_v2"
+            upgraded_profile["account"] = "Balance Contract V2"
+            upgraded_profile["pdf"]["balance_mappings"][0]["account_id"] = (
+                "balance_contract_v2"
+            )
+            profile_path.write_text(json.dumps(upgraded_profile), encoding="utf-8")
+
+            replacement = self._run_cli(
+                [
+                    "import",
+                    str(statement),
+                    "--replace",
+                    "--no-interactive",
+                    "--json",
+                ],
+                cwd=root,
+                extra_pythonpath=fake_modules,
+            )
+
+            self.assertEqual(replacement.returncode, 0, replacement.stderr)
+            replacement_data = json.loads(replacement.stdout)["data"]
+            self.assertEqual(replacement_data["source_occurrence_count"], 2)
+            self.assertEqual(replacement_data["canonical_occurrence_count"], 2)
+            migrated = load_identity_state(categorized_path)
+            self.assertFalse(migrated.canonical_migration_required)
+            canonical_ids = [row["transaction_id"] for row in migrated.rows]
+            self.assertTrue(all(row["category"] == "Dining" for row in migrated.rows))
+            self.assertTrue(
+                all(row["needs_review"] == "false" for row in migrated.rows)
+            )
+            self.assertTrue(
+                all(
+                    not row["source_id"] and not row["source_file"]
+                    for row in migrated.rows
+                )
+            )
+            self.assertTrue(set(source_ids).isdisjoint(canonical_ids))
+            with (root / "corrections.csv").open(
+                newline="", encoding="utf-8"
+            ) as corrections_file:
+                correction_ids = {
+                    row["transaction_id"] for row in csv.DictReader(corrections_file)
+                }
+            self.assertEqual(set(canonical_ids), correction_ids)
+            first_generation = self._artifact_bytes(
+                root,
+                [
+                    "output/categorized.csv",
+                    "output/review_needed.csv",
+                    "output/.honeymoney-identity-manifest.json",
+                    "output/.honeymoney-source-occurrences.csv",
+                    "output/.honeymoney-overlap-manifest.json",
+                    "corrections.csv",
+                ],
+            )
+
+            repeated = self._run_cli(
+                [
+                    "import",
+                    str(statement),
+                    "--replace",
+                    "--no-interactive",
+                    "--json",
+                ],
+                cwd=root,
+                extra_pythonpath=fake_modules,
+            )
+
+            self.assertEqual(repeated.returncode, 0, repeated.stderr)
+            self.assertEqual(
+                self._artifact_bytes(
+                    root,
+                    [
+                        "output/categorized.csv",
+                        "output/review_needed.csv",
+                        "output/.honeymoney-identity-manifest.json",
+                        "output/.honeymoney-source-occurrences.csv",
+                        "output/.honeymoney-overlap-manifest.json",
+                        "corrections.csv",
+                    ],
+                ),
+                first_generation,
+            )
+            html_path = root / "output" / "migration.html"
+            report = self._run_cli(
+                [
+                    "report",
+                    "2026-04",
+                    "--output",
+                    str(html_path),
+                    "--no-open",
+                    "--json",
+                ],
+                cwd=root,
+            )
+            self.assertEqual(report.returncode, 0, report.stderr)
+            self.assertEqual(json.loads(report.stdout)["data"]["transaction_count"], 2)
+            html = html_path.read_text(encoding="utf-8")
+            self.assertIn("Dining", html)
+            for transaction_id in canonical_ids:
+                self.assertIn(transaction_id, html)
+
+    def test_current_replace_rekeys_repeated_rows_after_profile_upgrade(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root, fake_modules, statement, profile_path = (
+                self._seed_balance_contract_workspace(tmp, repeated=True)
+            )
+            categorized_path = root / "output" / "categorized.csv"
+            original = load_identity_state(categorized_path)
+            original_ids = [row["transaction_id"] for row in original.rows]
+            (root / "corrections.csv").write_text(
+                csv_document(
+                    CORRECTION_COLUMNS,
+                    [
+                        {
+                            "transaction_id": transaction_id,
+                            "category": "Dining",
+                            "flow_type": "expense",
+                            "confidence": "1.00",
+                            "reason": "Synthetic repeated review",
+                            "needs_review": "false",
+                        }
+                        for transaction_id in original_ids
+                    ],
+                ),
+                encoding="utf-8",
+            )
+            upgraded_profile = json.loads(profile_path.read_text(encoding="utf-8"))
+            upgraded_profile["account_id"] = "balance_contract_v2"
+            upgraded_profile["account"] = "Balance Contract V2"
+            profile_path.write_text(json.dumps(upgraded_profile), encoding="utf-8")
+
+            replacement = self._run_cli(
+                [
+                    "import",
+                    str(statement),
+                    "--replace",
+                    "--no-interactive",
+                    "--json",
+                ],
+                cwd=root,
+                extra_pythonpath=fake_modules,
+            )
+
+            self.assertEqual(replacement.returncode, 0, replacement.stderr)
+            replaced = load_identity_state(categorized_path)
+            replacement_ids = [row["transaction_id"] for row in replaced.rows]
+            self.assertEqual(len(replacement_ids), 2)
+            self.assertTrue(set(original_ids).isdisjoint(replacement_ids))
+            self.assertTrue(all(row["category"] == "Dining" for row in replaced.rows))
+            self.assertTrue(
+                all(row["needs_review"] == "false" for row in replaced.rows)
+            )
+            with (root / "corrections.csv").open(
+                newline="", encoding="utf-8"
+            ) as handle:
+                correction_ids = {
+                    row["transaction_id"] for row in csv.DictReader(handle)
+                }
+            self.assertEqual(correction_ids, set(replacement_ids))
+            first_generation = self._artifact_bytes(
+                root,
+                [
+                    "output/categorized.csv",
+                    "output/review_needed.csv",
+                    "output/.honeymoney-identity-manifest.json",
+                    "output/.honeymoney-source-occurrences.csv",
+                    "output/.honeymoney-overlap-manifest.json",
+                    "corrections.csv",
+                ],
+            )
+
+            repeated = self._run_cli(
+                [
+                    "import",
+                    str(statement),
+                    "--replace",
+                    "--no-interactive",
+                    "--json",
+                ],
+                cwd=root,
+                extra_pythonpath=fake_modules,
+            )
+
+            self.assertEqual(repeated.returncode, 0, repeated.stderr)
+            self.assertEqual(
+                self._artifact_bytes(root, list(first_generation)),
+                first_generation,
+            )
+
+    def test_current_replace_keeps_conflicting_repeated_history_reviewable(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root, fake_modules, statement, profile_path = (
+                self._seed_balance_contract_workspace(tmp, repeated=True)
+            )
+            categorized_path = root / "output" / "categorized.csv"
+            original = load_identity_state(categorized_path)
+            original_ids = [row["transaction_id"] for row in original.rows]
+            (root / "corrections.csv").write_text(
+                csv_document(
+                    CORRECTION_COLUMNS,
+                    [
+                        {
+                            "transaction_id": original_ids[0],
+                            "category": "Dining",
+                            "needs_review": "false",
+                        },
+                        {
+                            "transaction_id": original_ids[1],
+                            "category": "Shopping",
+                            "needs_review": "false",
+                        },
+                    ],
+                ),
+                encoding="utf-8",
+            )
+            upgraded_profile = json.loads(profile_path.read_text(encoding="utf-8"))
+            upgraded_profile["account_id"] = "balance_contract_v2"
+            upgraded_profile["account"] = "Balance Contract V2"
+            profile_path.write_text(json.dumps(upgraded_profile), encoding="utf-8")
+
+            replacement = self._run_cli(
+                [
+                    "import",
+                    str(statement),
+                    "--replace",
+                    "--no-interactive",
+                    "--json",
+                ],
+                cwd=root,
+                extra_pythonpath=fake_modules,
+            )
+
+            self.assertEqual(replacement.returncode, 0, replacement.stderr)
+            replaced = load_identity_state(categorized_path)
+            self.assertTrue(
+                all(
+                    "overlap_history_ambiguous" in row["flags"].split(";")
+                    and row["needs_review"] == "true"
+                    for row in replaced.rows
+                )
+            )
+            with (root / "corrections.csv").open(
+                newline="", encoding="utf-8"
+            ) as handle:
+                correction_ids = {
+                    row["transaction_id"] for row in csv.DictReader(handle)
+                }
+            self.assertTrue(set(original_ids).isdisjoint(correction_ids))
 
     def test_import_loads_identity_state_once(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1216,7 +1537,7 @@ def open(source_path):
             listed = self._run_cli(["duplicates", "--json"], cwd=root)
             self.assertEqual(listed.returncode, 0, listed.stderr)
             listed_document = json.loads(listed.stdout)
-            self.assertEqual(listed_document["schema_version"], 1)
+            self.assertEqual(listed_document["schema_version"], 2)
             self.assertEqual(listed_document["command"], "duplicates")
             [group] = listed_document["data"]["groups"]
             self.assertEqual(group["keep_all_count"], 3)
@@ -2104,7 +2425,10 @@ def open(source_path):
                 rows = list(csv.DictReader(handle))
             self.assertEqual(len(rows), 2)
             for row in rows:
+                row["category"] = "Dining"
+                row["flow_type"] = "expense"
                 row["needs_review"] = "true"
+                row["review_reasons"] = "identity_conflict"
                 row["flags"] = "duplicate_suspected;duplicate_review_promoted"
                 row["reason"] = (
                     "Duplicate candidate [match_type=legacy, occurrence_ids=stale]"
@@ -3149,6 +3473,18 @@ def open(source_path):
                         1,
                     )
                     self.assertEqual(
+                        replace_report["categorization"]["provenance"],
+                        {
+                            "total_count": 2,
+                            "deterministic_count": 0,
+                            "memory_count": 0,
+                            "exact_correction_count": 1,
+                            "accepted_model_count": 0,
+                            "reviewable_model_count": 1,
+                            "unresolved_count": 0,
+                        },
+                    )
+                    self.assertEqual(
                         sent_batches,
                         [
                             [
@@ -3599,7 +3935,7 @@ def open(source_path):
             import_result = self._run_cli(
                 ["import", str(statement)],
                 cwd=root,
-                input_text=f"{_category_number('Other')}\n\n",
+                input_text=f"{_category_number('Dining')}\n\n",
             )
             self.assertEqual(import_result.returncode, 0, import_result.stderr)
 
@@ -3612,12 +3948,14 @@ def open(source_path):
             self.assertEqual(review_result.returncode, 0, review_result.stderr)
             self.assertIn("1 records need review", review_result.stdout)
             self.assertIn("PENDING PURCHASE", review_result.stdout)
+            self.assertIn("Resolve the accounting flow", review_result.stdout)
+            self.assertIn("Choose a category", review_result.stdout)
             self.assertNotIn("REVIEWED PURCHASE", review_result.stdout)
             with (root / "output" / "categorized.csv").open(
                 newline="", encoding="utf-8"
             ) as fh:
                 rows = {row["merchant"]: row for row in csv.DictReader(fh)}
-            self.assertEqual(rows["REVIEWED PURCHASE"]["category"], "Other")
+            self.assertEqual(rows["REVIEWED PURCHASE"]["category"], "Dining")
             self.assertEqual(rows["PENDING PURCHASE"]["category"], "Groceries")
 
     def test_repeated_review_categories_select_the_union_without_duplicates(
@@ -3792,7 +4130,7 @@ def open(source_path):
             import_result = self._run_cli(
                 ["import", str(statement)],
                 cwd=root,
-                input_text=f"{_category_number('Other')}\n",
+                input_text=f"{_category_number('Dining')}\n",
             )
             self.assertEqual(import_result.returncode, 0, import_result.stderr)
             before = self._review_artifact_bytes(root)
