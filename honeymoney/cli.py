@@ -192,6 +192,7 @@ class _ReviewBatchPlan:
 @dataclass(frozen=True)
 class _RateApplicationResult:
     rate_cache_path: Path
+    rate_cache_defaulted: bool
     imported_count: int
     cached_count: int
     requested_count: int
@@ -1262,6 +1263,7 @@ def _apply_rate_observations(
             )
         return _RateApplicationResult(
             rate_cache_path=rate_cache_path,
+            rate_cache_defaulted=_rate_cache_was_defaulted(config),
             imported_count=len(observations),
             cached_count=len(cache["observations"]),
             requested_count=0,
@@ -1367,6 +1369,7 @@ def _apply_rate_observations(
     )
     return _RateApplicationResult(
         rate_cache_path=rate_cache_path,
+        rate_cache_defaulted=_rate_cache_was_defaulted(config),
         imported_count=len(observations),
         cached_count=len(cache["observations"]),
         requested_count=len(requested_keys),
@@ -1416,6 +1419,10 @@ def _emit_rate_result(
 ) -> int:
     data: dict[str, Any] = {
         "provider": HKMA_PROVIDER,
+        "rate_cache": {
+            "path": str(result.rate_cache_path.resolve()),
+            "defaulted": result.rate_cache_defaulted,
+        },
         "imported_observation_count": result.imported_count,
         "cached_observation_count": result.cached_count,
         "requested_transaction_date_count": result.requested_count,
@@ -1450,7 +1457,8 @@ def _emit_rate_result(
         f"{result.resolved_count}/{result.requested_count} transaction dates "
         f"resolved; {result.valued_count} transaction(s) valued."
     )
-    print(f"Rate cache: {result.rate_cache_path}")
+    source = "default" if result.rate_cache_defaulted else "configured"
+    print(f"Rate cache: {result.rate_cache_path.resolve()} ({source})")
     return 0
 
 
@@ -2117,21 +2125,29 @@ def _setup_command(argv: list[str]) -> int:
     if existing_config_path.exists():
         _recover_config_generation(_read_config_document(existing_config_path))
     _write_starter_workspace(root, force=args.force)
+    rate_cache_path = (root / "rates.json").resolve()
     if args.json:
         _emit_json(
             "setup",
             "success",
-            data={"root": str(root)},
+            data={
+                "root": str(root),
+                "rate_cache": {
+                    "path": str(rate_cache_path),
+                    "defaulted": False,
+                },
+            },
             artifacts={
                 "config_json": str(root / "config.json"),
                 "corrections_csv": str(root / "corrections.csv"),
-                "rate_cache_json": str(root / "rates.json"),
+                "rate_cache_json": str(rate_cache_path),
                 "input_directory": str(root / "input"),
                 "output_directory": str(root / "output"),
             },
         )
         return 0
     print(f"Created Honeymoney workspace at {root}")
+    print(f"Rate cache: {rate_cache_path} (configured)")
     print("")
     print("Next:")
     print(f"  1. Put exported CSV/PDF files in {root / 'input'}")
@@ -4538,17 +4554,27 @@ def _load_config_document(config_path: str | None, *, recover: bool) -> dict[str
     config["paths"].setdefault("output", "./output/categorized.csv")
     config["_identity_config_path"] = resolved_config_path
     config["_identity_workspace_root"] = resolved_config_path.parent
+    _resolve_rate_cache_config(config, resolved_config_path)
     if recover:
         _recover_config_generation(config)
-    rate_cache_value = config.get("rate_cache")
-    if recover and isinstance(rate_cache_value, str) and rate_cache_value.strip():
-        recover_generation(Path(rate_cache_value))
-    config["_rate_cache"] = (
-        load_rate_cache(Path(rate_cache_value))
-        if isinstance(rate_cache_value, str) and rate_cache_value.strip()
-        else empty_rate_cache()
-    )
+    rate_cache_path = _configured_rate_cache_path(config)
+    if recover:
+        recover_generation(rate_cache_path)
+    config["_rate_cache"] = load_rate_cache(rate_cache_path)
     return config
+
+
+def _resolve_rate_cache_config(config: dict[str, Any], config_path: Path) -> None:
+    value = config.get("rate_cache")
+    if isinstance(value, str) and value.strip():
+        config["_rate_cache_defaulted"] = False
+        return
+    workspace_root = config_path.parent.resolve()
+    rate_cache_path = (workspace_root / "rates.json").resolve()
+    if not rate_cache_path.is_relative_to(workspace_root):
+        raise ValueError("The default rate cache must stay inside the workspace")
+    config["rate_cache"] = str(rate_cache_path)
+    config["_rate_cache_defaulted"] = True
 
 
 def _configured_rate_cache_path(config: Mapping[str, object]) -> Path:
@@ -4556,6 +4582,10 @@ def _configured_rate_cache_path(config: Mapping[str, object]) -> Path:
     if not isinstance(value, str) or not value.strip():
         raise ValueError("Config must define a rate_cache JSON path")
     return Path(value)
+
+
+def _rate_cache_was_defaulted(config: Mapping[str, object]) -> bool:
+    return config.get("_rate_cache_defaulted") is True
 
 
 def _loaded_rate_cache(config: Mapping[str, object]) -> RateCache:

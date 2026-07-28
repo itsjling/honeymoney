@@ -273,13 +273,17 @@ honeymoney rates import ./er-eeri-daily.json --json
 
 The command checks the whole provider document before it writes. It stores
 HKD-per-unit-of-foreign-currency observations in the versioned local
-`rates.json` cache. An exact date wins. For a weekend or holiday, the latest
-prior observation may serve a transaction for up to seven calendar days. A
-future or older rate cannot fill the value. The cache records the requested
-transaction date, observation date, raw rate, provider, currencies, and a
-document digest. Provider fields already use one foreign-currency unit,
-including JPY, KRW, and IDR. Later statement imports add their requested-date
-resolutions. The cache stores no statement text or input path.
+`rates.json` cache. If an older config has no `rate_cache` field, Honeymoney
+uses `rates.json` beside that config without editing the config. An explicit
+path still wins. Human and JSON rate-command output say which path was resolved
+and whether it came from this default. An exact date wins. For a weekend or
+holiday, the latest prior observation may serve a transaction for up to seven
+calendar days. A future or older rate cannot fill the value. The cache records
+the requested transaction date, observation date, raw rate, provider,
+currencies, and a document digest. Provider fields already use one
+foreign-currency unit, including JPY, KRW, and IDR. Later statement imports add
+their requested-date resolutions. The cache stores no statement text or input
+path.
 
 Imported HKMA values use `valuation_source=hkma_daily_reference_rate` and
 `valuation_status=estimated`. `valuation_rate_date` and `valuation_provider`
@@ -471,8 +475,10 @@ Three hidden files join each recoverable ledger generation:
   active or retired multiset slots, keyed membership history, and explicit
   duplicate resolutions.
 
-`rates.json` is a versioned local input cache named by `config.rate_cache`. Rate
-imports publish it with the ledger generation when a ledger exists.
+`rates.json` is a versioned local input cache named by `config.rate_cache`.
+Legacy configs without that field use `rates.json` beside `config.json`; this
+in-memory default never edits the config. Rate imports publish the cache with
+the ledger generation when a ledger exists.
 
 An exact issue #31 ledger keeps its old source IDs during read-only commands.
 Its first write publishes the canonical CSV and both new hidden files together.
