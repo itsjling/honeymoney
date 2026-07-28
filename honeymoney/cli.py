@@ -52,12 +52,14 @@ from honeymoney.duplicates import (
 from honeymoney.identity import (
     IdentityError,
     ambiguous_legacy_transaction_ids,
+    record_fingerprint,
     resolve_batch,
 )
 from honeymoney.identity_state import IdentityState, load_configured_identity_state
 from honeymoney.learning import plan_learned_rules
 from honeymoney.manual_pairs import (
     MANUAL_PAIR_FIELD,
+    MANUAL_PAIR_FLAG_PREFIX,
     ManualPairError,
     manual_pair_id,
     manual_pair_marker,
@@ -2910,16 +2912,24 @@ def _manual_pair_review(argv: list[str]) -> int:
     by_id = {
         row["transaction_id"]: row for row in ledger_rows if row.get("transaction_id")
     }
-    selected = [by_id.get(identifier) for identifier in args.transaction_ids]
-    if any(row is None for row in selected):
+    selected_ids = list(args.transaction_ids)
+    replaying_retired_ids = any(identifier not in by_id for identifier in selected_ids)
+    if replaying_retired_ids:
+        aliases = _proven_manual_pair_aliases(config, categorized_path)
+        selected_ids = [
+            identifier if identifier in by_id else aliases.get(identifier, "")
+            for identifier in selected_ids
+        ]
+    if (
+        any(not identifier or identifier not in by_id for identifier in selected_ids)
+        or len(set(selected_ids)) != 2
+    ):
         raise ManualPairError(
             "manual_pair_stale_transaction",
             "A nominated transaction is no longer current.",
         )
-    left = selected[0]
-    right = selected[1]
-    assert left is not None
-    assert right is not None
+    left = by_id[selected_ids[0]]
+    right = by_id[selected_ids[1]]
     protected_flags = {
         IDENTITY_MIGRATION_AMBIGUITY_FLAG,
         "overlap_count_ambiguous",
@@ -2936,6 +2946,19 @@ def _manual_pair_review(argv: list[str]) -> int:
     validate_manual_pair_facts(left, right)
 
     markers = [manual_pair_marker(row) for row in (left, right)]
+    malformed_marker = any(
+        any(
+            token.startswith(MANUAL_PAIR_FLAG_PREFIX)
+            for token in row.get("flags", "").split(";")
+        )
+        and not marker
+        for row, marker in zip((left, right), markers)
+    )
+    if malformed_marker:
+        raise ManualPairError(
+            "manual_pair_conflict",
+            "A nominated transaction has conflicting manual-pair state.",
+        )
     existing_group = markers[0] if markers[0] and markers[0] == markers[1] else ""
     if any(markers) and not existing_group:
         raise ManualPairError(
@@ -2954,6 +2977,62 @@ def _manual_pair_review(argv: list[str]) -> int:
                 "manual_pair_conflict",
                 "A nominated transaction already belongs to an active pair.",
             )
+    corrections = load_corrections(config)
+    if not existing_group:
+        proposed_pair_id = manual_pair_id(args.transaction_ids)
+        nominated_correction_groups = {
+            corrections.get(row["transaction_id"], {}).get(MANUAL_PAIR_FIELD, "")
+            for row in (left, right)
+        }
+        nominated_correction_groups.discard("")
+        proposed_correction_members = {
+            transaction_id
+            for transaction_id, correction in corrections.items()
+            if correction.get(MANUAL_PAIR_FIELD) == proposed_pair_id
+        }
+        if nominated_correction_groups or proposed_correction_members:
+            raise ManualPairError(
+                "manual_pair_conflict",
+                "A nominated transaction has conflicting stored pair membership.",
+            )
+    if existing_group:
+        _require_complete_manual_pair(
+            ledger_rows,
+            corrections,
+            left,
+            right,
+            existing_group,
+        )
+        current_ids = sorted(selected_ids)
+        data = {
+            "paired_count": 2,
+            "unchanged": True,
+            "changed": False,
+            "result": "already_paired",
+            "pair_id": existing_group,
+            "transaction_ids": current_ids,
+            "remaining_review_count": sum(
+                1 for row in ledger_rows if row.get("needs_review") == "true"
+            ),
+        }
+        if args.json:
+            _emit_json(
+                "review.pair",
+                "success",
+                data=data,
+                artifacts=_correction_artifacts(config, categorized_path),
+            )
+        else:
+            print(
+                "Manual internal-transfer pair already paired: "
+                f"{existing_group}; current transactions {', '.join(current_ids)}."
+            )
+        return 0
+    if replaying_retired_ids:
+        raise ManualPairError(
+            "manual_pair_stale_transaction",
+            "The nominated retired transactions do not map to one active manual pair.",
+        )
 
     pair_id = existing_group or manual_pair_id(args.transaction_ids)
     patches = {}
@@ -2966,9 +3045,18 @@ def _manual_pair_review(argv: list[str]) -> int:
         patch[MANUAL_PAIR_FIELD] = pair_id
         patches[row["transaction_id"]] = patch
     result = apply_correction_operation(config, categorized_path, patches)
+    current_ids = sorted(
+        row["transaction_id"]
+        for row in result.ledger_rows
+        if manual_pair_marker(row) == pair_id
+    )
     data = {
         "paired_count": 2,
-        "unchanged": bool(existing_group),
+        "unchanged": False,
+        "changed": True,
+        "result": "paired",
+        "pair_id": pair_id,
+        "transaction_ids": current_ids,
         "remaining_review_count": result.remaining_review_count,
     }
     if args.json:
@@ -2979,9 +3067,91 @@ def _manual_pair_review(argv: list[str]) -> int:
             artifacts=_correction_artifacts(config, categorized_path),
         )
     else:
-        state = "already confirmed" if existing_group else "confirmed"
-        print(f"Manual internal-transfer pair {state}; 2 transactions linked.")
+        print(
+            "Manual internal-transfer pair confirmed: "
+            f"{pair_id}; current transactions {', '.join(current_ids)}."
+        )
     return 0
+
+
+def _proven_manual_pair_aliases(
+    config: dict[str, Any],
+    categorized_path: Path,
+) -> dict[str, str]:
+    """Map source occurrence IDs only through one active canonical slot."""
+    state = load_configured_identity_state(categorized_path, config)
+    manifest = state.overlap_manifest
+    evidence_rows = state.source_evidence_rows
+    if manifest is None or evidence_rows is None:
+        return {}
+    current_ids = {
+        row.get("transaction_id", "") for row in state.rows if row.get("transaction_id")
+    }
+    target_by_fingerprint = {
+        group["record_fingerprint"]: active_ids[0]
+        for group in manifest["groups"]
+        if len(
+            active_ids := [
+                slot["transaction_id"]
+                for slot in group["slots"]
+                if slot["state"] == "active" and slot["transaction_id"] in current_ids
+            ]
+        )
+        == 1
+    }
+    targets_by_source_id: dict[str, set[str]] = {}
+    try:
+        for row in evidence_rows:
+            target = target_by_fingerprint.get(record_fingerprint(row))
+            source_id = row.get("transaction_id", "")
+            if target and source_id:
+                targets_by_source_id.setdefault(source_id, set()).add(target)
+    except IdentityError:
+        return {}
+    return {
+        source_id: next(iter(targets))
+        for source_id, targets in targets_by_source_id.items()
+        if len(targets) == 1
+    }
+
+
+def _require_complete_manual_pair(
+    ledger_rows: list[dict[str, str]],
+    corrections: Mapping[str, Mapping[str, str]],
+    left: dict[str, str],
+    right: dict[str, str],
+    pair_id: str,
+) -> None:
+    """Fail unless the two rows are the whole current stored pair."""
+    expected_ids = {left["transaction_id"], right["transaction_id"]}
+    ledger_members = {
+        row["transaction_id"]
+        for row in ledger_rows
+        if row.get("transaction_id") and manual_pair_marker(row) == pair_id
+    }
+    correction_members = {
+        transaction_id
+        for transaction_id, correction in corrections.items()
+        if correction.get(MANUAL_PAIR_FIELD) == pair_id
+    }
+    complete = ledger_members == expected_ids and correction_members == expected_ids
+    for row, other in ((left, right), (right, left)):
+        complete = complete and all(
+            (
+                manual_pair_marker(row) == pair_id,
+                row.get("transfer_group_id") == pair_id,
+                row.get("paired_transaction_id") == other["transaction_id"],
+                row.get("reconciliation_status") == "paired",
+                row.get("category") == "Internal Transfer",
+                row.get("flow_type") == "internal_transfer",
+                row.get("flow_source") == "correction",
+            )
+        )
+    if not complete:
+        raise ManualPairError(
+            "manual_pair_conflict",
+            "The current stored manual pair is incomplete or conflicting.",
+        )
 
 
 def _batch_review(

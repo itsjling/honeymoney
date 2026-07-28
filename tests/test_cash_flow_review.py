@@ -12,6 +12,7 @@ from unittest.mock import Mock, patch
 
 from honeymoney.csv_artifacts import csv_document
 from honeymoney.identity_state import identity_manifest_path, load_identity_state
+from honeymoney.manual_pairs import manual_pair_id
 from honeymoney.overlap import overlap_manifest_path, source_occurrences_path
 from honeymoney.schema import SOURCE_OCCURRENCE_COLUMNS
 
@@ -95,6 +96,17 @@ class CashFlowReviewTest(unittest.TestCase):
             str(path.relative_to(root)): path.read_bytes()
             for path in paths
             if path.exists()
+        }
+
+    def _pair_artifacts(self, root: Path) -> dict[str, bytes]:
+        paths = [
+            *sorted((root / "output").iterdir()),
+            root / "corrections.csv",
+        ]
+        return {
+            str(path.relative_to(root)): path.read_bytes()
+            for path in paths
+            if path.is_file()
         }
 
     def test_filtered_review_marks_only_unresolved_may_inflow_as_income(self) -> None:
@@ -955,7 +967,7 @@ class CashFlowReviewTest(unittest.TestCase):
                 updated["EQUAL OUTFLOW"]["flow_type"], "internal_transfer"
             )
 
-    def test_manual_same_account_pair_survives_reconcile_and_replacement(
+    def test_manual_pair_replay_survives_migration_reconcile_and_replacement(
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -976,14 +988,28 @@ class CashFlowReviewTest(unittest.TestCase):
                 cwd=root,
             )
             self.assertEqual(imported.returncode, 0, imported.stderr)
+            categorized_path = root / "output" / "categorized.csv"
+            state = load_identity_state(categorized_path)
+            source_rows = state.source_rows
+            self.assertIsNotNone(source_rows)
+            assert source_rows is not None
+            categorized_path.write_text(
+                csv_document(SOURCE_OCCURRENCE_COLUMNS, source_rows),
+                encoding="utf-8",
+            )
+            source_occurrences_path(categorized_path).unlink()
+            overlap_manifest_path(categorized_path).unlink()
             rows = {row["merchant"]: row for row in self._ledger(root)}
+            nominated_ids = [
+                rows["SYNTHETIC CASH OUT"]["transaction_id"],
+                rows["SYNTHETIC CASH IN"]["transaction_id"],
+            ]
 
             paired = self._run_cli(
                 [
                     "review",
                     "pair",
-                    rows["SYNTHETIC CASH OUT"]["transaction_id"],
-                    rows["SYNTHETIC CASH IN"]["transaction_id"],
+                    *nominated_ids,
                     "--yes",
                     "--json",
                 ],
@@ -995,11 +1021,19 @@ class CashFlowReviewTest(unittest.TestCase):
             self.assertEqual(payload["command"], "review.pair")
             self.assertEqual(payload["data"]["paired_count"], 2)
             self.assertFalse(payload["data"]["unchanged"])
+            self.assertTrue(payload["data"]["changed"])
+            self.assertEqual(payload["data"]["result"], "paired")
             self.assertNotIn("SYNTHETIC CASH", paired.stdout)
             self.assertNotIn("cash-movements.csv", paired.stdout)
             linked = {row["merchant"]: row for row in self._ledger(root)}
             outgoing = linked["SYNTHETIC CASH OUT"]
             incoming = linked["SYNTHETIC CASH IN"]
+            current_ids = sorted(
+                [outgoing["transaction_id"], incoming["transaction_id"]]
+            )
+            self.assertNotEqual(set(current_ids), set(nominated_ids))
+            self.assertEqual(payload["data"]["transaction_ids"], current_ids)
+            self.assertEqual(payload["data"]["pair_id"], outgoing["transfer_group_id"])
             self.assertEqual(
                 {row["category"] for row in linked.values()},
                 {"Internal Transfer"},
@@ -1038,22 +1072,63 @@ class CashFlowReviewTest(unittest.TestCase):
                 {outgoing["transfer_group_id"]},
             )
 
+            replay_before = self._pair_artifacts(root)
             repeated = self._run_cli(
                 [
                     "review",
                     "pair",
-                    outgoing["transaction_id"],
-                    incoming["transaction_id"],
+                    *nominated_ids,
                     "--yes",
                     "--json",
                 ],
                 cwd=root,
             )
             self.assertEqual(repeated.returncode, 0, repeated.stderr)
-            self.assertTrue(json.loads(repeated.stdout)["data"]["unchanged"])
+            repeated_data = json.loads(repeated.stdout)["data"]
+            self.assertTrue(repeated_data["unchanged"])
+            self.assertFalse(repeated_data["changed"])
+            self.assertEqual(repeated_data["result"], "already_paired")
+            self.assertEqual(repeated_data["pair_id"], outgoing["transfer_group_id"])
+            self.assertEqual(repeated_data["transaction_ids"], current_ids)
+            self.assertNotIn("SYNTHETIC CASH", repeated.stdout)
+            self.assertNotIn("500.00", repeated.stdout)
+            self.assertEqual(self._pair_artifacts(root), replay_before)
+
+            human = self._run_cli(
+                [
+                    "review",
+                    "pair",
+                    *nominated_ids,
+                    "--yes",
+                ],
+                cwd=root,
+            )
+            self.assertEqual(human.returncode, 0, human.stderr)
+            self.assertIn("already paired", human.stdout)
+            self.assertIn(outgoing["transfer_group_id"], human.stdout)
+            for transaction_id in current_ids:
+                self.assertIn(transaction_id, human.stdout)
+            self.assertNotIn("SYNTHETIC CASH", human.stdout)
+            self.assertNotIn("500.00", human.stdout)
+            self.assertEqual(self._pair_artifacts(root), replay_before)
+
             reconciled = self._run_cli(["reconcile", "--json"], cwd=root)
             self.assertEqual(reconciled.returncode, 0, reconciled.stderr)
             self.assertEqual(json.loads(reconciled.stdout)["data"]["paired_groups"], 1)
+            reconciled_artifacts = self._pair_artifacts(root)
+            replayed_after_reconcile = self._run_cli(
+                ["review", "pair", *nominated_ids, "--yes", "--json"],
+                cwd=root,
+            )
+            self.assertEqual(
+                replayed_after_reconcile.returncode,
+                0,
+                replayed_after_reconcile.stderr,
+            )
+            self.assertFalse(
+                json.loads(replayed_after_reconcile.stdout)["data"]["changed"]
+            )
+            self.assertEqual(self._pair_artifacts(root), reconciled_artifacts)
 
             replaced = self._run_cli(
                 [
@@ -1075,6 +1150,20 @@ class CashFlowReviewTest(unittest.TestCase):
                 {row["reconciliation_status"] for row in replacement_rows},
                 {"paired"},
             )
+            replaced_artifacts = self._pair_artifacts(root)
+            replayed_after_replace = self._run_cli(
+                ["review", "pair", *nominated_ids, "--yes", "--json"],
+                cwd=root,
+            )
+            self.assertEqual(
+                replayed_after_replace.returncode,
+                0,
+                replayed_after_replace.stderr,
+            )
+            self.assertFalse(
+                json.loads(replayed_after_replace.stdout)["data"]["changed"]
+            )
+            self.assertEqual(self._pair_artifacts(root), replaced_artifacts)
 
             report = self._run_cli(
                 ["report", "2026-05", "--no-open"],
@@ -1084,6 +1173,20 @@ class CashFlowReviewTest(unittest.TestCase):
             html = (root / "output" / "report.html").read_text(encoding="utf-8")
             self.assertIn('id="tile-income">0.00</div>', html)
             self.assertIn('id="tile-spending">0.00</div>', html)
+            report_artifacts = self._pair_artifacts(root)
+            replayed_after_report = self._run_cli(
+                ["review", "pair", *nominated_ids, "--yes", "--json"],
+                cwd=root,
+            )
+            self.assertEqual(
+                replayed_after_report.returncode,
+                0,
+                replayed_after_report.stderr,
+            )
+            self.assertFalse(
+                json.loads(replayed_after_report.stdout)["data"]["changed"]
+            )
+            self.assertEqual(self._pair_artifacts(root), report_artifacts)
 
     def test_review_decision_atomically_supersedes_a_manual_pair(self) -> None:
         cases = (
@@ -1183,7 +1286,7 @@ class CashFlowReviewTest(unittest.TestCase):
             "flags": "",
             "review_reasons": "accounting_flow",
         }
-        result = Mock(remaining_review_count=0)
+        result = Mock(remaining_review_count=0, ledger_rows=[left, right])
 
         with (
             patch.object(
@@ -1261,6 +1364,26 @@ class CashFlowReviewTest(unittest.TestCase):
             self.assertEqual(remaining["reconciliation_status"], "unmatched")
             self.assertIn("manual_transfer_pair_invalid", remaining["flags"])
             self.assertIn("accounting_flow", remaining["review_reasons"].split(";"))
+            missing_before = self._pair_artifacts(root)
+            replayed_missing = self._run_cli(
+                [
+                    "review",
+                    "pair",
+                    first["transaction_id"],
+                    second["transaction_id"],
+                    "--yes",
+                    "--json",
+                ],
+                cwd=root,
+            )
+            self.assertEqual(replayed_missing.returncode, 2, replayed_missing.stderr)
+            self.assertEqual(
+                json.loads(replayed_missing.stdout)["errors"][0]["code"],
+                "manual_pair_stale_transaction",
+            )
+            self.assertNotIn("SYNTHETIC", replayed_missing.stdout)
+            self.assertNotIn("100.00", replayed_missing.stdout)
+            self.assertEqual(self._pair_artifacts(root), missing_before)
 
             statement.write_text("\n".join(original), encoding="utf-8")
             restored = self._run_cli(
@@ -1279,6 +1402,114 @@ class CashFlowReviewTest(unittest.TestCase):
                     for row in restored_rows
                 )
             )
+
+    def test_manual_pair_replay_rejects_extra_stored_members_without_writing(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._setup_workspace(tmp)
+            self._import_rows(
+                root,
+                "extra-pair-member.csv",
+                [
+                    "2026-05-04,SYNTHETIC PAIR OUT,-100.00,HKD",
+                    "2026-05-04,SYNTHETIC PAIR IN,100.00,HKD",
+                    "2026-05-05,SYNTHETIC EXTRA,-30.00,HKD",
+                ],
+            )
+            rows = {row["merchant"]: row for row in self._ledger(root)}
+            pair_ids = [
+                rows["SYNTHETIC PAIR OUT"]["transaction_id"],
+                rows["SYNTHETIC PAIR IN"]["transaction_id"],
+            ]
+            paired = self._run_cli(
+                ["review", "pair", *pair_ids, "--yes", "--json"],
+                cwd=root,
+            )
+            self.assertEqual(paired.returncode, 0, paired.stderr)
+            pair_id = json.loads(paired.stdout)["data"]["pair_id"]
+            correction_path = root / "corrections.csv"
+            with correction_path.open(newline="", encoding="utf-8") as handle:
+                reader = csv.DictReader(handle)
+                fieldnames = list(reader.fieldnames or [])
+                corrections = list(reader)
+            corrections.append(
+                {
+                    **{field: "" for field in fieldnames},
+                    "transaction_id": rows["SYNTHETIC EXTRA"]["transaction_id"],
+                    "manual_pair_id": pair_id,
+                }
+            )
+            with correction_path.open("w", newline="", encoding="utf-8") as handle:
+                writer = csv.DictWriter(handle, fieldnames=fieldnames)
+                writer.writeheader()
+                writer.writerows(corrections)
+            before = self._pair_artifacts(root)
+
+            replayed = self._run_cli(
+                ["review", "pair", *pair_ids, "--yes", "--json"],
+                cwd=root,
+            )
+
+            self.assertEqual(replayed.returncode, 2, replayed.stderr)
+            self.assertEqual(
+                json.loads(replayed.stdout)["errors"][0]["code"],
+                "manual_pair_conflict",
+            )
+            self.assertNotIn("SYNTHETIC", replayed.stdout)
+            self.assertNotIn("100.00", replayed.stdout)
+            self.assertEqual(self._pair_artifacts(root), before)
+
+    def test_manual_pair_rejects_correction_only_membership_without_writing(
+        self,
+    ) -> None:
+        cases = ("missing_member", "conflicting_pair")
+        for case in cases:
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as tmp:
+                root = self._setup_workspace(tmp)
+                self._import_rows(
+                    root,
+                    "correction-only-pair.csv",
+                    [
+                        "2026-05-04,SYNTHETIC PAIR OUT,-100.00,HKD",
+                        "2026-05-04,SYNTHETIC PAIR IN,100.00,HKD",
+                    ],
+                )
+                rows = {row["merchant"]: row for row in self._ledger(root)}
+                pair_ids = [
+                    rows["SYNTHETIC PAIR OUT"]["transaction_id"],
+                    rows["SYNTHETIC PAIR IN"]["transaction_id"],
+                ]
+                stored_pair_id = (
+                    manual_pair_id(pair_ids)
+                    if case == "missing_member"
+                    else manual_pair_id([pair_ids[0], "retired-transaction"])
+                )
+                correction_path = root / "corrections.csv"
+                with correction_path.open(newline="", encoding="utf-8") as handle:
+                    fieldnames = list(csv.DictReader(handle).fieldnames or [])
+                correction = {field: "" for field in fieldnames}
+                correction["transaction_id"] = pair_ids[0]
+                correction["manual_pair_id"] = stored_pair_id
+                with correction_path.open("w", newline="", encoding="utf-8") as handle:
+                    writer = csv.DictWriter(handle, fieldnames=fieldnames)
+                    writer.writeheader()
+                    writer.writerow(correction)
+                before = self._pair_artifacts(root)
+
+                replayed = self._run_cli(
+                    ["review", "pair", *pair_ids, "--yes", "--json"],
+                    cwd=root,
+                )
+
+                self.assertEqual(replayed.returncode, 2, replayed.stderr)
+                self.assertEqual(
+                    json.loads(replayed.stdout)["errors"][0]["code"],
+                    "manual_pair_conflict",
+                )
+                self.assertNotIn("SYNTHETIC", replayed.stdout)
+                self.assertNotIn("100.00", replayed.stdout)
+                self.assertEqual(self._pair_artifacts(root), before)
 
     def test_manual_pair_rejects_stale_same_sign_and_conflicting_rows_atomically(
         self,
