@@ -6,10 +6,12 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from honeymoney.csv_artifacts import csv_document
 from honeymoney.identity_state import load_identity_state
 from honeymoney.overlap import overlap_manifest_path, source_occurrences_path
+from honeymoney.persistence import GenerationConflictError
 from honeymoney.review_state import REVIEW_REASON_SOURCE_DATA
 from honeymoney.schema import (
     PRE_RATE_METADATA_CATEGORIZED_COLUMNS,
@@ -515,6 +517,53 @@ class SourceDataReviewWorkflowTest(unittest.TestCase):
             self.assertEqual(
                 json.loads(blocked.stdout)["errors"][0]["code"],
                 "source_data_evidence_active",
+            )
+
+    def test_resolve_rejects_a_generation_change_during_state_load(self) -> None:
+        import honeymoney.cli as cli
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._setup_workspace(tmp)
+            statement = root / "concurrent-resolve.csv"
+            self._write_statement(
+                statement,
+                ["2026-05-04,SYNTHETIC CONCURRENT RESOLVE,-10.00,HKD"],
+            )
+            self._import(root, statement)
+            ledger_path = root / "output" / "categorized.csv"
+            _, rows = self._read_csv(ledger_path)
+            transaction_id = rows[0]["transaction_id"]
+            self._mark_canonical_stale(root, {transaction_id})
+            real_load = cli.load_configured_identity_state
+            published_generation: dict[str, bytes] = {}
+
+            def load_then_publish(*args: object, **kwargs: object) -> object:
+                state = real_load(*args, **kwargs)
+                fieldnames, current_rows = self._read_csv(ledger_path)
+                current_rows[0]["notes"] = "Synthetic concurrent update"
+                self._write_csv(ledger_path, fieldnames, current_rows)
+                published_generation.update(self._generation_bytes(root))
+                return state
+
+            with (
+                patch.object(
+                    cli,
+                    "load_configured_identity_state",
+                    side_effect=load_then_publish,
+                ),
+                self.assertRaises(GenerationConflictError),
+            ):
+                cli._source_data_resolve_command(
+                    transaction_id,
+                    str(root / "config.json"),
+                    json_output=True,
+                )
+
+            self.assertEqual(self._generation_bytes(root), published_generation)
+            _, retained_rows = self._read_csv(ledger_path)
+            self.assertEqual(
+                retained_rows[0]["notes"],
+                "Synthetic concurrent update",
             )
 
     def test_resolve_schema_migration_repairs_all_stale_rows(self) -> None:

@@ -1249,17 +1249,21 @@ def _source_data_resolve_command(
 ) -> int:
     config = _load_config(config_path)
     categorized_path = Path(config["paths"]["output"])
-    state = load_configured_identity_state(categorized_path, config)
-    migration_required = (
-        state.canonical_migration_required
-        or state.overlap_migration_required
-        or state.ledger_schema_migration_required
-    )
     generation_paths = generation_member_paths(
         categorized_path,
         configured_generation_paths(config),
     )
     expected_generation = generation_hashes(generation_paths)
+    state = load_configured_identity_state(categorized_path, config)
+    if generation_hashes(generation_paths) != expected_generation:
+        raise GenerationConflictError(
+            "The ledger generation changed while this operation was reading it"
+        )
+    migration_required = (
+        state.canonical_migration_required
+        or state.overlap_migration_required
+        or state.ledger_schema_migration_required
+    )
     corrections = load_corrections(config)
     correction_active = source_data_review_active(corrections.get(transaction_id))
     item = inspect_source_data_review(
