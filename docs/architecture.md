@@ -124,6 +124,17 @@ one generation. A failed replacement leaves the prior financial generation
 unchanged, and its report describes that preserved generation. Running
 `reconcile` as a separate upgrade step remains safe but is optional.
 
+Replacement, migration, and reconciliation derive `source_data_issue` from
+the active source pool after corrections run. The canonical row keeps only
+source-data flags that active parser, balance, or provenance evidence supports.
+This also repairs stale correction review fields before publication.
+`source-data inspect` uses the same checked provenance join for any valuation
+state and returns only bounded source context. `source-data resolve` changes
+only the named row on a current schema and writes only when that join finds no
+active support. If the write also upgrades stored rows, it repairs the whole
+migrating generation. It publishes the ledger, corrections, review queue,
+source evidence, and identity files as one recoverable generation.
+
 `honeymoney duplicates` reads unresolved count-mismatch groups from the overlap
 module. `duplicates resolve` validates the current membership-bound group ID,
 then records `same-event` or `keep-all`. Same-event retains the second-largest
@@ -131,8 +142,8 @@ per-source count; keep-all retains the maximum. A membership change ignores the
 old resolution, restores duplicate review, and emits a value-free warning.
 Resolution regenerates the canonical ledger, review queue, transfers, and
 reconciliation, uses active source evidence for statement balances, and
-publishes changed corrections in the same generation. It does not rewrite the
-last import report.
+repairs source-data state after the overlap decision. It publishes changed
+corrections in the same generation and does not rewrite the last import report.
 
 The current import report describes the latest attempted import even when a
 source fails, while the authoritative ledger, its derived review rows, and saved
@@ -245,6 +256,15 @@ Missing-valuation inspection emits a workspace-relative source path only after
 the path produces the stored source namespace. A matching file name alone is
 not proof. Evidence keeps one item per active source occurrence, including
 equal display, page, and row values.
+
+The shared active-provenance index also supports source-data review. It checks
+canonical group membership and source-occurrence counts before either
+inspection path returns evidence. Source-data evidence maps each supported flag
+to a parser, balance, or provenance conflict and gives its safe source, page,
+statement section, and field without returning statement values. A valid
+unresolved overlap count or history conflict remains loadable and appears as
+typed provenance evidence; malformed persisted identity state still fails
+closed.
 
 The resolver runs for the whole input batch before categorization, correction
 application, reconciliation, or any transaction-ID dictionary. It resolves a

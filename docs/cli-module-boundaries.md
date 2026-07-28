@@ -22,10 +22,12 @@ complete prospective ledger. The CLI uses read-only evaluation for reports
 when no source was processed; otherwise it applies the result before it
 publishes the ledger.
 
-`valuation_inspection.py` owns the read-only join from canonical missing values
-to active source occurrences. It checks overlap membership and occurrence
-counts before returning workspace-relative file, page, and row evidence. The
-CLI loads identity state without recovery for this command.
+`provenance.py` owns the checked join from canonical rows to active source
+occurrences. It validates overlap membership and occurrence counts and proves
+workspace-relative paths. `valuation_inspection.py` uses that join for missing
+values. `source_data_review.py` uses it to derive typed source-data review and
+value-free evidence for any valuation state. The CLI loads identity state
+without recovery for read-only inspection and owns recoverable repair writes.
 
 `rates.py` owns official HKMA document checks, cache checks, cache merging, and
 date resolution. It performs no network or ledger I/O. The CLI owns local file

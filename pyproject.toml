@@ -61,10 +61,12 @@ files = [
   "honeymoney/overlap_contracts.py",
   "honeymoney/parser_contracts.py",
   "honeymoney/persistence.py",
+  "honeymoney/provenance.py",
   "honeymoney/reconciliation.py",
   "honeymoney/report.py",
   "honeymoney/rules.pyi",
   "honeymoney/schema.py",
+  "honeymoney/source_data_review.py",
 ]
 strict = true
 disallow_any_explicit = true

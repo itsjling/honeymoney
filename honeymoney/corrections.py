@@ -73,6 +73,7 @@ from honeymoney.schema import (
     allowed_owners,
     allowed_payment_methods,
 )
+from honeymoney.source_data_review import repair_source_data_review_state
 
 CORRECTION_FIELDS = [
     "category",
@@ -511,6 +512,11 @@ def apply_correction_operation(
     )
     expected_generation = generation_hashes(generation_paths)
     state = load_configured_identity_state(categorized_path, config)
+    migration_required = (
+        state.canonical_migration_required
+        or state.overlap_migration_required
+        or state.ledger_schema_migration_required
+    )
     if generation_hashes(generation_paths) != expected_generation:
         raise GenerationConflictError(
             "The ledger generation changed while this operation was reading it"
@@ -642,6 +648,17 @@ def apply_correction_operation(
             and corrected == baseline
         ):
             corrected_ledger[index] = original
+    if migration_required:
+        repair_source_data_review_state(
+            corrected_ledger,
+            source_rows,
+            operation_overlap_manifest,
+        )
+        for transaction_id, patch in review_state_correction_updates(
+            merged_corrections,
+            corrected_ledger,
+        ).items():
+            merged_corrections[transaction_id].update(patch)
     review_rows = [
         to_review_row(row)
         for row in corrected_ledger

@@ -122,7 +122,9 @@ canonical ID. The migration and successful replacement use one recoverable
 generation, and the import summary reports the migration. If every source
 fails, the summary describes the preserved generation. You may run
 `honeymoney reconcile` first, but this preflight step is no longer required for
-a safe upgrade.
+a safe upgrade. Replacement also derives `source_data_issue` from the active
+source occurrences. A fixed source clears stale flags and correction tokens;
+current parser or balance conflicts stay in review.
 
 ```bash
 honeymoney profile validate PROFILE
@@ -329,11 +331,12 @@ Prints or edits the active `config.json`; pass `--config PATH` to target another
 ## Structured agent commands
 
 `setup`, `run`, `import`, `status`, `report`, `config`, `profile validate`,
-`evaluate`, `learn`, `valuation missing`, `rates import`, `rates fetch`,
-and fully specified one-shot `review` accept `--json`. JSON mode prints exactly
-one versioned document to stdout, never prompts, and never opens a browser.
-Exit code `0` is success, `1` is strict partial success, and `2` is an input,
-configuration, or validation error.
+`evaluate`, `learn`, `valuation missing`, `source-data inspect`, `source-data
+resolve`, `rates import`, `rates fetch`, and fully specified one-shot `review`
+accept `--json`. JSON mode prints exactly one versioned document to stdout,
+never prompts, and never opens a browser. Exit code `0` is success, `1` is
+strict partial success, and `2` is an input, configuration, or validation
+error.
 
 Import, status, pending, report, and reconcile data distinguish
 `source_occurrence_count` from `canonical_occurrence_count`. Their `overlap`
@@ -361,6 +364,27 @@ ledger, identity
 manifest, overlap manifest, and active source rows without writing or
 recovering files. Ambiguous or inconsistent provenance stops with a value-free
 error.
+
+Inspect or clear one source-data review without opening a CSV:
+
+```bash
+honeymoney source-data inspect TRANSACTION_ID
+honeymoney source-data resolve TRANSACTION_ID --json
+```
+
+Inspection works for actual, estimated, and missing HKD valuations. It reports
+only the transaction ID, valuation state, active occurrence count, and safe
+source, page, statement section, field, flag, and evidence status. It omits
+amounts and statement text. `resolve` clears only a stale flag or
+`source_data_issue` token on the named row. If that write also upgrades an old
+stored schema, it repairs all rows in the migrating generation. Active parser,
+balance, or provenance evidence returns `source_data_evidence_active` and
+changes nothing. Unresolved overlap count and history conflicts count as typed
+provenance evidence. An already clear row returns `changed=false`. A successful
+repair publishes the ledger, correction review fields, review queue, hidden
+source rows, and both identity files in one recoverable generation. Reconcile,
+source replacement, duplicate resolution, and any command that migrates stored
+rows apply the same repair rule.
 
 ```bash
 honeymoney import ./statement.csv --config ./money/config.json --json

@@ -40,11 +40,15 @@ _IDENTITY_FLAGS = {
     "overlap_count_ambiguous",
     "overlap_history_ambiguous",
 }
-_SOURCE_DATA_FLAGS = {
-    "invalid_amount",
-    "statement_opening_balance_conflict",
-    "statement_closing_balance_conflict",
-}
+SOURCE_DATA_FLAGS = frozenset(
+    {
+        "invalid_amount",
+        "source_provenance_ambiguous",
+        "source_provenance_inconsistent",
+        "statement_opening_balance_conflict",
+        "statement_closing_balance_conflict",
+    }
+)
 
 
 def review_reason_tokens(value: str) -> list[str]:
@@ -137,7 +141,7 @@ def synchronize_review_state(
     else:
         reasons.discard(REVIEW_REASON_IDENTITY)
 
-    if flags & _SOURCE_DATA_FLAGS:
+    if flags & SOURCE_DATA_FLAGS:
         reasons.add(REVIEW_REASON_SOURCE_DATA)
     else:
         reasons.discard(REVIEW_REASON_SOURCE_DATA)

@@ -85,6 +85,8 @@ from honeymoney.overlap import (
 from honeymoney.persistence import (
     GenerationConflictError,
     configured_generation_paths,
+    generation_hashes,
+    generation_member_paths,
     persist_generation,
     recover_generation,
 )
@@ -134,6 +136,12 @@ from honeymoney.rules import (
 from honeymoney.schema import (
     ALLOWED_FLOW_TYPES,
     allowed_categories,
+)
+from honeymoney.source_data_review import (
+    SourceDataReviewError,
+    inspect_source_data_review,
+    repair_source_data_review_state,
+    source_data_review_active,
 )
 from honeymoney.valuation import (
     VALUATION_SOURCE_HKMA_RATE,
@@ -322,6 +330,8 @@ def main(argv: list[str] | None = None) -> int:
         return _learn_command(argv[1:])
     if argv and argv[0] == "valuation":
         return _valuation_command(argv[1:])
+    if argv and argv[0] == "source-data":
+        return _source_data_command(argv[1:])
     if argv and argv[0] == "rates":
         return _rates_command(argv[1:])
     if argv and argv[0] == "status":
@@ -680,6 +690,11 @@ def _run_pipeline(
             config,
             statement_rows=source_rows,
         )
+        repair_source_data_review_state(
+            ledger_rows,
+            source_rows,
+            overlap_result.manifest,
+        )
         refresh_duplicate_candidates(ledger_rows, final_review_ids=final_review_ids)
         enforce_overlap_review(ledger_rows, overlap_result)
         _enforce_identity_review(ledger_rows)
@@ -948,6 +963,8 @@ Commands:
                                    Report category coverage and exact accuracy
   honeymoney learn [--yes]          Build exact rules from active reviews
   honeymoney valuation missing      Trace missing values to source evidence
+  honeymoney source-data inspect ID Inspect one source-data review safely
+  honeymoney source-data resolve ID Clear a stale source-data review
   honeymoney rates import FILE      Import downloaded official HKMA daily rates
   honeymoney rates fetch EUR --start DATE --end DATE --allow-network
                                    Fetch public official HKMA daily rates
@@ -1157,6 +1174,212 @@ def _valuation_command(argv: list[str]) -> int:
     return 0
 
 
+def _source_data_command(argv: list[str]) -> int:
+    if not argv or argv[0] not in {"inspect", "resolve"}:
+        raise ValueError(
+            "honeymoney source-data requires an `inspect` or `resolve` subcommand"
+        )
+    action = argv[0]
+    command_argv = argv[1:]
+    parser = _command_parser(
+        command_argv,
+        prog=f"honeymoney source-data {action}",
+        description=(
+            "Inspect active source-data evidence without showing transaction values."
+            if action == "inspect"
+            else "Clear stale source-data review state after checking active evidence."
+        ),
+    )
+    parser.add_argument("transaction_id")
+    parser.add_argument("--config", dest="config_path")
+    parser.add_argument("--json", action="store_true")
+    args = parser.parse_args(command_argv)
+    if action == "inspect":
+        return _source_data_inspect_command(
+            args.transaction_id,
+            args.config_path,
+            json_output=args.json,
+        )
+    return _source_data_resolve_command(
+        args.transaction_id,
+        args.config_path,
+        json_output=args.json,
+    )
+
+
+def _source_data_inspect_command(
+    transaction_id: str,
+    config_path: str | None,
+    *,
+    json_output: bool,
+) -> int:
+    config = _load_config_read_only(config_path)
+    categorized_path = Path(config["paths"]["output"])
+    state = load_configured_identity_state(
+        categorized_path,
+        config,
+        recover=False,
+    )
+    corrections = load_corrections(config)
+    item = inspect_source_data_review(
+        state,
+        transaction_id,
+        workspace_root=Path(config["_identity_workspace_root"]),
+        source_root=Path(config["paths"]["input"]),
+        correction_review_reason_active=source_data_review_active(
+            corrections.get(transaction_id)
+        ),
+    )
+    if json_output:
+        _emit_json(
+            "source-data.inspect",
+            "success",
+            data={"transaction": item},
+        )
+        return 0
+    _print_source_data_inspection(item)
+    return 0
+
+
+def _source_data_resolve_command(
+    transaction_id: str,
+    config_path: str | None,
+    *,
+    json_output: bool,
+) -> int:
+    config = _load_config(config_path)
+    categorized_path = Path(config["paths"]["output"])
+    state = load_configured_identity_state(categorized_path, config)
+    migration_required = (
+        state.canonical_migration_required
+        or state.overlap_migration_required
+        or state.ledger_schema_migration_required
+    )
+    generation_paths = generation_member_paths(
+        categorized_path,
+        configured_generation_paths(config),
+    )
+    expected_generation = generation_hashes(generation_paths)
+    corrections = load_corrections(config)
+    correction_active = source_data_review_active(corrections.get(transaction_id))
+    item = inspect_source_data_review(
+        state,
+        transaction_id,
+        workspace_root=Path(config["_identity_workspace_root"]),
+        source_root=Path(config["paths"]["input"]),
+        correction_review_reason_active=correction_active,
+    )
+    if item["active_evidence_flags"]:
+        raise SourceDataReviewError(
+            "source_data_evidence_active",
+            "Active source evidence still supports this source-data issue.",
+        )
+    source_rows = state.source_rows
+    overlap_manifest = state.overlap_manifest
+    if source_rows is None or overlap_manifest is None:
+        raise SourceDataReviewError(
+            "source_data_provenance_unavailable",
+            "Active source-data provenance is unavailable.",
+        )
+    ledger_rows = [dict(row) for row in state.rows]
+    changed_ids = repair_source_data_review_state(
+        ledger_rows,
+        source_rows,
+        overlap_manifest,
+        transaction_ids=None if migration_required else {transaction_id},
+    )
+    correction_updates = review_state_correction_updates(
+        (
+            corrections
+            if migration_required
+            else (
+                {transaction_id: corrections[transaction_id]}
+                if transaction_id in corrections
+                else {}
+            )
+        ),
+        ledger_rows,
+    )
+    changed = bool(changed_ids or correction_updates)
+    if changed:
+        documents = ledger_output_documents(
+            categorized_path,
+            ledger_rows,
+            identity_manifest_document=state.manifest_document,
+            source_occurrences=source_rows,
+            source_evidence=state.source_evidence_rows,
+            overlap_manifest=overlap_manifest,
+        )
+        if config.get("corrections"):
+            correction_path, correction_content, _ = prepare_corrections_document(
+                config,
+                (
+                    correction_updates
+                    if migration_required
+                    else (
+                        {transaction_id: correction_updates[transaction_id]}
+                        if transaction_id in correction_updates
+                        else {}
+                    )
+                ),
+            )
+            documents[correction_path] = correction_content
+        persist_generation(
+            categorized_path,
+            documents,
+            expected_generation_hashes=expected_generation,
+        )
+    data = {
+        "transaction_id": transaction_id,
+        "result": "resolved" if changed else "already_clear",
+        "changed": changed,
+        "evidence_status": "clear",
+    }
+    if json_output:
+        _emit_json(
+            "source-data.resolve",
+            "success",
+            data=data,
+            artifacts={"categorized_csv": str(categorized_path.resolve())},
+        )
+        return 0
+    if changed:
+        print(f"Cleared stale source-data review state for {transaction_id}.")
+    else:
+        print(f"Source-data review state is already clear for {transaction_id}.")
+    return 0
+
+
+def _print_source_data_inspection(item: Mapping[str, object]) -> None:
+    print(f"Source-data review for {item['transaction_id']}")
+    print(f"  Evidence status: {item['evidence_status']}")
+    print(f"  Valuation: {item['valuation_status']} via {item['valuation_source']}")
+    print(f"  Active source occurrences: {item['source_occurrence_count']}")
+    flags = item["source_data_flags"]
+    active_flags = item["active_evidence_flags"]
+    assert isinstance(flags, list)
+    assert isinstance(active_flags, list)
+    print("  Canonical flags: " + (", ".join(flags) if flags else "(none)"))
+    print(
+        "  Active evidence flags: "
+        + (", ".join(active_flags) if active_flags else "(none)")
+    )
+    evidence = item["evidence"]
+    assert isinstance(evidence, list)
+    for raw in evidence:
+        assert isinstance(raw, Mapping)
+        source = raw.get("source_file") or raw.get("source_display") or "(unknown)"
+        print(
+            "    "
+            f"source={source} "
+            f"page={raw.get('source_page') or '-'} "
+            f"section={raw.get('statement_section') or '-'} "
+            f"field={raw.get('field') or '-'} "
+            f"flag={raw.get('flag') or '-'} "
+            f"status={raw.get('evidence_status') or '-'}"
+        )
+
+
 def _rates_command(argv: list[str]) -> int:
     if not argv or argv[0] not in {"import", "fetch"}:
         raise ValueError("honeymoney rates requires an `import` or `fetch` subcommand")
@@ -1276,6 +1499,11 @@ def _apply_rate_observations(
     state = load_configured_identity_state(categorized_path, config)
     if state.source_rows is None or state.overlap_manifest is None:
         raise IdentityError("identity_manifest_invalid")
+    migration_required = (
+        state.canonical_migration_required
+        or state.overlap_migration_required
+        or state.ledger_schema_migration_required
+    )
     source_rows = [dict(row) for row in state.source_rows]
     requested_pairs = _requested_rate_pairs(
         source_rows,
@@ -1325,6 +1553,12 @@ def _apply_rate_observations(
     rows = overlap_result.rows
     reconcile_ledger(rows, valued_config, statement_rows=source_rows)
     enforce_overlap_review(rows, overlap_result)
+    if migration_required:
+        repair_source_data_review_state(
+            rows,
+            source_rows,
+            overlap_result.manifest,
+        )
     documents = ledger_output_documents(
         categorized_path,
         rows,
@@ -1716,6 +1950,35 @@ def _duplicates_resolve_command(argv: list[str]) -> int:
     rows = [dict(row) for row in resolution.result.rows]
     apply_corrections(rows, resolution.correction_updates)
     reconcile_ledger(rows, config, statement_rows=state.source_rows)
+    correction_updates = {
+        transaction_id: dict(patch)
+        for transaction_id, patch in resolution.correction_updates.items()
+    }
+    removed_correction_ids = set(resolution.removed_correction_ids)
+    source_rows = state.source_rows
+    if source_rows is None:
+        raise SourceDataReviewError(
+            "source_data_provenance_unavailable",
+            "Active source-data provenance is unavailable.",
+        )
+    repair_source_data_review_state(
+        rows,
+        source_rows,
+        resolution.result.manifest,
+    )
+    effective_corrections = {
+        transaction_id: dict(correction)
+        for transaction_id, correction in corrections.items()
+        if transaction_id not in removed_correction_ids
+    }
+    for transaction_id, patch in correction_updates.items():
+        effective_corrections[transaction_id] = {
+            **effective_corrections.get(transaction_id, {}),
+            **patch,
+        }
+    correction_updates.update(
+        review_state_correction_updates(effective_corrections, rows)
+    )
     files = ledger_output_documents(
         categorized_path,
         rows,
@@ -1724,11 +1987,11 @@ def _duplicates_resolve_command(argv: list[str]) -> int:
         source_evidence=state.source_evidence_rows,
         overlap_manifest=resolution.result.manifest,
     )
-    if resolution.removed_correction_ids or resolution.correction_updates:
+    if removed_correction_ids or correction_updates:
         corrections_path, corrections_document, _ = prepare_corrections_document(
             config,
-            resolution.correction_updates,
-            removed_transaction_ids=set(resolution.removed_correction_ids),
+            correction_updates,
+            removed_transaction_ids=removed_correction_ids,
         )
         files[corrections_path] = corrections_document
     persist_generation(categorized_path, files)
@@ -3777,6 +4040,20 @@ def _reconcile_command(argv: list[str]) -> int:
         rows = overlap_result.rows
         summary = reconcile_ledger(rows, config, statement_rows=state.source_rows)
         enforce_overlap_review(rows, overlap_result)
+    source_rows = state.source_rows
+    operation_overlap_manifest = (
+        state.overlap_manifest if overlap_result is None else overlap_result.manifest
+    )
+    if source_rows is None or operation_overlap_manifest is None:
+        raise SourceDataReviewError(
+            "source_data_provenance_unavailable",
+            "Active source-data provenance is unavailable.",
+        )
+    repair_source_data_review_state(
+        rows,
+        source_rows,
+        operation_overlap_manifest,
+    )
     overlap_diagnostic = (
         _unmigrated_overlap(rows)
         if overlap_result is None
@@ -3806,13 +4083,9 @@ def _reconcile_command(argv: list[str]) -> int:
             categorized_path,
             rows,
             final_review_ids=final_review_ids,
-            source_rows=state.source_rows,
+            source_rows=source_rows,
             source_evidence=state.source_evidence_rows,
-            overlap_manifest=(
-                state.overlap_manifest
-                if overlap_result is None
-                else overlap_result.manifest
-            ),
+            overlap_manifest=(operation_overlap_manifest),
             overlap_result=overlap_result,
             identity_manifest_document=state.manifest_document,
             correction_document=correction_document,
@@ -4754,6 +5027,15 @@ def run() -> int:
             if isinstance(error, ValuationInspectionError)
             else None
         )
+        source_data_review_details = (
+            {
+                "type": "SourceDataReviewError",
+                "code": error.code,
+                "message": str(error),
+            }
+            if isinstance(error, SourceDataReviewError)
+            else None
+        )
         rate_import_details = (
             {
                 "type": "RateImportError",
@@ -4782,6 +5064,7 @@ def run() -> int:
                     or duplicate_details
                     or manual_pair_details
                     or valuation_inspection_details
+                    or source_data_review_details
                     or rate_fetch_details
                     or rate_import_details
                     or {
@@ -4804,9 +5087,14 @@ def run() -> int:
                 duplicate_details["message"]
                 if duplicate_details is not None
                 else (
-                    f"{rate_fetch_details['code']}: {rate_fetch_details['message']}"
-                    if rate_fetch_details is not None
-                    else str(error)
+                    f"{source_data_review_details['code']}: "
+                    f"{source_data_review_details['message']}"
+                    if source_data_review_details is not None
+                    else (
+                        f"{rate_fetch_details['code']}: {rate_fetch_details['message']}"
+                        if rate_fetch_details is not None
+                        else str(error)
+                    )
                 )
             ),
             file=sys.stderr,
@@ -4846,6 +5134,10 @@ def _json_error_command(argv: list[str]) -> str:
         return "review.pair"
     if len(argv) > 1 and argv[:2] == ["valuation", "missing"]:
         return "valuation.missing"
+    if len(argv) > 1 and argv[:2] == ["source-data", "inspect"]:
+        return "source-data.inspect"
+    if len(argv) > 1 and argv[:2] == ["source-data", "resolve"]:
+        return "source-data.resolve"
     if len(argv) > 1 and argv[:2] == ["rates", "import"]:
         return "rates.import"
     if len(argv) > 1 and argv[:2] == ["rates", "fetch"]:
