@@ -726,7 +726,11 @@ class PdfBalanceReconciliationTest(unittest.TestCase):
             "synthetic_bank"
         ]["statements"][0]
 
-        self.assertEqual(statement["result"], "unavailable")
+        self.assertEqual(statement["result"], "missing_closing")
+        self.assertTrue(statement["opening_evidence_found"])
+        self.assertFalse(statement["closing_evidence_found"])
+        self.assertNotIn("opening_balance", statement)
+        self.assertNotIn("difference", statement)
         self.assertEqual(statement["reason"], "Closing balance is unavailable.")
 
     def test_multi_page_balance_rollovers_keep_statement_endpoints(self) -> None:

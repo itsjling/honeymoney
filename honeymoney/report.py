@@ -4,6 +4,7 @@ import html
 import json
 from decimal import Decimal, InvalidOperation
 
+from honeymoney.contracts import BalanceReconciliation
 from honeymoney.valuation import valuation_summary
 
 _PAGE_TEMPLATE = """<!doctype html>
@@ -273,6 +274,19 @@ _PAGE_TEMPLATE = """<!doctype html>
   .valuation-table th:first-child, .valuation-table td:first-child { text-align: left; }
   .valuation-table td { text-align: right; }
   .valuation-table tr:last-child td { border-bottom: 0; font-weight: 620; }
+  .coverage-table { width: 100%; border-collapse: collapse; min-width: 680px; }
+  .coverage-table th, .coverage-table td {
+    padding: 0.65rem 0.5rem;
+    border-bottom: 1px solid var(--line);
+    text-align: left;
+  }
+  .coverage-table th {
+    color: var(--ink-faint);
+    font-size: 0.72rem;
+    font-weight: 600;
+  }
+  .coverage-table tr:last-child td { border-bottom: 0; }
+  .coverage-table .outcome { font-family: var(--mono); font-size: 0.82rem; }
   .valuation-note { color: var(--ink-muted); font-size: 0.82rem; margin: 0.8rem 0 0; }
   .completeness-grid {
     display: grid;
@@ -358,6 +372,8 @@ _PAGE_TEMPLATE = """<!doctype html>
       <p class="valuation-note">Combined estimates include statement and matched actual values plus configured or provider reference estimates. They are not exact bank conversion costs or tax valuations.</p>
     </div>
   </section>
+
+  __BALANCE_COVERAGE__
 
   <section class="panel rise d2">
     <div class="panel-head">
@@ -668,6 +684,7 @@ def build_report_html(
     period_label: str,
     *,
     source_occurrence_count: int | None = None,
+    balance_reconciliation: BalanceReconciliation | None = None,
 ) -> str:
     data = json.dumps(
         [_report_row(row) for row in rows],
@@ -724,11 +741,52 @@ def build_report_html(
         "__COMBINED_SPENDING__": _format_total(combined["spending"]),
         "__COMBINED_REFUNDS__": _format_total(combined["refunds"]),
         "__COMBINED_NET__": _format_total(combined["net_cash_flow"]),
+        "__BALANCE_COVERAGE__": _balance_coverage_html(balance_reconciliation or {}),
     }
     document = _PAGE_TEMPLATE
     for placeholder, value in replacements.items():
         document = document.replace(placeholder, value)
     return document
+
+
+def _balance_coverage_html(
+    balance_reconciliation: BalanceReconciliation,
+) -> str:
+    body: list[str] = []
+    for account_id, account in sorted(balance_reconciliation.items()):
+        for statement in account["statements"]:
+            source_file = statement.get("source_file", "") or "(unknown)"
+            section = statement.get("statement_section", "") or "(none)"
+            currency = statement.get("posted_currency", "") or "(unknown)"
+            opening = "found" if statement.get("opening_evidence_found") else "missing"
+            closing = "found" if statement.get("closing_evidence_found") else "missing"
+            values = (
+                account_id or "(unknown)",
+                source_file,
+                section,
+                currency,
+                opening,
+                closing,
+                statement["result"],
+            )
+            cells = "".join(f"<td>{html.escape(value)}</td>" for value in values[:-1])
+            body.append(
+                f'<tr>{cells}<td class="outcome">{html.escape(values[-1])}</td></tr>'
+            )
+    rows = (
+        "".join(body)
+        if body
+        else '<tr><td colspan="7" class="empty">No statement sections found.</td></tr>'
+    )
+    return (
+        '<section class="panel rise d2" aria-label="Statement balance coverage">'
+        '<div class="panel-head"><h2>Statement balance coverage</h2>'
+        '<span class="hint">Evidence only; unavailable values stay hidden</span></div>'
+        '<div class="panel-body table-wrap"><table class="coverage-table">'
+        "<thead><tr><th>Account</th><th>Source</th><th>Section</th>"
+        "<th>Currency</th><th>Opening</th><th>Closing</th><th>Outcome</th>"
+        f"</tr></thead><tbody>{rows}</tbody></table></div></section>"
+    )
 
 
 def _report_row(row: dict[str, str]) -> dict[str, object]:

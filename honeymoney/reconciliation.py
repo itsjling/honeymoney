@@ -863,11 +863,13 @@ def _balance_reconciliation(
             }
         )
         statement: StatementBalance = {
-            "source_file": source_files[0] if source_files else "",
+            "source_file": _safe_source_label(source_files[0]) if source_files else "",
             "statement_section": statement_section,
             "posted_currency": posted_currency,
             "status": "unavailable",
             "result": "unavailable",
+            "opening_evidence_found": False,
+            "closing_evidence_found": False,
         }
         opening, opening_problem = _statement_balance(
             statement_rows, "statement_opening_balance", "Opening"
@@ -875,18 +877,32 @@ def _balance_reconciliation(
         closing, closing_problem = _statement_balance(
             statement_rows, "statement_closing_balance", "Closing"
         )
-        if _has_statement_balance_conflict(statement_rows, "opening"):
+        opening_conflict = _has_statement_balance_conflict(statement_rows, "opening")
+        closing_conflict = _has_statement_balance_conflict(statement_rows, "closing")
+        if opening_conflict:
             opening = None
             opening_problem = "Opening balances conflict."
-        if _has_statement_balance_conflict(statement_rows, "closing"):
+        if closing_conflict:
             closing = None
             closing_problem = "Closing balances conflict."
+        statement["opening_evidence_found"] = opening is not None
+        statement["closing_evidence_found"] = closing is not None
         conflicts = [
             *_statement_balance_conflicts(statement_rows, "opening"),
             *_statement_balance_conflicts(statement_rows, "closing"),
         ]
         if conflicts:
             statement["conflicts"] = conflicts
+        if opening_conflict or closing_conflict:
+            statement["result"] = "conflicting_evidence"
+        elif opening_problem == "Opening balance is unavailable.":
+            statement["result"] = (
+                "missing_both"
+                if closing_problem == "Closing balance is unavailable."
+                else "missing_opening"
+            )
+        elif closing_problem == "Closing balance is unavailable.":
+            statement["result"] = "missing_closing"
         if opening_problem or closing_problem:
             problems = [
                 problem for problem in (opening_problem, closing_problem) if problem
@@ -956,7 +972,7 @@ def _balance_reconciliation(
         elif results == {"matched"}:
             account["status"] = "reconciled"
             account["result"] = "matched"
-        elif "unavailable" in results:
+        elif results - {"matched"}:
             account["reason"] = "One or more statement balance checks are unavailable."
     return accounts
 

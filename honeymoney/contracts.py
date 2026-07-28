@@ -22,6 +22,8 @@ class StatementBalance(TypedDict, total=False):
     posted_currency: str
     status: str
     result: str
+    opening_evidence_found: bool
+    closing_evidence_found: bool
     reason: str
     conflicts: list[BalanceConflict]
     opening_balance: str

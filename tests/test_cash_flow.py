@@ -871,6 +871,30 @@ class CashFlowWorkflowTest(unittest.TestCase):
                         "category": "Other",
                     },
                     {
+                        "transaction_id": "txn_opening_only",
+                        "date": "2026-06-03",
+                        "account_id": "bank_opening_only",
+                        "account_type": "bank",
+                        "posted_amount": "7.00",
+                        "posted_currency": "HKD",
+                        "amount_hkd": "7.00",
+                        "statement_opening_balance": "1234.56",
+                        "source_file": "opening-only.csv",
+                        "category": "Other",
+                    },
+                    {
+                        "transaction_id": "txn_closing_only",
+                        "date": "2026-06-03",
+                        "account_id": "bank_closing_only",
+                        "account_type": "bank",
+                        "posted_amount": "8.00",
+                        "posted_currency": "HKD",
+                        "amount_hkd": "8.00",
+                        "statement_closing_balance": "6543.21",
+                        "source_file": "closing-only.csv",
+                        "category": "Other",
+                    },
+                    {
                         "transaction_id": "txn_balance_difference",
                         "date": "2026-06-04",
                         "account_id": "bank_difference",
@@ -907,6 +931,31 @@ class CashFlowWorkflowTest(unittest.TestCase):
                         "source_file": "synthetic-b.csv",
                         "category": "Other",
                     },
+                    {
+                        "transaction_id": "txn_balance_conflict_one",
+                        "date": "2026-06-07",
+                        "account_id": "bank_conflict",
+                        "account_type": "bank",
+                        "posted_amount": "1.00",
+                        "posted_currency": "HKD",
+                        "amount_hkd": "1.00",
+                        "statement_opening_balance": "7777.77",
+                        "statement_closing_balance": "9999.99",
+                        "source_file": "conflict.csv",
+                        "category": "Other",
+                    },
+                    {
+                        "transaction_id": "txn_balance_conflict_two",
+                        "date": "2026-06-08",
+                        "account_id": "bank_conflict",
+                        "account_type": "bank",
+                        "posted_amount": "2.00",
+                        "posted_currency": "HKD",
+                        "amount_hkd": "2.00",
+                        "statement_opening_balance": "8888.88",
+                        "source_file": "conflict.csv",
+                        "category": "Other",
+                    },
                 ],
             )
 
@@ -919,11 +968,42 @@ class CashFlowWorkflowTest(unittest.TestCase):
             self.assertEqual(
                 balances["bank_balanced"]["statements"][0]["difference"], "0.00"
             )
-            self.assertEqual(balances["bank_unavailable"]["status"], "unavailable")
             self.assertEqual(
-                balances["bank_unavailable"]["statements"][0]["reason"],
+                balances["bank_balanced"]["statements"][0]["result"], "matched"
+            )
+            self.assertTrue(
+                balances["bank_balanced"]["statements"][0]["opening_evidence_found"]
+            )
+            self.assertTrue(
+                balances["bank_balanced"]["statements"][0]["closing_evidence_found"]
+            )
+            self.assertEqual(balances["bank_unavailable"]["status"], "unavailable")
+            unavailable = balances["bank_unavailable"]["statements"][0]
+            self.assertEqual(unavailable["result"], "missing_both")
+            self.assertFalse(unavailable["opening_evidence_found"])
+            self.assertFalse(unavailable["closing_evidence_found"])
+            self.assertNotIn("opening_balance", unavailable)
+            self.assertNotIn("closing_balance", unavailable)
+            self.assertNotIn("calculated_closing_balance", unavailable)
+            self.assertNotIn("difference", unavailable)
+            self.assertEqual(
+                unavailable["reason"],
                 "Opening and closing balances are unavailable.",
             )
+            opening_only = balances["bank_opening_only"]["statements"][0]
+            self.assertEqual(opening_only["status"], "unavailable")
+            self.assertEqual(opening_only["result"], "missing_closing")
+            self.assertTrue(opening_only["opening_evidence_found"])
+            self.assertFalse(opening_only["closing_evidence_found"])
+            self.assertNotIn("opening_balance", opening_only)
+            self.assertNotIn("difference", opening_only)
+            closing_only = balances["bank_closing_only"]["statements"][0]
+            self.assertEqual(closing_only["status"], "unavailable")
+            self.assertEqual(closing_only["result"], "missing_opening")
+            self.assertFalse(closing_only["opening_evidence_found"])
+            self.assertTrue(closing_only["closing_evidence_found"])
+            self.assertNotIn("closing_balance", closing_only)
+            self.assertNotIn("difference", closing_only)
             self.assertEqual(balances["bank_difference"]["status"], "difference")
             self.assertEqual(balances["bank_difference"]["result"], "mismatched")
             self.assertEqual(
@@ -934,6 +1014,58 @@ class CashFlowWorkflowTest(unittest.TestCase):
                 balances["bank_partial"]["reason"],
                 "One or more statement balance checks are unavailable.",
             )
+            conflict = balances["bank_conflict"]["statements"][0]
+            self.assertEqual(conflict["status"], "unavailable")
+            self.assertEqual(conflict["result"], "conflicting_evidence")
+            self.assertFalse(conflict["opening_evidence_found"])
+            self.assertTrue(conflict["closing_evidence_found"])
+            self.assertNotIn("opening_balance", conflict)
+            self.assertNotIn("closing_balance", conflict)
+            self.assertNotIn("difference", conflict)
+
+            human = self._run_cli(["reconcile", "--dry-run"], cwd=root)
+            self.assertEqual(human.returncode, 0, human.stderr)
+            self.assertIn(
+                "result=missing_opening opening=missing closing=found",
+                human.stdout,
+            )
+            self.assertIn(
+                "result=missing_closing opening=found closing=missing",
+                human.stdout,
+            )
+            self.assertIn(
+                "result=missing_both opening=missing closing=missing",
+                human.stdout,
+            )
+            self.assertIn("result=conflicting_evidence", human.stdout)
+            self.assertIn("result=matched", human.stdout)
+            self.assertIn("result=mismatched", human.stdout)
+            self.assertNotIn("1234.56", human.stdout)
+            self.assertNotIn("6543.21", human.stdout)
+            self.assertNotIn("7777.77", human.stdout)
+            self.assertNotIn("8888.88", human.stdout)
+            self.assertNotIn("9999.99", human.stdout)
+
+            report = self._run_cli(
+                ["report", "--month", "2026-06", "--no-open", "--json"],
+                cwd=root,
+            )
+            self.assertEqual(report.returncode, 0, report.stderr)
+            report_data = json.loads(report.stdout)["data"]
+            self.assertIn("balance_reconciliation", report_data)
+            report_html = (root / "output" / "report.html").read_text(encoding="utf-8")
+            self.assertIn("Statement balance coverage", report_html)
+            self.assertIn("missing_opening", report_html)
+            self.assertIn("missing_closing", report_html)
+            self.assertIn("missing_both", report_html)
+            self.assertIn("conflicting_evidence", report_html)
+            self.assertIn("matched", report_html)
+            self.assertIn("mismatched", report_html)
+            self.assertNotIn("1234.56", report_html)
+            self.assertNotIn("6543.21", report_html)
+            self.assertNotIn("7777.77", report_html)
+            self.assertNotIn("8888.88", report_html)
+            self.assertNotIn("9999.99", report_html)
 
     def test_balance_reconciliation_separates_source_identity_and_currency(
         self,
@@ -985,7 +1117,17 @@ class CashFlowWorkflowTest(unittest.TestCase):
         )
         self.assertEqual(
             [statement["result"] for statement in result["statements"]],
-            ["matched", "matched", "unavailable"],
+            ["matched", "matched", "missing_both"],
+        )
+        self.assertEqual(
+            [
+                (
+                    statement["opening_evidence_found"],
+                    statement["closing_evidence_found"],
+                )
+                for statement in result["statements"]
+            ],
+            [(True, True), (True, True), (False, False)],
         )
 
     def test_balance_reconciliation_separates_sections_and_statements(
@@ -1072,8 +1214,33 @@ class CashFlowWorkflowTest(unittest.TestCase):
         ][0]
 
         self.assertEqual(statement["status"], "unavailable")
-        self.assertEqual(statement["result"], "unavailable")
+        self.assertEqual(statement["result"], "conflicting_evidence")
+        self.assertFalse(statement["opening_evidence_found"])
+        self.assertTrue(statement["closing_evidence_found"])
+        self.assertNotIn("opening_balance", statement)
+        self.assertNotIn("closing_balance", statement)
+        self.assertNotIn("difference", statement)
         self.assertEqual(statement["reason"], "Opening balances conflict.")
+
+    def test_missing_balance_evidence_does_not_add_source_data_review(self) -> None:
+        rows = [
+            {
+                "transaction_id": "txn_missing_balance_evidence",
+                "account_id": "missing",
+                "source_file": "missing.csv",
+                "posted_currency": "HKD",
+                "posted_amount": "1.00",
+                "flags": "",
+                "review_reasons": "",
+                "needs_review": "false",
+            }
+        ]
+
+        reconcile_ledger(rows, {})
+
+        self.assertEqual(rows[0]["flags"], "")
+        self.assertEqual(rows[0]["review_reasons"], "")
+        self.assertEqual(rows[0]["needs_review"], "false")
 
     def test_manual_pair_facts_reject_account_amount_currency_and_owner_conflicts(
         self,
