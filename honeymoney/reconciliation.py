@@ -850,7 +850,7 @@ def _balance_reconciliation(
             }
         )
         statement: StatementBalance = {
-            "source_file": _safe_source_label(source_files[0]) if source_files else "",
+            "source_file": source_files[0] if source_files else "",
             "statement_section": statement_section,
             "posted_currency": posted_currency,
             "status": "unavailable",
@@ -882,13 +882,11 @@ def _balance_reconciliation(
             statement["conflicts"] = conflicts
         if opening_conflict or closing_conflict:
             statement["result"] = "conflicting_evidence"
-        elif opening_problem == "Opening balance is unavailable.":
-            statement["result"] = (
-                "missing_both"
-                if closing_problem == "Closing balance is unavailable."
-                else "missing_opening"
-            )
-        elif closing_problem == "Closing balance is unavailable.":
+        elif opening is None and closing is None:
+            statement["result"] = "missing_both"
+        elif opening is None:
+            statement["result"] = "missing_opening"
+        elif closing is None:
             statement["result"] = "missing_closing"
         if opening_problem or closing_problem:
             problems = [

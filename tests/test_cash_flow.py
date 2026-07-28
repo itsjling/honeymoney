@@ -956,6 +956,30 @@ class CashFlowWorkflowTest(unittest.TestCase):
                         "source_file": "conflict.csv",
                         "category": "Other",
                     },
+                    {
+                        "transaction_id": "txn_absent_opening_invalid_closing",
+                        "date": "2026-06-09",
+                        "account_id": "bank_no_safe_endpoints_a",
+                        "account_type": "bank",
+                        "posted_amount": "1.00",
+                        "posted_currency": "HKD",
+                        "amount_hkd": "1.00",
+                        "statement_closing_balance": "not-a-balance",
+                        "source_file": "invalid-closing.csv",
+                        "category": "Other",
+                    },
+                    {
+                        "transaction_id": "txn_invalid_opening_absent_closing",
+                        "date": "2026-06-10",
+                        "account_id": "bank_no_safe_endpoints_b",
+                        "account_type": "bank",
+                        "posted_amount": "1.00",
+                        "posted_currency": "HKD",
+                        "amount_hkd": "1.00",
+                        "statement_opening_balance": "not-a-balance",
+                        "source_file": "invalid-opening.csv",
+                        "category": "Other",
+                    },
                 ],
             )
 
@@ -1022,6 +1046,17 @@ class CashFlowWorkflowTest(unittest.TestCase):
             self.assertNotIn("opening_balance", conflict)
             self.assertNotIn("closing_balance", conflict)
             self.assertNotIn("difference", conflict)
+            for account_id in (
+                "bank_no_safe_endpoints_a",
+                "bank_no_safe_endpoints_b",
+            ):
+                no_safe_endpoints = balances[account_id]["statements"][0]
+                self.assertEqual(no_safe_endpoints["result"], "missing_both")
+                self.assertFalse(no_safe_endpoints["opening_evidence_found"])
+                self.assertFalse(no_safe_endpoints["closing_evidence_found"])
+                self.assertNotIn("opening_balance", no_safe_endpoints)
+                self.assertNotIn("closing_balance", no_safe_endpoints)
+                self.assertNotIn("difference", no_safe_endpoints)
 
             human = self._run_cli(["reconcile", "--dry-run"], cwd=root)
             self.assertEqual(human.returncode, 0, human.stderr)
@@ -1137,7 +1172,7 @@ class CashFlowWorkflowTest(unittest.TestCase):
             {
                 "account_id": "multi",
                 "source_id": "source_a",
-                "source_file": "same.pdf",
+                "source_file": "bank-a/june.pdf",
                 "posted_currency": "HKD",
                 "posted_amount": "10.00",
                 "statement_opening_balance": "100.00",
@@ -1146,7 +1181,7 @@ class CashFlowWorkflowTest(unittest.TestCase):
             {
                 "account_id": "multi",
                 "source_id": "source_a",
-                "source_file": "same.pdf",
+                "source_file": "bank-a/june.pdf",
                 "posted_currency": "USD",
                 "posted_amount": "-5.00",
                 "statement_opening_balance": "50.00",
@@ -1155,7 +1190,7 @@ class CashFlowWorkflowTest(unittest.TestCase):
             {
                 "account_id": "multi",
                 "source_id": "source_b",
-                "source_file": "same.pdf",
+                "source_file": "bank-b/june.pdf",
                 "posted_currency": "HKD",
                 "posted_amount": "1.00",
             },
@@ -1181,6 +1216,10 @@ class CashFlowWorkflowTest(unittest.TestCase):
         self.assertEqual(
             [statement["result"] for statement in result["statements"]],
             ["matched", "matched", "missing_both"],
+        )
+        self.assertEqual(
+            [statement["source_file"] for statement in result["statements"]],
+            ["bank-a/june.pdf", "bank-a/june.pdf", "bank-b/june.pdf"],
         )
         self.assertEqual(
             [
