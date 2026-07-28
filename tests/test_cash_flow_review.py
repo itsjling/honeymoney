@@ -1140,6 +1140,35 @@ class CashFlowReviewTest(unittest.TestCase):
             )
 
             replay_before = self._pair_artifacts(root)
+            repeated_with_current_ids = self._run_cli(
+                [
+                    "review",
+                    "pair",
+                    *current_ids,
+                    "--yes",
+                    "--json",
+                ],
+                cwd=root,
+            )
+            self.assertEqual(
+                repeated_with_current_ids.returncode,
+                0,
+                repeated_with_current_ids.stderr,
+            )
+            current_replay_data = json.loads(repeated_with_current_ids.stdout)["data"]
+            self.assertTrue(current_replay_data["unchanged"])
+            self.assertFalse(current_replay_data["changed"])
+            self.assertEqual(current_replay_data["result"], "already_paired")
+            self.assertEqual(
+                current_replay_data["pair_id"],
+                outgoing["transfer_group_id"],
+            )
+            self.assertEqual(
+                current_replay_data["transaction_ids"],
+                current_ids,
+            )
+            self.assertEqual(self._pair_artifacts(root), replay_before)
+
             repeated = self._run_cli(
                 [
                     "review",
@@ -1745,6 +1774,68 @@ class CashFlowReviewTest(unittest.TestCase):
                 self.assertNotIn("100.00", replayed.stdout)
                 self.assertEqual(self._pair_artifacts(root), before)
 
+    def test_manual_pair_replay_rechecks_generation_after_read(self) -> None:
+        import honeymoney.cli as cli
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._setup_workspace(tmp)
+            self._import_rows(
+                root,
+                "concurrent-read-replay.csv",
+                [
+                    "2026-05-04,SYNTHETIC PAIR OUT,-100.00,HKD",
+                    "2026-05-04,SYNTHETIC PAIR IN,100.00,HKD",
+                ],
+            )
+            rows = {row["merchant"]: row for row in self._ledger(root)}
+            pair_ids = [
+                rows["SYNTHETIC PAIR OUT"]["transaction_id"],
+                rows["SYNTHETIC PAIR IN"]["transaction_id"],
+            ]
+            paired = self._run_cli(
+                ["review", "pair", *pair_ids, "--yes", "--json"],
+                cwd=root,
+            )
+            self.assertEqual(paired.returncode, 0, paired.stderr)
+            ledger_path = root / "output" / "categorized.csv"
+            read_ledger = cli.read_ledger
+            published_generation: dict[str, bytes] = {}
+
+            def read_then_publish(path, *, config=None):
+                stale_rows = read_ledger(path, config=config)
+                with ledger_path.open(newline="", encoding="utf-8") as handle:
+                    reader = csv.DictReader(handle)
+                    fieldnames = list(reader.fieldnames or [])
+                    current_rows = list(reader)
+                current_rows[0]["notes"] = "Synthetic concurrent update"
+                with ledger_path.open("w", newline="", encoding="utf-8") as handle:
+                    writer = csv.DictWriter(handle, fieldnames=fieldnames)
+                    writer.writeheader()
+                    writer.writerows(current_rows)
+                published_generation.update(self._pair_artifacts(root))
+                return stale_rows
+
+            output = io.StringIO()
+            with (
+                patch.object(cli, "read_ledger", side_effect=read_then_publish),
+                redirect_stdout(output),
+                self.assertRaises(GenerationConflictError),
+            ):
+                cli._manual_pair_review(
+                    [
+                        *pair_ids,
+                        "--config",
+                        str(root / "config.json"),
+                        "--yes",
+                        "--json",
+                    ]
+                )
+
+            self.assertEqual(output.getvalue(), "")
+            self.assertEqual(self._pair_artifacts(root), published_generation)
+            [published_row, *_] = self._ledger(root)
+            self.assertEqual(published_row["notes"], "Synthetic concurrent update")
+
     def test_manual_pair_replay_rechecks_generation_before_reporting(self) -> None:
         import honeymoney.cli as cli
 
@@ -1857,11 +1948,23 @@ class CashFlowReviewTest(unittest.TestCase):
                 cwd=root,
             )
             self.assertEqual(paired.returncode, 0, paired.stderr)
-            read_ledger = cli.read_ledger
+            recover_generation = cli.recover_generation
             recovered_generation: dict[str, bytes] = {}
 
-            def read_then_recover(path, *, config=None):
-                recovered_rows = read_ledger(path, config=config)
+            def recover_then_publish(
+                path,
+                *,
+                allowed_generation_paths=(),
+            ) -> None:
+                recover_generation(
+                    path,
+                    allowed_generation_paths=allowed_generation_paths,
+                )
+                if (
+                    Path(path).resolve() != custom_output.resolve()
+                    or recovered_generation
+                ):
+                    return
                 with custom_output.open(newline="", encoding="utf-8") as handle:
                     reader = csv.DictReader(handle)
                     fieldnames = list(reader.fieldnames or [])
@@ -1886,11 +1989,14 @@ class CashFlowReviewTest(unittest.TestCase):
                         if artifact.is_file()
                     }
                 )
-                return recovered_rows
 
             output = io.StringIO()
             with (
-                patch.object(cli, "read_ledger", side_effect=read_then_recover),
+                patch.object(
+                    cli,
+                    "recover_generation",
+                    side_effect=recover_then_publish,
+                ),
                 redirect_stdout(output),
             ):
                 return_code = cli._manual_pair_review(

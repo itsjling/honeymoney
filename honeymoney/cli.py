@@ -2907,12 +2907,20 @@ def _manual_pair_review(argv: list[str]) -> int:
 
     config = _load_config(args.config_path)
     categorized_path = Path(args.output_path or config["paths"]["output"])
-    ledger_rows = read_ledger(categorized_path, config=config)
+    recover_generation(
+        categorized_path,
+        allowed_generation_paths=configured_generation_paths(config),
+    )
     generation_paths = generation_member_paths(
         categorized_path,
         configured_generation_paths(config),
     )
     expected_generation = generation_hashes(generation_paths)
+    ledger_rows = read_ledger(categorized_path, config=config)
+    if generation_hashes(generation_paths) != expected_generation:
+        raise GenerationConflictError(
+            "The ledger generation changed while this operation was reading it"
+        )
     _reject_ambiguous_legacy_transaction_ids(ledger_rows)
     by_id = {
         row["transaction_id"]: row for row in ledger_rows if row.get("transaction_id")
@@ -3017,7 +3025,10 @@ def _manual_pair_review(argv: list[str]) -> int:
                 "A nominated transaction has conflicting stored pair membership.",
             )
     if existing_group:
-        if manual_pair_id(args.transaction_ids) != existing_group:
+        if (
+            replaying_retired_ids
+            and manual_pair_id(args.transaction_ids) != existing_group
+        ):
             raise ManualPairError(
                 "manual_pair_conflict",
                 "The nominated transactions do not match the stored manual pair.",
