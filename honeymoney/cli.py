@@ -3857,7 +3857,7 @@ def _reconcile_command(argv: list[str]) -> int:
             posted_currency = statement["posted_currency"] or "(unknown)"
             opening = "found" if statement["opening_evidence_found"] else "missing"
             closing = "found" if statement["closing_evidence_found"] else "missing"
-            print(
+            coverage = (
                 "Balance coverage: "
                 f"account={account_id or '(unknown)'} "
                 f"source={source_file} "
@@ -3867,6 +3867,9 @@ def _reconcile_command(argv: list[str]) -> int:
                 f"opening={opening} "
                 f"closing={closing}"
             )
+            if reason := statement.get("reason"):
+                coverage += f" reason={reason}"
+            print(coverage)
             for conflict in statement.get("conflicts", []):
                 print(
                     "Balance issue: "

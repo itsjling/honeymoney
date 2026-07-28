@@ -760,23 +760,24 @@ def _balance_coverage_html(
             currency = statement.get("posted_currency", "") or "(unknown)"
             opening = "found" if statement.get("opening_evidence_found") else "missing"
             closing = "found" if statement.get("closing_evidence_found") else "missing"
-            values = (
+            details = (
                 account_id or "(unknown)",
                 source_file,
                 section,
                 currency,
                 opening,
                 closing,
-                statement["result"],
             )
-            cells = "".join(f"<td>{html.escape(value)}</td>" for value in values[:-1])
+            cells = "".join(f"<td>{html.escape(value)}</td>" for value in details)
+            outcome = html.escape(statement["result"])
+            reason = html.escape(statement.get("reason", ""))
             body.append(
-                f'<tr>{cells}<td class="outcome">{html.escape(values[-1])}</td></tr>'
+                f'<tr>{cells}<td class="outcome">{outcome}</td><td>{reason}</td></tr>'
             )
     rows = (
         "".join(body)
         if body
-        else '<tr><td colspan="7" class="empty">No statement sections found.</td></tr>'
+        else '<tr><td colspan="8" class="empty">No statement sections found.</td></tr>'
     )
     return (
         '<section class="panel rise d2" aria-label="Statement balance coverage">'
@@ -785,7 +786,7 @@ def _balance_coverage_html(
         '<div class="panel-body table-wrap"><table class="coverage-table">'
         "<thead><tr><th>Account</th><th>Source</th><th>Section</th>"
         "<th>Currency</th><th>Opening</th><th>Closing</th><th>Outcome</th>"
-        f"</tr></thead><tbody>{rows}</tbody></table></div></section>"
+        f"<th>Reason</th></tr></thead><tbody>{rows}</tbody></table></div></section>"
     )
 
 

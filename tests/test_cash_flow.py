@@ -11,6 +11,7 @@ from pathlib import Path
 from honeymoney.identity_state import LEGACY_CATEGORIZED_COLUMNS
 from honeymoney.manual_pairs import ManualPairError, validate_manual_pair_facts
 from honeymoney.reconciliation import reconcile_ledger, transaction_direction
+from honeymoney.report import build_report_html
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -1075,6 +1076,10 @@ class CashFlowWorkflowTest(unittest.TestCase):
             self.assertIn("result=conflicting_evidence", human.stdout)
             self.assertIn("result=matched", human.stdout)
             self.assertIn("result=mismatched", human.stdout)
+            self.assertIn(
+                "reason=Opening and closing balances are unavailable.",
+                human.stdout,
+            )
             self.assertNotIn("1234.56", human.stdout)
             self.assertNotIn("6543.21", human.stdout)
             self.assertNotIn("7777.77", human.stdout)
@@ -1148,6 +1153,24 @@ class CashFlowWorkflowTest(unittest.TestCase):
                 calculation_unavailable,
             )
             self.assertNotIn("difference", calculation_unavailable)
+        report_html = build_report_html(
+            [],
+            "Synthetic period",
+            balance_reconciliation=balances,
+        )
+        self.assertIn("<th>Reason</th>", report_html)
+        for reason in unavailable_inputs.values():
+            self.assertIn(f"<td>{reason}</td>", report_html)
+        balances["bank_missing_posted_currency"]["statements"][0]["reason"] = (
+            "Unsafe <reason> & detail."
+        )
+        escaped_html = build_report_html(
+            [],
+            "Synthetic period",
+            balance_reconciliation=balances,
+        )
+        self.assertIn("Unsafe &lt;reason&gt; &amp; detail.", escaped_html)
+        self.assertNotIn("Unsafe <reason> & detail.", escaped_html)
 
     def test_period_report_reconciles_the_complete_represented_statement(
         self,
