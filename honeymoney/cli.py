@@ -43,7 +43,7 @@ from honeymoney.corrections import (
     to_review_row,
     validate_correction,
 )
-from honeymoney.csv_artifacts import canonical_csv_cell
+from honeymoney.csv_artifacts import canonical_csv_cell, read_csv_artifact
 from honeymoney.duplicates import (
     DUPLICATE_MATCH_TYPE,
     refresh_duplicate_candidates,
@@ -2907,6 +2907,11 @@ def _manual_pair_review(argv: list[str]) -> int:
 
     config = _load_config(args.config_path)
     categorized_path = Path(args.output_path or config["paths"]["output"])
+    generation_paths = generation_member_paths(
+        categorized_path,
+        configured_generation_paths(config),
+    )
+    expected_generation = generation_hashes(generation_paths)
     ledger_rows = read_ledger(categorized_path, config=config)
     _reject_ambiguous_legacy_transaction_ids(ledger_rows)
     by_id = {
@@ -2977,9 +2982,15 @@ def _manual_pair_review(argv: list[str]) -> int:
                 "manual_pair_conflict",
                 "A nominated transaction already belongs to an active pair.",
             )
+    candidate_pair_id = existing_group or manual_pair_id(args.transaction_ids)
+    _require_unambiguous_manual_pair_corrections(
+        config,
+        candidate_pair_id,
+        set(selected_ids),
+    )
     corrections = load_corrections(config)
     if not existing_group:
-        proposed_pair_id = manual_pair_id(args.transaction_ids)
+        proposed_pair_id = candidate_pair_id
         nominated_correction_groups = {
             corrections.get(row["transaction_id"], {}).get(MANUAL_PAIR_FIELD, "")
             for row in (left, right)
@@ -3030,6 +3041,10 @@ def _manual_pair_review(argv: list[str]) -> int:
                 1 for row in ledger_rows if row.get("needs_review") == "true"
             ),
         }
+        if generation_hashes(generation_paths) != expected_generation:
+            raise GenerationConflictError(
+                "The ledger generation changed while this operation was reading it"
+            )
         if args.json:
             _emit_json(
                 "review.pair",
@@ -3128,6 +3143,53 @@ def _proven_manual_pair_aliases(
         for source_id, targets in targets_by_source_id.items()
         if len(targets) == 1
     }
+
+
+def _require_unambiguous_manual_pair_corrections(
+    config: Mapping[str, object],
+    pair_id: str,
+    member_ids: set[str],
+) -> None:
+    """Reject raw correction rows that a transaction-keyed map would lose."""
+    corrections_value = config.get("corrections")
+    if not corrections_value:
+        return
+    corrections_path = Path(str(corrections_value))
+    if not corrections_path.exists():
+        return
+    rows = read_csv_artifact(corrections_path, CORRECTION_COLUMNS).rows
+    memberships = [
+        (
+            row.get("transaction_id", "").strip(),
+            row.get(MANUAL_PAIR_FIELD, "").strip(),
+        )
+        for row in rows
+    ]
+    counts: dict[str, int] = {}
+    for transaction_id, _ in memberships:
+        if transaction_id:
+            counts[transaction_id] = counts.get(transaction_id, 0) + 1
+    malformed_idless = any(
+        not transaction_id and stored_pair_id == pair_id
+        for transaction_id, stored_pair_id in memberships
+    )
+    duplicate_members = {
+        transaction_id
+        for transaction_id, count in counts.items()
+        if count > 1
+        and (
+            transaction_id in member_ids
+            or any(
+                candidate_id == transaction_id and stored_pair_id == pair_id
+                for candidate_id, stored_pair_id in memberships
+            )
+        )
+    }
+    if malformed_idless or duplicate_members:
+        raise ManualPairError(
+            "manual_pair_conflict",
+            "The stored manual-pair corrections are malformed or conflicting.",
+        )
 
 
 def _require_complete_manual_pair(
