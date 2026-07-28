@@ -648,17 +648,17 @@ def apply_correction_operation(
             and corrected == baseline
         ):
             corrected_ledger[index] = original
-    if migration_required:
-        repair_source_data_review_state(
-            corrected_ledger,
-            source_rows,
-            operation_overlap_manifest,
-        )
-        for transaction_id, patch in review_state_correction_updates(
-            merged_corrections,
-            corrected_ledger,
-        ).items():
-            merged_corrections[transaction_id].update(patch)
+    repair_source_data_review_state(
+        corrected_ledger,
+        source_rows,
+        operation_overlap_manifest,
+        transaction_ids=None if migration_required else corrected_ids,
+    )
+    for transaction_id, patch in review_state_correction_updates(
+        merged_corrections,
+        corrected_ledger,
+    ).items():
+        merged_corrections[transaction_id].update(patch)
     review_rows = [
         to_review_row(row)
         for row in corrected_ledger

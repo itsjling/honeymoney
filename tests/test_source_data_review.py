@@ -12,7 +12,10 @@ from honeymoney.csv_artifacts import csv_document
 from honeymoney.identity_state import load_identity_state
 from honeymoney.overlap import overlap_manifest_path, source_occurrences_path
 from honeymoney.persistence import GenerationConflictError
-from honeymoney.review_state import REVIEW_REASON_SOURCE_DATA
+from honeymoney.review_state import (
+    REVIEW_REASON_IDENTITY,
+    REVIEW_REASON_SOURCE_DATA,
+)
 from honeymoney.schema import (
     PRE_RATE_METADATA_CATEGORIZED_COLUMNS,
     PRE_RATE_METADATA_SOURCE_OCCURRENCE_COLUMNS,
@@ -185,6 +188,78 @@ class SourceDataReviewWorkflowTest(unittest.TestCase):
             for path in paths
             if path.exists()
         }
+
+    def test_ordinary_correction_repairs_cleared_history_provenance(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._setup_workspace(tmp)
+            statement = root / "history-provenance.csv"
+            self._write_statement(
+                statement,
+                ["2026-05-01,SYNTHETIC HISTORY,-10.00,HKD"],
+            )
+            self._import(root, statement)
+            ledger_path = root / "output" / "categorized.csv"
+            fieldnames, rows = self._read_csv(ledger_path)
+            [row] = rows
+            transaction_id = row["transaction_id"]
+            flags = [item for item in row["flags"].split(";") if item]
+            flags.extend(
+                [
+                    "overlap_history_ambiguous",
+                    "source_provenance_ambiguous",
+                ]
+            )
+            reasons = [item for item in row["review_reasons"].split(";") if item]
+            reasons.extend(
+                [
+                    REVIEW_REASON_IDENTITY,
+                    REVIEW_REASON_SOURCE_DATA,
+                ]
+            )
+            row["flags"] = ";".join(dict.fromkeys(flags))
+            row["review_reasons"] = ";".join(dict.fromkeys(reasons))
+            row["needs_review"] = "true"
+            self._write_csv(ledger_path, fieldnames, rows)
+
+            corrected = self._run_cli(
+                [
+                    "review",
+                    "--transaction",
+                    transaction_id,
+                    "--as",
+                    "expense",
+                    "--json",
+                ],
+                cwd=root,
+            )
+
+            self.assertEqual(corrected.returncode, 0, corrected.stderr)
+            _, [updated] = self._read_csv(ledger_path)
+            updated_flags = set(filter(None, updated["flags"].split(";")))
+            self.assertNotIn("overlap_history_ambiguous", updated_flags)
+            self.assertNotIn("source_provenance_ambiguous", updated_flags)
+            updated_reasons = set(filter(None, updated["review_reasons"].split(";")))
+            self.assertNotIn(REVIEW_REASON_IDENTITY, updated_reasons)
+            self.assertNotIn(REVIEW_REASON_SOURCE_DATA, updated_reasons)
+            self.assertEqual(updated["needs_review"], "true")
+            _, [saved_correction] = self._read_csv(root / "corrections.csv")
+            saved_reasons = set(
+                filter(None, saved_correction["review_reasons"].split(";"))
+            )
+            self.assertNotIn(REVIEW_REASON_IDENTITY, saved_reasons)
+            self.assertNotIn(REVIEW_REASON_SOURCE_DATA, saved_reasons)
+
+            inspected = self._run_cli(
+                ["source-data", "inspect", transaction_id, "--json"],
+                cwd=root,
+            )
+            self.assertEqual(inspected.returncode, 0, inspected.stderr)
+            item = json.loads(inspected.stdout)["data"]["transaction"]
+            self.assertEqual(item["evidence_status"], "clear")
+            self.assertFalse(item["review_reason_active"])
+            self.assertFalse(item["correction_review_reason_active"])
+            self.assertEqual(item["source_data_flags"], [])
+            self.assertEqual(item["active_evidence_flags"], [])
 
     def test_inspect_and_resolve_stale_actual_and_estimated_rows(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
