@@ -7,7 +7,13 @@ import ssl
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import date
-from http.client import HTTPException, HTTPSConnection
+from http.client import (
+    BadStatusLine,
+    HTTPException,
+    HTTPSConnection,
+    IncompleteRead,
+    LineTooLong,
+)
 from math import isfinite
 from urllib.parse import parse_qsl, urlencode, urlsplit
 
@@ -334,6 +340,11 @@ def _verified_tls_context() -> ssl.SSLContext:
 
 
 def _transport_error(error: BaseException) -> RateFetchError:
+    if isinstance(error, (BadStatusLine, LineTooLong, IncompleteRead)):
+        return RateFetchError(
+            "rate_fetch_response_malformed",
+            "The HKMA rate response was malformed or incomplete.",
+        )
     if isinstance(error, ssl.SSLCertVerificationError):
         return RateFetchError(
             "rate_fetch_certificate_verification",

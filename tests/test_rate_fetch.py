@@ -7,6 +7,7 @@ import sys
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
+from http.client import BadStatusLine, IncompleteRead, LineTooLong
 from pathlib import Path
 from unittest.mock import Mock, call, patch
 from urllib.parse import parse_qs, urlsplit
@@ -302,6 +303,18 @@ class RateFetchBoundaryTest(unittest.TestCase):
             (
                 ConnectionRefusedError("PRIVATE CONNECTION DETAIL"),
                 "rate_fetch_connection",
+            ),
+            (
+                BadStatusLine("PRIVATE STATUS DETAIL"),
+                "rate_fetch_response_malformed",
+            ),
+            (
+                LineTooLong("PRIVATE HEADER DETAIL"),
+                "rate_fetch_response_malformed",
+            ),
+            (
+                IncompleteRead(b"PRIVATE BODY DETAIL", 100),
+                "rate_fetch_response_malformed",
             ),
         )
         for raised, code in failures:
