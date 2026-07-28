@@ -54,6 +54,7 @@ AMBIGUITY_FLAG = "reconciliation_ambiguous"
 AMBIGUITY_PRIOR_REVIEW_FLAG = "reconciliation_ambiguous_prior_review"
 AMBIGUITY_REASON = "Ambiguous transfer candidates"
 CROSS_CURRENCY_FLAG = "cross_currency_exchange"
+StatementBalanceKey = tuple[str, str, str, str, str]
 
 
 def reconcile_ledger(
@@ -826,26 +827,12 @@ def _row_date(row: dict[str, str]) -> date | None:
 def _balance_reconciliation(
     rows: list[dict[str, str]],
 ) -> BalanceReconciliation:
-    groups: dict[tuple[str, str, str, str, str], list[dict[str, str]]] = {}
+    groups: dict[StatementBalanceKey, list[dict[str, str]]] = {}
     for row in rows:
-        account_id = row.get("account_id", "")
-        if not account_id:
+        key = _statement_balance_key(row)
+        if key is None:
             continue
-        source_id = row.get("source_id", "").strip()
-        source_kind = "source_id" if source_id else "source_file"
-        source_value = source_id or row.get("source_file", "")
-        statement_section = row.get("statement_section", "").strip()
-        posted_currency = row.get("posted_currency", "").strip().upper()
-        groups.setdefault(
-            (
-                account_id,
-                source_kind,
-                source_value,
-                statement_section,
-                posted_currency,
-            ),
-            [],
-        ).append(row)
+        groups.setdefault(key, []).append(row)
 
     accounts: BalanceReconciliation = {}
     for (
@@ -975,6 +962,33 @@ def _balance_reconciliation(
         elif results - {"matched"}:
             account["reason"] = "One or more statement balance checks are unavailable."
     return accounts
+
+
+def complete_statement_rows(
+    all_rows: list[dict[str, str]],
+    represented_rows: list[dict[str, str]],
+) -> list[dict[str, str]]:
+    """Return every row from each statement represented by the selected rows."""
+    represented_keys = {
+        key
+        for row in represented_rows
+        if (key := _statement_balance_key(row)) is not None
+    }
+    return [row for row in all_rows if _statement_balance_key(row) in represented_keys]
+
+
+def _statement_balance_key(row: Mapping[str, str]) -> StatementBalanceKey | None:
+    account_id = row.get("account_id", "")
+    if not account_id:
+        return None
+    source_id = row.get("source_id", "").strip()
+    return (
+        account_id,
+        "source_id" if source_id else "source_file",
+        source_id or row.get("source_file", ""),
+        row.get("statement_section", "").strip(),
+        row.get("posted_currency", "").strip().upper(),
+    )
 
 
 def _has_statement_balance_conflict(rows: list[dict[str, str]], kind: str) -> bool:

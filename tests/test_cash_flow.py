@@ -1067,6 +1067,69 @@ class CashFlowWorkflowTest(unittest.TestCase):
             self.assertNotIn("8888.88", report_html)
             self.assertNotIn("9999.99", report_html)
 
+    def test_period_report_reconciles_the_complete_represented_statement(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._workspace(
+                tmp,
+                [
+                    {
+                        "transaction_id": "txn_before_period",
+                        "date": "2026-05-31",
+                        "account_id": "bank_boundary",
+                        "account_type": "bank",
+                        "posted_amount": "10.00",
+                        "posted_currency": "HKD",
+                        "amount_hkd": "10.00",
+                        "statement_opening_balance": "100.00",
+                        "source_file": "boundary.pdf",
+                        "category": "Other",
+                    },
+                    {
+                        "transaction_id": "txn_in_period_one",
+                        "date": "2026-06-01",
+                        "account_id": "bank_boundary",
+                        "account_type": "bank",
+                        "posted_amount": "20.00",
+                        "posted_currency": "HKD",
+                        "amount_hkd": "20.00",
+                        "source_file": "boundary.pdf",
+                        "category": "Other",
+                    },
+                    {
+                        "transaction_id": "txn_in_period_two",
+                        "date": "2026-06-02",
+                        "account_id": "bank_boundary",
+                        "account_type": "bank",
+                        "posted_amount": "30.00",
+                        "posted_currency": "HKD",
+                        "amount_hkd": "30.00",
+                        "statement_closing_balance": "160.00",
+                        "source_file": "boundary.pdf",
+                        "category": "Other",
+                    },
+                ],
+            )
+
+            report = self._run_cli(
+                ["report", "--month", "2026-06", "--no-open", "--json"],
+                cwd=root,
+            )
+
+            self.assertEqual(report.returncode, 0, report.stderr)
+            data = json.loads(report.stdout)["data"]
+            self.assertEqual(data["transaction_count"], 2)
+            balance = data["balance_reconciliation"]["bank_boundary"]
+            self.assertEqual(balance["result"], "matched")
+            [statement] = balance["statements"]
+            self.assertEqual(statement["result"], "matched")
+            self.assertTrue(statement["opening_evidence_found"])
+            self.assertTrue(statement["closing_evidence_found"])
+            html = (root / "output" / "report.html").read_text(encoding="utf-8")
+            self.assertIn("matched", html)
+            self.assertNotIn("missing_opening", html)
+
     def test_balance_reconciliation_separates_source_identity_and_currency(
         self,
     ) -> None:

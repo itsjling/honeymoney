@@ -108,6 +108,7 @@ from honeymoney.rates import (
     validate_rate_cache,
 )
 from honeymoney.reconciliation import (
+    complete_statement_rows,
     reconcile_ledger,
     transaction_direction,
     validate_reconciliation_config,
@@ -3673,10 +3674,14 @@ def _report_command(argv: list[str]) -> int:
         _duplicate_compatibility(period_overlap)
     )
     period_label = f"{start.isoformat()} to {end.isoformat()}"
+    period_statement_rows = complete_statement_rows(
+        state.source_rows,
+        period_source_rows,
+    )
     period_summary = reconcile_ledger(
         [dict(row) for row in rows],
         config,
-        statement_rows=period_source_rows,
+        statement_rows=period_statement_rows,
     )
     balance_reconciliation = period_summary["balance_reconciliation"]
 
