@@ -8,10 +8,12 @@ from decimal import Decimal, InvalidOperation
 from typing import TypedDict
 
 from honeymoney.contracts import Config
+from honeymoney.rates import RateObservation, resolve_cached_rate
 
 VALUATION_SOURCE_STATEMENT = "statement_posted"
 VALUATION_SOURCE_MATCHED_EXCHANGE = "matched_exchange_leg"
 VALUATION_SOURCE_DATED_RATE = "configured_dated_rate"
+VALUATION_SOURCE_HKMA_RATE = "hkma_daily_reference_rate"
 VALUATION_SOURCE_FIXED_RATE = "configured_fixed_rate"
 VALUATION_SOURCE_MISSING = "missing"
 
@@ -24,6 +26,7 @@ ALLOWED_VALUATION_SOURCES = frozenset(
         VALUATION_SOURCE_STATEMENT,
         VALUATION_SOURCE_MATCHED_EXCHANGE,
         VALUATION_SOURCE_DATED_RATE,
+        VALUATION_SOURCE_HKMA_RATE,
         VALUATION_SOURCE_FIXED_RATE,
         VALUATION_SOURCE_MISSING,
     }
@@ -64,6 +67,7 @@ def value_transaction(
     ):
         row["amount_hkd"] = _format_decimal(matched_amount)
         row["valuation_status"] = VALUATION_STATUS_ACTUAL
+        _clear_rate_metadata(row)
         _set_missing_rate_flag(row, False)
         return
 
@@ -81,6 +85,7 @@ def value_transaction(
                 if posted_currency and posted_currency != base_currency
                 else VALUATION_STATUS_ACTUAL
             )
+            _clear_rate_metadata(row)
             _set_missing_rate_flag(row, False)
             return
         _set_missing(row)
@@ -89,6 +94,7 @@ def value_transaction(
         row["amount_hkd"] = _format_decimal(amount)
         row["valuation_source"] = VALUATION_SOURCE_STATEMENT
         row["valuation_status"] = VALUATION_STATUS_ACTUAL
+        _clear_rate_metadata(row)
         _set_missing_rate_flag(row, False)
         return
 
@@ -97,6 +103,20 @@ def value_transaction(
         row["amount_hkd"] = _format_decimal(amount * dated_rate)
         row["valuation_source"] = VALUATION_SOURCE_DATED_RATE
         row["valuation_status"] = VALUATION_STATUS_ESTIMATED
+        row["valuation_rate_date"] = transaction_date
+        row["valuation_provider"] = "Configured exact-date rate"
+        _set_missing_rate_flag(row, False)
+        return
+
+    cached_rate = _cached_rate(config, posted_currency, transaction_date)
+    if cached_rate is not None:
+        row["amount_hkd"] = _format_decimal(
+            amount * Decimal(str(cached_rate["raw_rate"]))
+        )
+        row["valuation_source"] = VALUATION_SOURCE_HKMA_RATE
+        row["valuation_status"] = VALUATION_STATUS_ESTIMATED
+        row["valuation_rate_date"] = str(cached_rate["observed_rate_date"])
+        row["valuation_provider"] = str(cached_rate["provider"])
         _set_missing_rate_flag(row, False)
         return
 
@@ -105,6 +125,8 @@ def value_transaction(
         row["amount_hkd"] = _format_decimal(amount * fixed_rate)
         row["valuation_source"] = VALUATION_SOURCE_FIXED_RATE
         row["valuation_status"] = VALUATION_STATUS_ESTIMATED
+        row["valuation_rate_date"] = ""
+        row["valuation_provider"] = "Configured fixed rate"
         _set_missing_rate_flag(row, False)
         return
 
@@ -128,6 +150,7 @@ def set_matched_exchange_valuation(
     foreign_row["amount_hkd"] = _format_decimal(base_amount)
     foreign_row["valuation_source"] = VALUATION_SOURCE_MATCHED_EXCHANGE
     foreign_row["valuation_status"] = VALUATION_STATUS_ACTUAL
+    _clear_rate_metadata(foreign_row)
     _set_missing_rate_flag(foreign_row, False)
 
 
@@ -182,10 +205,14 @@ def validate_dated_rates(config: Config) -> None:
 def configured_exchange_rate(
     config: Config, currency: str, transaction_date: str
 ) -> Decimal | None:
-    """Return the exact-date rate, then the fixed fallback, for a currency."""
-    return _dated_rate(config, currency, transaction_date) or _fixed_rate(
-        config, currency
-    )
+    """Return the first configured or cached rate in valuation order."""
+    dated_rate = _dated_rate(config, currency, transaction_date)
+    if dated_rate is not None:
+        return dated_rate
+    cached_rate = _cached_rate(config, currency, transaction_date)
+    if cached_rate is not None:
+        return Decimal(str(cached_rate["raw_rate"]))
+    return _fixed_rate(config, currency)
 
 
 def _dated_rate(config: Config, currency: str, transaction_date: str) -> Decimal | None:
@@ -205,6 +232,15 @@ def _fixed_rate(config: Config, currency: str) -> Decimal | None:
     return _positive_decimal(raw.get(currency))
 
 
+def _cached_rate(
+    config: Config, currency: str, transaction_date: str
+) -> RateObservation | None:
+    raw = config.get("_rate_cache")
+    if not isinstance(raw, Mapping):
+        return None
+    return resolve_cached_rate(raw, currency, transaction_date)
+
+
 def _positive_decimal(value: object) -> Decimal | None:
     parsed = _decimal(str(value)) if value is not None else None
     return parsed if parsed is not None and parsed > 0 else None
@@ -222,7 +258,13 @@ def _set_missing(row: dict[str, str]) -> None:
     row["amount_hkd"] = ""
     row["valuation_source"] = VALUATION_SOURCE_MISSING
     row["valuation_status"] = VALUATION_STATUS_MISSING
+    _clear_rate_metadata(row)
     _set_missing_rate_flag(row, True)
+
+
+def _clear_rate_metadata(row: dict[str, str]) -> None:
+    row["valuation_rate_date"] = ""
+    row["valuation_provider"] = ""
 
 
 def _set_missing_rate_flag(row: dict[str, str], active: bool) -> None:

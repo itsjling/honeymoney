@@ -43,6 +43,8 @@ from honeymoney.persistence import (
 )
 from honeymoney.schema import (
     CATEGORIZED_COLUMNS,
+    PRE_RATE_METADATA_CATEGORIZED_COLUMNS,
+    PRE_RATE_METADATA_SOURCE_OCCURRENCE_COLUMNS,
     PRE_STATEMENT_SECTION_CATEGORIZED_COLUMNS,
     PRE_STATEMENT_SECTION_SOURCE_OCCURRENCE_COLUMNS,
     PREVIOUS_CATEGORIZED_COLUMNS,
@@ -146,12 +148,14 @@ def load_identity_state(
             or header
             not in (
                 CATEGORIZED_COLUMNS,
+                PRE_RATE_METADATA_CATEGORIZED_COLUMNS,
                 PRE_STATEMENT_SECTION_CATEGORIZED_COLUMNS,
                 PREVIOUS_CATEGORIZED_COLUMNS,
             )
             or occurrence_header
             not in (
                 SOURCE_OCCURRENCE_COLUMNS,
+                PRE_RATE_METADATA_SOURCE_OCCURRENCE_COLUMNS,
                 PRE_STATEMENT_SECTION_SOURCE_OCCURRENCE_COLUMNS,
                 PREVIOUS_SOURCE_OCCURRENCE_COLUMNS,
             )
@@ -208,6 +212,7 @@ def load_identity_state(
 
     if header in (
         SOURCE_OCCURRENCE_COLUMNS,
+        PRE_RATE_METADATA_SOURCE_OCCURRENCE_COLUMNS,
         PRE_STATEMENT_SECTION_SOURCE_OCCURRENCE_COLUMNS,
         PREVIOUS_SOURCE_OCCURRENCE_COLUMNS,
     ):
@@ -260,6 +265,7 @@ def load_identity_state(
             header
             in (
                 CATEGORIZED_COLUMNS,
+                PRE_RATE_METADATA_CATEGORIZED_COLUMNS,
                 PRE_STATEMENT_SECTION_CATEGORIZED_COLUMNS,
                 PREVIOUS_CATEGORIZED_COLUMNS,
             )

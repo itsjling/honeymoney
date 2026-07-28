@@ -74,6 +74,11 @@ Statement-section balance scope adds the public text column
 `statement_section`. ADR 0004 headers remain migration input and gain the
 column on the next write.
 
+The local HKMA rate cache adds `valuation_rate_date` and
+`valuation_provider` after `valuation_status` in ledger, review, and hidden
+source CSVs. The prior statement-section headers remain migration input and
+gain these columns on the next write.
+
 Manual cash-movement pairing adds the text field `manual_pair_id` to
 `corrections.csv`. Older correction headers remain valid and gain the field on
 the next write. Only `review pair` creates this field; structured `correct`

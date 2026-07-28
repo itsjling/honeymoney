@@ -1105,6 +1105,8 @@ def _agreed_canonical_template(
     )
     row["valuation_source"] = _agreed_value(bucket, "valuation_source", "")
     row["valuation_status"] = _agreed_value(bucket, "valuation_status", "")
+    row["valuation_rate_date"] = _agreed_value(bucket, "valuation_rate_date", "")
+    row["valuation_provider"] = _agreed_value(bucket, "valuation_provider", "")
     for field in _DISPLAY_FIELDS:
         row[field] = _agreed_value(bucket, field, "")
 
@@ -1265,6 +1267,7 @@ def _validate_canonical_amount_hkd(
                 "",
                 "missing",
                 "configured_dated_rate",
+                "hkma_daily_reference_rate",
                 "configured_fixed_rate",
             }
             for row in source_occurrences
