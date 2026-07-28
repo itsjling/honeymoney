@@ -2907,12 +2907,12 @@ def _manual_pair_review(argv: list[str]) -> int:
 
     config = _load_config(args.config_path)
     categorized_path = Path(args.output_path or config["paths"]["output"])
+    ledger_rows = read_ledger(categorized_path, config=config)
     generation_paths = generation_member_paths(
         categorized_path,
         configured_generation_paths(config),
     )
     expected_generation = generation_hashes(generation_paths)
-    ledger_rows = read_ledger(categorized_path, config=config)
     _reject_ambiguous_legacy_transaction_ids(ledger_rows)
     by_id = {
         row["transaction_id"]: row for row in ledger_rows if row.get("transaction_id")

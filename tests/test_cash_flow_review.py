@@ -1810,6 +1810,119 @@ class CashFlowReviewTest(unittest.TestCase):
             [published_row, *_] = self._ledger(root)
             self.assertEqual(published_row["notes"], "Synthetic concurrent update")
 
+    def test_manual_pair_replay_snapshots_custom_output_after_recovery(self) -> None:
+        import honeymoney.cli as cli
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._setup_workspace(tmp)
+            statement = root / "custom-output-replay.csv"
+            statement.write_text(
+                "\n".join(
+                    [
+                        "Date,Description,Amount,Currency",
+                        "2026-05-04,SYNTHETIC PAIR OUT,-100.00,HKD",
+                        "2026-05-04,SYNTHETIC PAIR IN,100.00,HKD",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            custom_output = root / "custom" / "ledger.csv"
+            imported = self._run_cli(
+                [
+                    "import",
+                    str(statement),
+                    "--output",
+                    str(custom_output),
+                    "--no-interactive",
+                ],
+                cwd=root,
+            )
+            self.assertEqual(imported.returncode, 0, imported.stderr)
+            with custom_output.open(newline="", encoding="utf-8") as handle:
+                rows = {row["merchant"]: row for row in csv.DictReader(handle)}
+            pair_ids = [
+                rows["SYNTHETIC PAIR OUT"]["transaction_id"],
+                rows["SYNTHETIC PAIR IN"]["transaction_id"],
+            ]
+            paired = self._run_cli(
+                [
+                    "review",
+                    "pair",
+                    *pair_ids,
+                    "--output",
+                    str(custom_output),
+                    "--yes",
+                    "--json",
+                ],
+                cwd=root,
+            )
+            self.assertEqual(paired.returncode, 0, paired.stderr)
+            read_ledger = cli.read_ledger
+            recovered_generation: dict[str, bytes] = {}
+
+            def read_then_recover(path, *, config=None):
+                recovered_rows = read_ledger(path, config=config)
+                with custom_output.open(newline="", encoding="utf-8") as handle:
+                    reader = csv.DictReader(handle)
+                    fieldnames = list(reader.fieldnames or [])
+                    current_rows = list(reader)
+                current_rows[0]["notes"] = "Synthetic recovered generation"
+                with custom_output.open(
+                    "w",
+                    newline="",
+                    encoding="utf-8",
+                ) as handle:
+                    writer = csv.DictWriter(handle, fieldnames=fieldnames)
+                    writer.writeheader()
+                    writer.writerows(current_rows)
+                artifact_paths = [
+                    *sorted(custom_output.parent.iterdir()),
+                    root / "corrections.csv",
+                ]
+                recovered_generation.update(
+                    {
+                        str(artifact.relative_to(root)): artifact.read_bytes()
+                        for artifact in artifact_paths
+                        if artifact.is_file()
+                    }
+                )
+                return recovered_rows
+
+            output = io.StringIO()
+            with (
+                patch.object(cli, "read_ledger", side_effect=read_then_recover),
+                redirect_stdout(output),
+            ):
+                return_code = cli._manual_pair_review(
+                    [
+                        *pair_ids,
+                        "--config",
+                        str(root / "config.json"),
+                        "--output",
+                        str(custom_output),
+                        "--yes",
+                        "--json",
+                    ]
+                )
+
+            self.assertEqual(return_code, 0)
+            self.assertEqual(
+                json.loads(output.getvalue())["data"]["result"],
+                "already_paired",
+            )
+            artifact_paths = [
+                *sorted(custom_output.parent.iterdir()),
+                root / "corrections.csv",
+            ]
+            self.assertEqual(
+                {
+                    str(artifact.relative_to(root)): artifact.read_bytes()
+                    for artifact in artifact_paths
+                    if artifact.is_file()
+                },
+                recovered_generation,
+            )
+
     def test_manual_pair_rejects_correction_only_membership_without_writing(
         self,
     ) -> None:
