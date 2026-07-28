@@ -1188,6 +1188,56 @@ class CashFlowReviewTest(unittest.TestCase):
             )
             self.assertEqual(self._pair_artifacts(root), report_artifacts)
 
+    def test_manual_pair_replay_rejects_unnominated_source_evidence_ids(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._setup_workspace(tmp)
+            self._import_rows(
+                root,
+                "source-evidence-pair.csv",
+                [
+                    "2026-05-04,SYNTHETIC PAIR OUT,-100.00,HKD",
+                    "2026-05-04,SYNTHETIC PAIR IN,100.00,HKD",
+                ],
+            )
+            categorized_path = root / "output" / "categorized.csv"
+            state = load_identity_state(categorized_path)
+            source_evidence = state.source_evidence_rows
+            self.assertIsNotNone(source_evidence)
+            assert source_evidence is not None
+            current = {row["merchant"]: row for row in self._ledger(root)}
+            current_ids = [
+                current["SYNTHETIC PAIR OUT"]["transaction_id"],
+                current["SYNTHETIC PAIR IN"]["transaction_id"],
+            ]
+            evidence = {row["merchant"]: row for row in source_evidence}
+            evidence_ids = [
+                evidence["SYNTHETIC PAIR OUT"]["transaction_id"],
+                evidence["SYNTHETIC PAIR IN"]["transaction_id"],
+            ]
+            self.assertTrue(set(current_ids).isdisjoint(evidence_ids))
+            paired = self._run_cli(
+                ["review", "pair", *current_ids, "--yes", "--json"],
+                cwd=root,
+            )
+            self.assertEqual(paired.returncode, 0, paired.stderr)
+            before = self._pair_artifacts(root)
+
+            replayed = self._run_cli(
+                ["review", "pair", *evidence_ids, "--yes", "--json"],
+                cwd=root,
+            )
+
+            self.assertEqual(replayed.returncode, 2, replayed.stderr)
+            self.assertEqual(
+                json.loads(replayed.stdout)["errors"][0]["code"],
+                "manual_pair_conflict",
+            )
+            self.assertNotIn("SYNTHETIC", replayed.stdout)
+            self.assertNotIn("100.00", replayed.stdout)
+            self.assertEqual(self._pair_artifacts(root), before)
+
     def test_review_decision_atomically_supersedes_a_manual_pair(self) -> None:
         cases = (
             ("expense", "SYNTHETIC CASH OUT", "expense"),

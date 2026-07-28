@@ -3007,6 +3007,11 @@ def _manual_pair_review(argv: list[str]) -> int:
                 "A nominated transaction has conflicting stored pair membership.",
             )
     if existing_group:
+        if manual_pair_id(args.transaction_ids) != existing_group:
+            raise ManualPairError(
+                "manual_pair_conflict",
+                "The nominated transactions do not match the stored manual pair.",
+            )
         _require_complete_manual_pair(
             ledger_rows,
             corrections,
