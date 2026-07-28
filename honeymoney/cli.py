@@ -32,7 +32,7 @@ from honeymoney.classification_policy import (
 )
 from honeymoney.corrections import (
     CORRECTION_COLUMNS,
-    CORRECTION_FIELDS,
+    EDITABLE_CORRECTION_FIELDS,
     apply_correction_operation,
     apply_corrections,
     ledger_output_documents,
@@ -56,6 +56,13 @@ from honeymoney.identity import (
 )
 from honeymoney.identity_state import IdentityState, load_configured_identity_state
 from honeymoney.learning import plan_learned_rules
+from honeymoney.manual_pairs import (
+    MANUAL_PAIR_FIELD,
+    ManualPairError,
+    manual_pair_id,
+    manual_pair_marker,
+    validate_manual_pair_facts,
+)
 from honeymoney.ollama import (
     OllamaProgress,
     apply_ollama_fallback,
@@ -880,6 +887,8 @@ Commands:
   honeymoney review --transaction ID --as income
                                    Apply one human accounting decision
   honeymoney review --file FILE    Apply an accounting decision batch
+  honeymoney review pair ID ID --yes
+                                   Confirm one same-account cash-movement pair
   honeymoney profile validate ... Validate a profile and optionally preview input
   honeymoney evaluate LEDGER --reference CORRECTIONS
                                    Report category coverage and exact accuracy
@@ -1904,6 +1913,8 @@ def _print_import_summary(report: dict[str, Any]) -> None:
 
 
 def _review_command(argv: list[str]) -> int:
+    if argv and argv[0] == "pair":
+        return _manual_pair_review(argv[1:])
     parser = _command_parser(
         argv,
         prog="honeymoney review",
@@ -2133,6 +2144,105 @@ def _one_shot_review(
             else ""
         )
         print(f"Reviewed {args.transaction_id} as {decision}{suffix}.")
+    return 0
+
+
+def _manual_pair_review(argv: list[str]) -> int:
+    parser = _command_parser(
+        argv,
+        prog="honeymoney review pair",
+        description="Confirm two same-account cash movements as one transfer pair.",
+    )
+    parser.add_argument("transaction_ids", nargs=2, metavar="TRANSACTION_ID")
+    parser.add_argument("--config", dest="config_path")
+    parser.add_argument("--output", dest="output_path")
+    parser.add_argument("--yes", action="store_true")
+    parser.add_argument("--json", action="store_true")
+    args = parser.parse_args(argv)
+    if not args.yes:
+        raise ManualPairError(
+            "manual_pair_confirmation_required",
+            "Manual transfer pairing requires --yes confirmation.",
+        )
+
+    config = _load_config(args.config_path)
+    categorized_path = Path(args.output_path or config["paths"]["output"])
+    ledger_rows = read_ledger(categorized_path, config=config)
+    _reject_ambiguous_legacy_transaction_ids(ledger_rows)
+    by_id = {
+        row["transaction_id"]: row for row in ledger_rows if row.get("transaction_id")
+    }
+    selected = [by_id.get(identifier) for identifier in args.transaction_ids]
+    if any(row is None for row in selected):
+        raise ManualPairError(
+            "manual_pair_stale_transaction",
+            "A nominated transaction is no longer current.",
+        )
+    left = selected[0]
+    right = selected[1]
+    assert left is not None
+    assert right is not None
+    protected_flags = {
+        IDENTITY_MIGRATION_AMBIGUITY_FLAG,
+        "overlap_count_ambiguous",
+        "overlap_history_ambiguous",
+    }
+    if any(
+        bool(protected_flags & set(row.get("flags", "").split(";")))
+        for row in (left, right)
+    ):
+        raise ManualPairError(
+            "manual_pair_ambiguous_transaction",
+            "A nominated transaction has ambiguous current state.",
+        )
+    validate_manual_pair_facts(left, right)
+
+    markers = [manual_pair_marker(row) for row in (left, right)]
+    existing_group = markers[0] if markers[0] and markers[0] == markers[1] else ""
+    if any(markers) and not existing_group:
+        raise ManualPairError(
+            "manual_pair_conflict",
+            "A nominated transaction belongs to a conflicting active manual pair.",
+        )
+    for row, other in ((left, right), (right, left)):
+        partner = row.get("paired_transaction_id", "")
+        if partner and partner != other["transaction_id"]:
+            raise ManualPairError(
+                "manual_pair_conflict",
+                "A nominated transaction belongs to a conflicting active pair.",
+            )
+        if partner and not existing_group:
+            raise ManualPairError(
+                "manual_pair_conflict",
+                "A nominated transaction already belongs to an active pair.",
+            )
+
+    pair_id = existing_group or manual_pair_id(args.transaction_ids)
+    patches = {}
+    for row in (left, right):
+        patch = _accounting_decision_patch(
+            row,
+            "internal-transfer",
+            "Internal transfer confirmed by manual pair review",
+        )
+        patch[MANUAL_PAIR_FIELD] = pair_id
+        patches[row["transaction_id"]] = patch
+    result = apply_correction_operation(config, categorized_path, patches)
+    data = {
+        "paired_count": 2,
+        "unchanged": bool(existing_group),
+        "remaining_review_count": result.remaining_review_count,
+    }
+    if args.json:
+        _emit_json(
+            "review.pair",
+            "success",
+            data=data,
+            artifacts=_correction_artifacts(config, categorized_path),
+        )
+    else:
+        state = "already confirmed" if existing_group else "confirmed"
+        print(f"Manual internal-transfer pair {state}; 2 transactions linked.")
     return 0
 
 
@@ -3380,7 +3490,7 @@ def _load_json_correction_batch(
     for index, item in enumerate(payload):
         if not isinstance(item, dict):
             raise ValueError(f"Correction at index {index} must be a JSON object")
-        unknown_fields = set(item) - {"transaction_id", *CORRECTION_FIELDS}
+        unknown_fields = set(item) - {"transaction_id", *EDITABLE_CORRECTION_FIELDS}
         if unknown_fields:
             fields = ", ".join(sorted(unknown_fields))
             raise ValueError(
@@ -3411,7 +3521,7 @@ def _load_json_correction_batch(
 
 def _normalize_json_correction(index: int, item: dict[str, Any]) -> dict[str, str]:
     correction: dict[str, str] = {}
-    for field in CORRECTION_FIELDS:
+    for field in EDITABLE_CORRECTION_FIELDS:
         if field not in item:
             continue
         value = item[field]
@@ -4026,30 +4136,35 @@ def run() -> int:
             if isinstance(error, DuplicateResolutionError)
             else None
         )
+        manual_pair_details = (
+            {
+                "type": "ManualPairError",
+                "code": error.code,
+                "message": str(error),
+            }
+            if isinstance(error, ManualPairError)
+            else None
+        )
         if "--json" in argv:
             command = _json_error_command(argv)
+            error_items = (
+                error.errors
+                if isinstance(error, _ReviewBatchError)
+                else [
+                    identity_details
+                    or duplicate_details
+                    or manual_pair_details
+                    or {
+                        "type": type(error).__name__,
+                        "message": str(error),
+                    }
+                ]
+            )
             _emit_json(
                 command,
                 "error",
                 data=error.data if isinstance(error, _ReviewBatchError) else None,
-                errors=[
-                    *(
-                        error.errors
-                        if isinstance(error, _ReviewBatchError)
-                        else [
-                            identity_details
-                            if identity_details is not None
-                            else (
-                                duplicate_details
-                                if duplicate_details is not None
-                                else {
-                                    "type": type(error).__name__,
-                                    "message": str(error),
-                                }
-                            )
-                        ]
-                    )
-                ],
+                errors=error_items,
             )
             return 2
         print(
@@ -4093,6 +4208,8 @@ def _json_error_command(argv: list[str]) -> str:
         return "profile.validate"
     if len(argv) > 1 and argv[:2] == ["duplicates", "resolve"]:
         return "duplicates.resolve"
+    if len(argv) > 1 and argv[:2] == ["review", "pair"]:
+        return "review.pair"
     return argv[0] if argv and not argv[0].startswith("-") else "run"
 
 

@@ -175,6 +175,20 @@ cumulative ledger, and publish `corrections.csv`, `categorized.csv`, and
 `review_needed.csv` through the recoverable ledger-generation protocol.
 Repeating a review does not append duplicate correction rows.
 
+To link two confirmed, same-account cash movements that automatic matching
+must leave alone, name both current IDs and confirm the choice:
+
+```bash
+honeymoney review pair TRANSACTION_ID TRANSACTION_ID --yes --json
+```
+
+The rows must have opposite, equal posted amounts in one currency and compatible
+owners. A valid pair gets one stable manual transfer group, stays paired on
+later reconciliation and proven replacement, and remains outside income and
+spending. A changed or missing member makes the remaining row unresolved and
+returns it to review. A later accounting decision clears both pair links in
+the same write and returns the other member to review.
+
 ```json
 [
   {"transaction_id": "txn_example", "decision": "expense"},
@@ -324,6 +338,8 @@ honeymoney reconcile --json
 ```
 
 Recomputes cash-flow treatment and transfer pairing across the full ledger.
+Automatic matching still excludes same-account rows. A confirmed
+`review pair` decision supplies the explicit link for those rows.
 Same-currency matching uses opposite signs, equal absolute HKD amounts, distinct
 owned `account_id` values, account types, and
 `reconciliation.date_window_days` (default `3`). Cross-currency matching uses

@@ -9,6 +9,7 @@ import unittest
 from pathlib import Path
 
 from honeymoney.identity_state import LEGACY_CATEGORIZED_COLUMNS
+from honeymoney.manual_pairs import ManualPairError, validate_manual_pair_facts
 from honeymoney.reconciliation import reconcile_ledger, transaction_direction
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -1074,6 +1075,140 @@ class CashFlowWorkflowTest(unittest.TestCase):
         self.assertEqual(statement["status"], "unavailable")
         self.assertEqual(statement["result"], "unavailable")
         self.assertEqual(statement["reason"], "Opening balances conflict.")
+
+    def test_manual_pair_facts_reject_account_amount_currency_and_owner_conflicts(
+        self,
+    ) -> None:
+        left = {
+            "transaction_id": "txn_left",
+            "account_id": "cash_account",
+            "posted_amount": "-100.00",
+            "posted_currency": "HKD",
+            "owner": "Justin",
+        }
+        right = {
+            "transaction_id": "txn_right",
+            "account_id": "cash_account",
+            "posted_amount": "100.00",
+            "posted_currency": "HKD",
+            "owner": "Justin",
+        }
+        cases = (
+            ("account_id", "other_account", "manual_pair_account_mismatch"),
+            ("posted_amount", "99.00", "manual_pair_amount_mismatch"),
+            ("posted_currency", "USD", "manual_pair_currency_mismatch"),
+            ("owner", "Franchesca", "manual_pair_owner_mismatch"),
+        )
+        for field, value, code in cases:
+            with self.subTest(field=field):
+                candidate = {**right, field: value}
+                with self.assertRaises(ManualPairError) as raised:
+                    validate_manual_pair_facts(left, candidate)
+                self.assertEqual(raised.exception.code, code)
+
+    def test_manual_pair_members_are_not_reused_for_currency_exchange(self) -> None:
+        pair_id = "mpair_" + "a" * 32
+        rows = [
+            {
+                "transaction_id": "txn_manual_out",
+                "date": "2026-07-01",
+                "account_id": "cash_account",
+                "account_type": "bank",
+                "institution": "Synthetic Bank",
+                "posted_amount": "-780.00",
+                "posted_currency": "HKD",
+                "amount_hkd": "-780.00",
+                "merchant": "SYNTHETIC EXCHANGE",
+                "owner": "Household",
+                "flags": f"manual_transfer_pair:{pair_id}",
+            },
+            {
+                "transaction_id": "txn_manual_in",
+                "date": "2026-07-01",
+                "account_id": "cash_account",
+                "account_type": "bank",
+                "institution": "Synthetic Bank",
+                "posted_amount": "780.00",
+                "posted_currency": "HKD",
+                "amount_hkd": "780.00",
+                "merchant": "SYNTHETIC REDEPOSIT",
+                "owner": "Household",
+                "flags": f"manual_transfer_pair:{pair_id}",
+            },
+            {
+                "transaction_id": "txn_foreign",
+                "date": "2026-07-01",
+                "account_id": "foreign_account",
+                "account_type": "bank",
+                "institution": "Synthetic Bank",
+                "posted_amount": "100.00",
+                "posted_currency": "JPY",
+                "amount_hkd": "",
+                "merchant": "SYNTHETIC DEPOSIT",
+                "owner": "Household",
+                "flags": "",
+            },
+        ]
+
+        summary = reconcile_ledger(
+            rows,
+            {
+                "base_currency": "HKD",
+                "exchange_rates": {"JPY": 7.8},
+            },
+        )
+
+        self.assertEqual(summary["paired_groups"], 1)
+        self.assertEqual(summary["cross_currency_paired_groups"], 0)
+        self.assertEqual(rows[0]["paired_transaction_id"], "txn_manual_in")
+        self.assertEqual(rows[1]["paired_transaction_id"], "txn_manual_out")
+        self.assertEqual(rows[2]["paired_transaction_id"], "")
+
+    def test_invalid_manual_member_is_reserved_from_automatic_matching(self) -> None:
+        pair_id = "mpair_" + "b" * 32
+        rows = [
+            {
+                "transaction_id": "txn_invalid_manual",
+                "date": "2026-07-01",
+                "account_id": "cash_account",
+                "account_type": "bank",
+                "institution": "Synthetic Bank",
+                "posted_amount": "-780.00",
+                "posted_currency": "HKD",
+                "amount_hkd": "-780.00",
+                "merchant": "SYNTHETIC EXCHANGE",
+                "owner": "Household",
+                "flags": f"manual_transfer_pair:{pair_id}",
+            },
+            {
+                "transaction_id": "txn_foreign",
+                "date": "2026-07-01",
+                "account_id": "foreign_account",
+                "account_type": "bank",
+                "institution": "Synthetic Bank",
+                "posted_amount": "100.00",
+                "posted_currency": "JPY",
+                "amount_hkd": "",
+                "merchant": "SYNTHETIC DEPOSIT",
+                "owner": "Household",
+                "flags": "",
+            },
+        ]
+
+        summary = reconcile_ledger(
+            rows,
+            {
+                "base_currency": "HKD",
+                "exchange_rates": {"JPY": 7.8},
+            },
+        )
+
+        self.assertEqual(summary["paired_groups"], 0)
+        self.assertEqual(summary["cross_currency_paired_groups"], 0)
+        self.assertEqual(summary["unmatched_transactions"], 1)
+        self.assertEqual(rows[0]["paired_transaction_id"], "")
+        self.assertEqual(rows[0]["flow_type"], "unresolved")
+        self.assertIn("manual_transfer_pair_invalid", rows[0]["flags"])
 
 
 if __name__ == "__main__":

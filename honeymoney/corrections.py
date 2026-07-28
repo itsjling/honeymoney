@@ -23,6 +23,13 @@ from honeymoney.identity_state import (
     validate_source_evidence_manifest_agreement,
     validated_manifest_document,
 )
+from honeymoney.manual_pairs import (
+    MANUAL_PAIR_FIELD,
+    manual_pair_marker,
+    validate_manual_pair_id,
+    with_manual_pair_marker,
+    without_manual_pair_marker,
+)
 from honeymoney.overlap import (
     CanonicalizationResult,
     apply_history_ambiguity,
@@ -45,6 +52,7 @@ from honeymoney.persistence import (
 )
 from honeymoney.reconciliation import reconcile_ledger
 from honeymoney.review_state import (
+    REVIEW_REASON_ACCOUNTING_FLOW,
     REVIEW_REASON_CATEGORY,
     REVIEW_REASON_CATEGORY_SUGGESTION,
     replace_review_reasons,
@@ -76,8 +84,13 @@ CORRECTION_FIELDS = [
     "notes",
     "needs_review",
     "review_reasons",
+    MANUAL_PAIR_FIELD,
 ]
 CORRECTION_COLUMNS = ["transaction_id", *CORRECTION_FIELDS]
+EDITABLE_CORRECTION_FIELDS = [
+    field for field in CORRECTION_FIELDS if field != MANUAL_PAIR_FIELD
+]
+_MANUAL_PAIR_SUPERSEDED_REASON = "Manual transfer pair superseded by review"
 
 
 @dataclass(frozen=True)
@@ -196,6 +209,13 @@ def validate_correction(
                 f"Unsupported review_reasons in correction {transaction_id}: "
                 f"{correction['review_reasons']}"
             ) from error
+    if correction.get(MANUAL_PAIR_FIELD):
+        try:
+            validate_manual_pair_id(correction[MANUAL_PAIR_FIELD])
+        except ValueError as error:
+            raise ValueError(
+                f"Unsupported manual_pair_id in correction {transaction_id}"
+            ) from error
 
 
 def apply_corrections(
@@ -221,6 +241,13 @@ def apply_corrections(
 
         if "flow_type" in correction:
             transaction["flow_source"] = "correction"
+        if MANUAL_PAIR_FIELD in correction:
+            pair_id = correction[MANUAL_PAIR_FIELD]
+            transaction["flags"] = (
+                with_manual_pair_marker(transaction.get("flags", ""), pair_id)
+                if pair_id
+                else without_manual_pair_marker(transaction.get("flags", ""))
+            )
 
         if "needs_review" in correction:
             release_duplicate_review_ownership(transaction)
@@ -498,8 +525,35 @@ def apply_correction_operation(
         row["transaction_id"]: row for row in ledger_rows if row.get("transaction_id")
     }
 
-    normalized_patches: dict[str, dict[str, str]] = {}
+    requested_transaction_ids = set(correction_patches)
+    existing_corrections = load_corrections(config)
+    pair_by_transaction_id = {
+        transaction_id: (
+            existing_corrections.get(transaction_id, {}).get(MANUAL_PAIR_FIELD)
+            or manual_pair_marker(row)
+        )
+        for transaction_id, row in ledger_by_id.items()
+    }
+    superseded_pair_ids = {
+        pair_by_transaction_id.get(transaction_id, "")
+        for transaction_id, patch in correction_patches.items()
+        if _supersedes_manual_pair(patch)
+    }
+    superseded_pair_ids.discard("")
+    expanded_patches: dict[str, dict[str, str]] = {}
+    for transaction_id, pair_id in pair_by_transaction_id.items():
+        if pair_id in superseded_pair_ids:
+            expanded_patches[transaction_id] = _manual_pair_reset_patch(
+                ledger_by_id[transaction_id]
+            )
     for transaction_id, patch in correction_patches.items():
+        expanded_patches[transaction_id] = {
+            **expanded_patches.get(transaction_id, {}),
+            **patch,
+        }
+
+    normalized_patches: dict[str, dict[str, str]] = {}
+    for transaction_id, patch in expanded_patches.items():
         if transaction_id not in ledger_by_id:
             raise ValueError(f"Unknown transaction_id: {transaction_id}")
         validate_correction(transaction_id, patch, config)
@@ -509,25 +563,35 @@ def apply_correction_operation(
             )
         normalized_patches[transaction_id] = dict(patch)
 
-    existing_corrections = load_corrections(config)
-    merged_corrections = dict(existing_corrections)
+    merged_corrections = {
+        transaction_id: dict(correction)
+        for transaction_id, correction in existing_corrections.items()
+    }
+    for correction in merged_corrections.values():
+        if correction.get(MANUAL_PAIR_FIELD) in superseded_pair_ids:
+            correction.pop(MANUAL_PAIR_FIELD, None)
     effective_batch: dict[str, dict[str, str]] = {}
     for transaction_id, correction_patch in normalized_patches.items():
         merged_correction = {
-            **existing_corrections.get(transaction_id, {}),
+            **merged_corrections.get(transaction_id, {}),
             **correction_patch,
         }
+        effective_correction = dict(merged_correction)
+        if correction_patch.get(MANUAL_PAIR_FIELD) == "":
+            merged_correction.pop(MANUAL_PAIR_FIELD, None)
+            effective_correction[MANUAL_PAIR_FIELD] = ""
         if "needs_review" not in merged_correction:
             merged_correction["needs_review"] = ledger_by_id[transaction_id].get(
                 "needs_review", "true"
             )
-        validate_correction(transaction_id, merged_correction, config)
+            effective_correction["needs_review"] = merged_correction["needs_review"]
+        validate_correction(transaction_id, effective_correction, config)
         _validate_resolved_state(
             transaction_id,
             ledger_by_id[transaction_id],
-            merged_correction,
+            effective_correction,
         )
-        effective_batch[transaction_id] = merged_correction
+        effective_batch[transaction_id] = effective_correction
         merged_corrections[transaction_id] = merged_correction
 
     source_rows = state.source_rows
@@ -632,12 +696,35 @@ def apply_correction_operation(
         expected_generation_hashes=expected_generation,
     )
     return CorrectionOperationResult(
-        applied_count=len(normalized_patches),
+        applied_count=len(requested_transaction_ids),
         remaining_review_count=len(review_rows),
-        transaction_ids=sorted(normalized_patches),
+        transaction_ids=sorted(requested_transaction_ids),
         ledger_rows=corrected_ledger,
         rules_added=rules_added,
     )
+
+
+def _supersedes_manual_pair(patch: Mapping[str, str]) -> bool:
+    return ("flow_type" in patch and patch["flow_type"] != "internal_transfer") or (
+        "category" in patch and patch["category"] != "Internal Transfer"
+    )
+
+
+def _manual_pair_reset_patch(row: Mapping[str, str]) -> dict[str, str]:
+    reasons = [
+        *review_reason_tokens(row.get("review_reasons", "")),
+        REVIEW_REASON_ACCOUNTING_FLOW,
+        REVIEW_REASON_CATEGORY,
+    ]
+    return {
+        "category": "Unknown",
+        "flow_type": "unresolved",
+        "confidence": "0.00",
+        "reason": _MANUAL_PAIR_SUPERSEDED_REASON,
+        "needs_review": "true",
+        "review_reasons": ";".join(dict.fromkeys(reasons)),
+        MANUAL_PAIR_FIELD: "",
+    }
 
 
 def _validate_resolved_state(
