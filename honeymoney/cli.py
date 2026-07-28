@@ -2990,7 +2990,18 @@ def _manual_pair_review(argv: list[str]) -> int:
             for transaction_id, correction in corrections.items()
             if correction.get(MANUAL_PAIR_FIELD) == proposed_pair_id
         }
-        if nominated_correction_groups or proposed_correction_members:
+        proposed_marker = f"{MANUAL_PAIR_FLAG_PREFIX}{proposed_pair_id}"
+        proposed_ledger_members = {
+            row["transaction_id"]
+            for row in ledger_rows
+            if row.get("transaction_id")
+            and proposed_marker in row.get("flags", "").split(";")
+        }
+        if (
+            nominated_correction_groups
+            or proposed_correction_members
+            or proposed_ledger_members
+        ):
             raise ManualPairError(
                 "manual_pair_conflict",
                 "A nominated transaction has conflicting stored pair membership.",

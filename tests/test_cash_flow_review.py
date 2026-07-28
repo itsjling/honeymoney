@@ -12,7 +12,7 @@ from unittest.mock import Mock, patch
 
 from honeymoney.csv_artifacts import csv_document
 from honeymoney.identity_state import identity_manifest_path, load_identity_state
-from honeymoney.manual_pairs import manual_pair_id
+from honeymoney.manual_pairs import MANUAL_PAIR_FLAG_PREFIX, manual_pair_id
 from honeymoney.overlap import overlap_manifest_path, source_occurrences_path
 from honeymoney.schema import SOURCE_OCCURRENCE_COLUMNS
 
@@ -1510,6 +1510,54 @@ class CashFlowReviewTest(unittest.TestCase):
                 self.assertNotIn("SYNTHETIC", replayed.stdout)
                 self.assertNotIn("100.00", replayed.stdout)
                 self.assertEqual(self._pair_artifacts(root), before)
+
+    def test_manual_pair_rejects_ledger_only_membership_without_writing(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._setup_workspace(tmp)
+            self._import_rows(
+                root,
+                "ledger-only-pair.csv",
+                [
+                    "2026-05-04,SYNTHETIC PAIR OUT,-100.00,HKD",
+                    "2026-05-04,SYNTHETIC PAIR IN,100.00,HKD",
+                    "2026-05-05,SYNTHETIC EXTRA,-30.00,HKD",
+                ],
+            )
+            ledger_path = root / "output" / "categorized.csv"
+            with ledger_path.open(newline="", encoding="utf-8") as handle:
+                reader = csv.DictReader(handle)
+                fieldnames = list(reader.fieldnames or [])
+                rows = list(reader)
+            rows_by_merchant = {row["merchant"]: row for row in rows}
+            pair_ids = [
+                rows_by_merchant["SYNTHETIC PAIR OUT"]["transaction_id"],
+                rows_by_merchant["SYNTHETIC PAIR IN"]["transaction_id"],
+            ]
+            pair_id = manual_pair_id(pair_ids)
+            rows_by_merchant["SYNTHETIC EXTRA"]["flags"] = (
+                f"{MANUAL_PAIR_FLAG_PREFIX}{pair_id}"
+            )
+            with ledger_path.open("w", newline="", encoding="utf-8") as handle:
+                writer = csv.DictWriter(handle, fieldnames=fieldnames)
+                writer.writeheader()
+                writer.writerows(rows)
+            before = self._pair_artifacts(root)
+
+            rejected = self._run_cli(
+                ["review", "pair", *pair_ids, "--yes", "--json"],
+                cwd=root,
+            )
+
+            self.assertEqual(rejected.returncode, 2, rejected.stderr)
+            self.assertEqual(
+                json.loads(rejected.stdout)["errors"][0]["code"],
+                "manual_pair_conflict",
+            )
+            self.assertNotIn("SYNTHETIC", rejected.stdout)
+            self.assertNotIn("100.00", rejected.stdout)
+            self.assertEqual(self._pair_artifacts(root), before)
 
     def test_manual_pair_rejects_stale_same_sign_and_conflicting_rows_atomically(
         self,
