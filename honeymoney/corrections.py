@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -35,7 +36,13 @@ from honeymoney.overlap import (
     validate_overlap_agreement,
 )
 from honeymoney.overlap_contracts import OverlapManifest
-from honeymoney.persistence import persist_generation
+from honeymoney.persistence import (
+    GenerationConflictError,
+    configured_generation_paths,
+    generation_hashes,
+    generation_member_paths,
+    persist_generation,
+)
 from honeymoney.reconciliation import reconcile_ledger
 from honeymoney.review_state import (
     REVIEW_REASON_CATEGORY,
@@ -464,17 +471,29 @@ def apply_correction_operation(
     correction_patches: dict[str, dict[str, str]],
     *,
     remembered_rules: list[dict[str, object]] | None = None,
+    ledger_precondition: Callable[[list[dict[str, str]]], None] | None = None,
 ) -> CorrectionOperationResult:
     """Validate, merge, reconcile, and recoverably persist a correction operation."""
     corrections_value = config.get("corrections")
     if not corrections_value:
         raise ValueError("Config must define a corrections CSV path")
     corrections_path = Path(str(corrections_value))
+    generation_paths = generation_member_paths(
+        categorized_path,
+        configured_generation_paths(config),
+    )
+    expected_generation = generation_hashes(generation_paths)
     state = load_configured_identity_state(categorized_path, config)
+    if generation_hashes(generation_paths) != expected_generation:
+        raise GenerationConflictError(
+            "The ledger generation changed while this operation was reading it"
+        )
     ledger_rows = _normalize_ledger_rows(state)
     ambiguous_ids = ambiguous_legacy_transaction_ids(ledger_rows)
     if ambiguous_ids:
         raise IdentityError("identity_legacy_transaction_id_ambiguous")
+    if ledger_precondition is not None:
+        ledger_precondition([dict(row) for row in ledger_rows])
     ledger_by_id = {
         row["transaction_id"]: row for row in ledger_rows if row.get("transaction_id")
     }
@@ -522,9 +541,18 @@ def apply_correction_operation(
         ledger_rows = canonical.rows
         operation_overlap_manifest = canonical.manifest
         operation_overlap_result = canonical
-        projection = project_corrections(canonical, effective_batch)
-        effective_batch = projection.corrections
-        migration_ambiguous_ids = projection.ambiguous_transaction_ids
+        batch_projection = project_corrections(canonical, effective_batch)
+        correction_projection = project_corrections(canonical, merged_corrections)
+        effective_batch = batch_projection.corrections
+        merged_corrections = correction_projection.corrections
+        migration_ambiguous_ids = tuple(
+            sorted(
+                {
+                    *batch_projection.ambiguous_transaction_ids,
+                    *correction_projection.ambiguous_transaction_ids,
+                }
+            )
+        )
     elif any(row.get("canonical_group_id") for row in ledger_rows):
         operation_overlap_result = canonicalize_overlaps(
             source_rows, ledger_rows, operation_overlap_manifest
@@ -598,7 +626,11 @@ def apply_correction_operation(
         rules_document["rules"] = existing_rules
         files[rules_path] = json.dumps(rules_document, indent=2, sort_keys=True) + "\n"
 
-    persist_generation(categorized_path, files)
+    persist_generation(
+        categorized_path,
+        files,
+        expected_generation_hashes=expected_generation,
+    )
     return CorrectionOperationResult(
         applied_count=len(normalized_patches),
         remaining_review_count=len(review_rows),

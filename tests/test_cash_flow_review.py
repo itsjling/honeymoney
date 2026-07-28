@@ -1,11 +1,19 @@
 import csv
+import io
 import json
 import os
 import subprocess
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
+from unittest.mock import patch
+
+from honeymoney.csv_artifacts import csv_document
+from honeymoney.identity_state import identity_manifest_path, load_identity_state
+from honeymoney.overlap import overlap_manifest_path, source_occurrences_path
+from honeymoney.schema import SOURCE_OCCURRENCE_COLUMNS
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 OFFLINE_OLLAMA_HOOK = REPO_ROOT / "tests" / "offline_ollama_hook"
@@ -19,9 +27,13 @@ class CashFlowReviewTest(unittest.TestCase):
         cwd: Path,
         input_text: str | None = None,
         ollama_mode: str | None = None,
+        filesystem_fault: str | None = None,
     ) -> subprocess.CompletedProcess[str]:
         env = dict(os.environ)
         python_paths = [str(REPO_ROOT)]
+        if filesystem_fault is not None:
+            python_paths.insert(0, str(REPO_ROOT / "tests" / "fault_injection"))
+            env["HONEYMONEY_TEST_FS_FAULT"] = filesystem_fault
         if ollama_mode is not None:
             python_paths.insert(0, str(OFFLINE_OLLAMA_HOOK))
             env["HONEYMONEY_TEST_OLLAMA_MODE"] = ollama_mode
@@ -200,6 +212,506 @@ class CashFlowReviewTest(unittest.TestCase):
             self.assertEqual(persisted["category"], "Income")
             self.assertEqual(persisted["flow_type"], "income")
             self.assertEqual(persisted["flow_source"], "correction")
+
+    def test_batch_review_json_is_atomic_and_idempotent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._setup_workspace(tmp)
+            self._import_rows(
+                root,
+                "batch.csv",
+                [
+                    "2026-05-04,SYNTHETIC BATCH CREDIT,700.00,HKD",
+                    "2026-05-05,SYNTHETIC BATCH DEBIT,-20.00,HKD",
+                ],
+            )
+            rows = {row["merchant"]: row for row in self._ledger(root)}
+            decisions = root / "decisions.json"
+            decisions.write_text(
+                json.dumps(
+                    [
+                        {
+                            "transaction_id": rows["SYNTHETIC BATCH CREDIT"][
+                                "transaction_id"
+                            ],
+                            "decision": "income",
+                        },
+                        {
+                            "transaction_id": rows["SYNTHETIC BATCH DEBIT"][
+                                "transaction_id"
+                            ],
+                            "decision": "expense",
+                        },
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            applied = self._run_cli(
+                ["review", "--file", str(decisions), "--json"],
+                cwd=root,
+            )
+
+            self.assertEqual(applied.returncode, 0, applied.stderr)
+            payload = json.loads(applied.stdout)
+            self.assertEqual(payload["schema_version"], 2)
+            self.assertEqual(payload["command"], "review")
+            self.assertEqual(payload["status"], "success")
+            self.assertEqual(payload["data"]["applied_count"], 2)
+            self.assertEqual(payload["data"]["unchanged_count"], 0)
+            self.assertEqual(payload["data"]["rejected_count"], 0)
+            self.assertNotIn("SYNTHETIC BATCH", applied.stdout)
+            self.assertNotIn("batch.csv", applied.stdout)
+            after_rows = {row["merchant"]: row for row in self._ledger(root)}
+            income = after_rows["SYNTHETIC BATCH CREDIT"]
+            expense = after_rows["SYNTHETIC BATCH DEBIT"]
+            self.assertEqual(
+                (income["category"], income["flow_type"]), ("Income", "income")
+            )
+            self.assertEqual(income["review_reasons"], "")
+            self.assertEqual(expense["flow_type"], "expense")
+            self.assertNotIn("accounting_flow", expense["review_reasons"].split(";"))
+            self.assertIn("category_decision", expense["review_reasons"].split(";"))
+            first_artifacts = self._artifacts(root)
+
+            repeated = self._run_cli(
+                ["review", "--file", str(decisions), "--json"],
+                cwd=root,
+            )
+
+            self.assertEqual(repeated.returncode, 0, repeated.stderr)
+            repeated_data = json.loads(repeated.stdout)["data"]
+            self.assertEqual(repeated_data["applied_count"], 0)
+            self.assertEqual(repeated_data["unchanged_count"], 2)
+            self.assertEqual(repeated_data["rejected_count"], 0)
+            self.assertEqual(self._artifacts(root), first_artifacts)
+
+    def test_batch_review_keeps_pre_migration_ids_idempotent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._setup_workspace(tmp)
+            self._import_rows(
+                root,
+                "legacy-batch.csv",
+                ["2026-05-04,SYNTHETIC LEGACY DEBIT,-20.00,HKD"],
+            )
+            categorized_path = root / "output" / "categorized.csv"
+            state = load_identity_state(categorized_path)
+            [source_row] = state.source_rows
+            source_transaction_id = source_row["transaction_id"]
+            categorized_path.write_text(
+                csv_document(SOURCE_OCCURRENCE_COLUMNS, [source_row]),
+                encoding="utf-8",
+            )
+            source_occurrences_path(categorized_path).unlink()
+            overlap_manifest_path(categorized_path).unlink()
+            decisions = root / "legacy-decisions.json"
+            decisions.write_text(
+                json.dumps(
+                    [
+                        {
+                            "transaction_id": source_transaction_id,
+                            "decision": "expense",
+                        }
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            first = self._run_cli(
+                ["review", "--file", str(decisions), "--json"],
+                cwd=root,
+            )
+            second = self._run_cli(
+                ["review", "--file", str(decisions), "--json"],
+                cwd=root,
+            )
+
+            self.assertEqual(first.returncode, 0, first.stderr)
+            self.assertEqual(second.returncode, 0, second.stderr)
+            self.assertEqual(json.loads(first.stdout)["data"]["applied_count"], 1)
+            second_data = json.loads(second.stdout)["data"]
+            self.assertEqual(second_data["applied_count"], 0)
+            self.assertEqual(second_data["unchanged_count"], 1)
+            [canonical_row] = self._ledger(root)
+            self.assertNotEqual(
+                canonical_row["transaction_id"],
+                source_transaction_id,
+            )
+            with (root / "corrections.csv").open(
+                newline="",
+                encoding="utf-8",
+            ) as handle:
+                [correction] = csv.DictReader(handle)
+            self.assertEqual(
+                correction["transaction_id"],
+                canonical_row["transaction_id"],
+            )
+
+    def test_batch_review_accepts_csv_and_reports_counts_without_row_text(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._setup_workspace(tmp)
+            self._import_rows(
+                root,
+                "csv-batch.csv",
+                ["2026-05-04,PRIVATE-SHAPED SYNTHETIC DEBIT,-10.00,HKD"],
+            )
+            [row] = self._ledger(root)
+            decisions = root / "decisions.csv"
+            decisions.write_text(
+                f"transaction_id,decision\n{row['transaction_id']},expense\n",
+                encoding="utf-8",
+            )
+
+            result = self._run_cli(
+                ["review", "--file", str(decisions)],
+                cwd=root,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn(
+                "Batch review complete: 1 applied, 0 unchanged, 0 rejected",
+                result.stdout,
+            )
+            self.assertNotIn(row["transaction_id"], result.stdout)
+            self.assertNotIn("PRIVATE-SHAPED", result.stdout)
+            [updated] = self._ledger(root)
+            self.assertEqual(updated["flow_type"], "expense")
+
+    def test_batch_review_rejects_invalid_and_stale_entries_before_writing(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._setup_workspace(tmp)
+            self._import_rows(
+                root,
+                "rejected.csv",
+                [
+                    "2026-05-04,SYNTHETIC VALID DEBIT,-10.00,HKD",
+                    "2026-05-05,SYNTHETIC OTHER DEBIT,-20.00,HKD",
+                ],
+            )
+            rows = self._ledger(root)
+            before = self._artifacts(root)
+            decisions = root / "invalid.json"
+            decisions.write_text(
+                json.dumps(
+                    [
+                        {
+                            "transaction_id": rows[0]["transaction_id"],
+                            "decision": "expense",
+                        },
+                        {
+                            "transaction_id": rows[1]["transaction_id"],
+                            "decision": "not-a-decision",
+                        },
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            invalid = self._run_cli(
+                ["review", "--file", str(decisions), "--json"],
+                cwd=root,
+            )
+
+            self.assertEqual(invalid.returncode, 2, invalid.stderr)
+            payload = json.loads(invalid.stdout)
+            self.assertEqual(
+                payload["data"],
+                {
+                    "applied_count": 0,
+                    "unchanged_count": 0,
+                    "rejected_count": 2,
+                },
+            )
+            self.assertEqual(payload["errors"][0]["code"], "unsupported_decision")
+            self.assertNotIn("SYNTHETIC", invalid.stdout)
+            self.assertNotIn("rejected.csv", invalid.stdout)
+            self.assertEqual(self._artifacts(root), before)
+
+            invalid_csv = root / "invalid.csv"
+            invalid_csv.write_text(
+                "transaction_id,decision\n"
+                f"{rows[0]['transaction_id']},expense,extra\n"
+                f"{rows[1]['transaction_id']},expense\n",
+                encoding="utf-8",
+            )
+            invalid_csv_result = self._run_cli(
+                ["review", "--file", str(invalid_csv), "--json"],
+                cwd=root,
+            )
+            self.assertEqual(
+                invalid_csv_result.returncode,
+                2,
+                invalid_csv_result.stderr,
+            )
+            invalid_csv_payload = json.loads(invalid_csv_result.stdout)
+            self.assertEqual(invalid_csv_payload["data"]["rejected_count"], 2)
+            self.assertEqual(
+                invalid_csv_payload["errors"][0]["code"],
+                "invalid_entry",
+            )
+            self.assertEqual(self._artifacts(root), before)
+
+            resolved = root / "resolved.json"
+            resolved.write_text(
+                json.dumps(
+                    [
+                        {
+                            "transaction_id": rows[0]["transaction_id"],
+                            "decision": "expense",
+                        }
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            first = self._run_cli(
+                ["review", "--file", str(resolved), "--json"],
+                cwd=root,
+            )
+            self.assertEqual(first.returncode, 0, first.stderr)
+            after_first = self._artifacts(root)
+            stale = root / "stale.json"
+            stale.write_text(
+                json.dumps(
+                    [
+                        {
+                            "transaction_id": rows[0]["transaction_id"],
+                            "decision": "refund",
+                        },
+                        {
+                            "transaction_id": "stale-synthetic-id",
+                            "decision": "expense",
+                        },
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            stale_result = self._run_cli(
+                ["review", "--file", str(stale), "--json"],
+                cwd=root,
+            )
+
+            self.assertEqual(stale_result.returncode, 2, stale_result.stderr)
+            stale_payload = json.loads(stale_result.stdout)
+            self.assertEqual(stale_payload["data"]["rejected_count"], 2)
+            self.assertEqual(
+                {error["code"] for error in stale_payload["errors"]},
+                {"stale_review_state", "stale_transaction_id"},
+            )
+            self.assertNotIn("stale-synthetic-id", stale_result.stdout)
+            self.assertEqual(self._artifacts(root), after_first)
+
+    def test_batch_review_does_not_overwrite_a_newer_decision(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._setup_workspace(tmp)
+            self._import_rows(
+                root,
+                "overlap.csv",
+                ["2026-05-04,SYNTHETIC OVERLAP DEBIT,-10.00,HKD"],
+            )
+            [row] = self._ledger(root)
+            decisions = root / "overlap-decisions.json"
+            decisions.write_text(
+                json.dumps(
+                    [
+                        {
+                            "transaction_id": row["transaction_id"],
+                            "decision": "expense",
+                        }
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            import honeymoney.cli as cli
+
+            original_apply = cli.apply_correction_operation
+            competing_patch = {
+                row["transaction_id"]: {
+                    "category": "Internal Transfer",
+                    "flow_type": "internal_transfer",
+                    "confidence": "1.00",
+                    "reason": "Synthetic competing review",
+                    "needs_review": "false",
+                    "review_reasons": "",
+                }
+            }
+            competed = False
+
+            def apply_after_competing_review(
+                config, categorized_path, patches, **kwargs
+            ):
+                nonlocal competed
+                if not competed:
+                    competed = True
+                    original_apply(config, categorized_path, competing_patch)
+                return original_apply(config, categorized_path, patches, **kwargs)
+
+            prior_cwd = Path.cwd()
+            output = io.StringIO()
+            try:
+                os.chdir(root)
+                with (
+                    patch.object(
+                        cli,
+                        "apply_correction_operation",
+                        apply_after_competing_review,
+                    ),
+                    patch.object(
+                        sys,
+                        "argv",
+                        [
+                            "honeymoney",
+                            "review",
+                            "--file",
+                            str(decisions),
+                            "--json",
+                        ],
+                    ),
+                    redirect_stdout(output),
+                ):
+                    return_code = cli.run()
+            finally:
+                os.chdir(prior_cwd)
+
+            self.assertEqual(return_code, 2)
+            payload = json.loads(output.getvalue())
+            self.assertEqual(payload["data"]["rejected_count"], 1)
+            self.assertIn(
+                payload["errors"][0]["code"],
+                {"stale_review_state", "stale_batch_generation"},
+            )
+            [persisted] = self._ledger(root)
+            self.assertEqual(persisted["flow_type"], "internal_transfer")
+            self.assertEqual(persisted["reason"], "Synthetic competing review")
+
+    def test_batch_review_does_not_overwrite_new_hidden_source_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._setup_workspace(tmp)
+            self._import_rows(
+                root,
+                "hidden-state.csv",
+                ["2026-05-04,SYNTHETIC HIDDEN STATE,-10.00,HKD"],
+            )
+            [row] = self._ledger(root)
+            decisions = root / "hidden-state-decisions.json"
+            decisions.write_text(
+                json.dumps(
+                    [
+                        {
+                            "transaction_id": row["transaction_id"],
+                            "decision": "expense",
+                        }
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            empty_statement = root / "empty-source.csv"
+            empty_statement.write_text(
+                "Date,Description,Amount,Currency\n",
+                encoding="utf-8",
+            )
+            manifest_path = identity_manifest_path(root / "output" / "categorized.csv")
+            prior_manifest = manifest_path.read_bytes()
+
+            import honeymoney.cli as cli
+            import honeymoney.corrections as corrections
+
+            original_persist = corrections.persist_generation
+            competed = False
+
+            def persist_after_empty_import(authoritative_path, files, **kwargs) -> None:
+                nonlocal competed
+                if not competed:
+                    competed = True
+                    imported = self._run_cli(
+                        [
+                            "import",
+                            str(empty_statement),
+                            "--no-interactive",
+                        ],
+                        cwd=root,
+                    )
+                    self.assertEqual(imported.returncode, 0, imported.stderr)
+                original_persist(authoritative_path, files, **kwargs)
+
+            prior_cwd = Path.cwd()
+            output = io.StringIO()
+            try:
+                os.chdir(root)
+                with (
+                    patch.object(
+                        corrections,
+                        "persist_generation",
+                        persist_after_empty_import,
+                    ),
+                    patch.object(
+                        sys,
+                        "argv",
+                        [
+                            "honeymoney",
+                            "review",
+                            "--file",
+                            str(decisions),
+                            "--json",
+                        ],
+                    ),
+                    redirect_stdout(output),
+                ):
+                    return_code = cli.run()
+            finally:
+                os.chdir(prior_cwd)
+
+            self.assertEqual(return_code, 2)
+            payload = json.loads(output.getvalue())
+            self.assertEqual(
+                payload["errors"][0]["code"],
+                "stale_batch_generation",
+            )
+            self.assertNotEqual(manifest_path.read_bytes(), prior_manifest)
+            [persisted] = self._ledger(root)
+            self.assertEqual(persisted["flow_type"], "unresolved")
+
+    def test_batch_review_recovery_restores_the_prior_generation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._setup_workspace(tmp)
+            self._import_rows(
+                root,
+                "recovery.csv",
+                ["2026-05-04,SYNTHETIC RECOVERY DEBIT,-10.00,HKD"],
+            )
+            [row] = self._ledger(root)
+            decisions = root / "recovery-decisions.json"
+            decisions.write_text(
+                json.dumps(
+                    [
+                        {
+                            "transaction_id": row["transaction_id"],
+                            "decision": "expense",
+                        }
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            before = self._artifacts(root)
+
+            failed = self._run_cli(
+                ["review", "--file", str(decisions), "--json"],
+                cwd=root,
+                filesystem_fault="replace-before:categorized.csv",
+            )
+
+            self.assertEqual(failed.returncode, 2, failed.stderr)
+            self.assertEqual(self._artifacts(root), before)
+            recovered = self._run_cli(
+                ["review", "--file", str(decisions), "--json"],
+                cwd=root,
+            )
+            self.assertEqual(recovered.returncode, 0, recovered.stderr)
+            self.assertEqual(json.loads(recovered.stdout)["data"]["applied_count"], 1)
 
     def test_invalid_review_combinations_and_empty_selection_do_not_write(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
