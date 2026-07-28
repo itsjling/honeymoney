@@ -1780,7 +1780,7 @@ def _config_command(argv: list[str]) -> int:
 
     config_path = _existing_config_path(args.config_path)
     config = _read_config_document(config_path)
-    _recover_config_generation(config)
+    _recover_config_path_generation(config_path, config)
     artifacts = {"config_json": str(config_path)}
 
     if args.action is None:
@@ -2123,7 +2123,7 @@ def _setup_command(argv: list[str]) -> int:
     root = _setup_root(args.root)
     existing_config_path = root / "config.json"
     if existing_config_path.exists():
-        _recover_config_generation(_read_config_document(existing_config_path))
+        _recover_config_path_generation(existing_config_path)
     _write_starter_workspace(root, force=args.force)
     rate_cache_path = (root / "rates.json").resolve()
     if args.json:
@@ -4603,6 +4603,17 @@ def _recover_config_generation(config: dict[str, Any]) -> None:
             Path(output),
             allowed_generation_paths=configured_generation_paths(config),
         )
+
+
+def _recover_config_path_generation(
+    config_path: Path,
+    config: dict[str, Any] | None = None,
+) -> None:
+    recovery_config = dict(
+        config if config is not None else _read_config_document(config_path)
+    )
+    _resolve_rate_cache_config(recovery_config, config_path.resolve())
+    _recover_config_generation(recovery_config)
 
 
 def _identity_diagnostic_warning(diagnostic: Any) -> str:
