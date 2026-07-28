@@ -2847,6 +2847,16 @@ def _reconcile_command(argv: list[str]) -> int:
         f"{overlap_diagnostic['consolidated_occurrence_count']} consolidated, "
         f"{overlap_diagnostic['ambiguous_group_count']} ambiguous groups"
     )
+    for account in summary["balance_reconciliation"].values():
+        for statement in account["statements"]:
+            for conflict in statement.get("conflicts", []):
+                print(
+                    "Balance issue: "
+                    f"source={conflict['source_file'] or '(unknown)'} "
+                    f"page={conflict['source_page'] or '(unknown)'} "
+                    f"section={conflict['statement_section'] or '(none)'} "
+                    f"field={conflict['field']}"
+                )
     return 0
 
 

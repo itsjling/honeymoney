@@ -5,6 +5,8 @@
 - Issue: GitHub #32
 - Narrows: ADR 0001 for the public canonical ledger and ADR 0002 for canonical
   local-memory evidence
+- Amended: ADR 0004 adds valuation and review-reason fields; GitHub #60 adds
+  statement-section evidence
 
 ## Context
 
@@ -82,7 +84,7 @@ after later source revisions.
 The exact hidden source header is:
 
 ```text
-transaction_id,source_id,source_namespace_id,source_revision,source_record_id,date,transaction_date,posting_date,account_id,account,account_type,institution,country,original_amount,original_currency,posted_amount,posted_currency,amount_hkd,statement_opening_balance,statement_closing_balance,merchant,original_description,category,flow_type,flow_source,transfer_group_id,paired_transaction_id,reconciliation_status,reconciliation_confidence,owner,payment_method,confidence,needs_review,reason,flags,notes,source_file,source_page,source_row
+transaction_id,source_id,source_namespace_id,source_revision,source_record_id,date,transaction_date,posting_date,account_id,account,account_type,institution,country,original_amount,original_currency,posted_amount,posted_currency,amount_hkd,valuation_source,valuation_status,statement_opening_balance,statement_closing_balance,statement_section,merchant,original_description,category,flow_type,flow_source,transfer_group_id,paired_transaction_id,reconciliation_status,reconciliation_confidence,owner,payment_method,confidence,needs_review,review_reasons,reason,flags,notes,source_file,source_page,source_row
 ```
 
 ### Hidden overlap manifest
@@ -140,13 +142,13 @@ file is reconstructed from canonical rows.
 The exact `categorized.csv` header is:
 
 ```text
-transaction_id,canonical_group_id,canonical_slot,provenance_status,source_occurrence_count,source_id,source_namespace_id,source_revision,source_record_id,date,transaction_date,posting_date,account_id,account,account_type,institution,country,original_amount,original_currency,posted_amount,posted_currency,amount_hkd,statement_opening_balance,statement_closing_balance,merchant,original_description,category,flow_type,flow_source,transfer_group_id,paired_transaction_id,reconciliation_status,reconciliation_confidence,owner,payment_method,confidence,needs_review,reason,flags,notes,source_file,source_page,source_row
+transaction_id,canonical_group_id,canonical_slot,provenance_status,source_occurrence_count,source_id,source_namespace_id,source_revision,source_record_id,date,transaction_date,posting_date,account_id,account,account_type,institution,country,original_amount,original_currency,posted_amount,posted_currency,amount_hkd,valuation_source,valuation_status,statement_opening_balance,statement_closing_balance,statement_section,merchant,original_description,category,flow_type,flow_source,transfer_group_id,paired_transaction_id,reconciliation_status,reconciliation_confidence,owner,payment_method,confidence,needs_review,review_reasons,reason,flags,notes,source_file,source_page,source_row
 ```
 
 The exact `review_needed.csv` header is:
 
 ```text
-transaction_id,canonical_group_id,canonical_slot,provenance_status,source_occurrence_count,source_id,source_namespace_id,source_revision,source_record_id,date,transaction_date,posting_date,account_id,account,account_type,institution,country,original_amount,original_currency,posted_amount,posted_currency,amount_hkd,statement_opening_balance,statement_closing_balance,merchant,original_description,suggested_category,suggested_flow_type,transfer_group_id,paired_transaction_id,reconciliation_status,suggested_owner,suggested_payment_method,category,flow_type,owner,payment_method,confidence,reason,flags,notes,source_file,source_page,source_row
+transaction_id,canonical_group_id,canonical_slot,provenance_status,source_occurrence_count,source_id,source_namespace_id,source_revision,source_record_id,date,transaction_date,posting_date,account_id,account,account_type,institution,country,original_amount,original_currency,posted_amount,posted_currency,amount_hkd,valuation_source,valuation_status,statement_opening_balance,statement_closing_balance,statement_section,merchant,original_description,suggested_category,suggested_flow_type,transfer_group_id,paired_transaction_id,reconciliation_status,suggested_owner,suggested_payment_method,category,flow_type,owner,payment_method,confidence,review_reasons,review_reason_labels,reason,flags,notes,source_file,source_page,source_row
 ```
 
 Canonical rows populate all four. Their four source identity fields and three

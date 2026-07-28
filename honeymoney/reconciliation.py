@@ -9,6 +9,7 @@ from typing import Mapping
 from honeymoney.classification_policy import trusted_accounting_provenance
 from honeymoney.contracts import (
     AccountBalance,
+    BalanceConflict,
     BalanceReconciliation,
     Config,
     ReconciliationSummary,
@@ -705,7 +706,7 @@ def _row_date(row: dict[str, str]) -> date | None:
 def _balance_reconciliation(
     rows: list[dict[str, str]],
 ) -> BalanceReconciliation:
-    groups: dict[tuple[str, str, str, str], list[dict[str, str]]] = {}
+    groups: dict[tuple[str, str, str, str, str], list[dict[str, str]]] = {}
     for row in rows:
         account_id = row.get("account_id", "")
         if not account_id:
@@ -713,9 +714,17 @@ def _balance_reconciliation(
         source_id = row.get("source_id", "").strip()
         source_kind = "source_id" if source_id else "source_file"
         source_value = source_id or row.get("source_file", "")
+        statement_section = row.get("statement_section", "").strip()
         posted_currency = row.get("posted_currency", "").strip().upper()
         groups.setdefault(
-            (account_id, source_kind, source_value, posted_currency), []
+            (
+                account_id,
+                source_kind,
+                source_value,
+                statement_section,
+                posted_currency,
+            ),
+            [],
         ).append(row)
 
     accounts: BalanceReconciliation = {}
@@ -723,6 +732,7 @@ def _balance_reconciliation(
         account_id,
         _source_kind,
         _source_value,
+        statement_section,
         posted_currency,
     ), statement_rows in sorted(groups.items()):
         source_files = sorted(
@@ -734,6 +744,7 @@ def _balance_reconciliation(
         )
         statement: StatementBalance = {
             "source_file": source_files[0] if source_files else "",
+            "statement_section": statement_section,
             "posted_currency": posted_currency,
             "status": "unavailable",
             "result": "unavailable",
@@ -750,6 +761,12 @@ def _balance_reconciliation(
         if _has_statement_balance_conflict(statement_rows, "closing"):
             closing = None
             closing_problem = "Closing balances conflict."
+        conflicts = [
+            *_statement_balance_conflicts(statement_rows, "opening"),
+            *_statement_balance_conflicts(statement_rows, "closing"),
+        ]
+        if conflicts:
+            statement["conflicts"] = conflicts
         if opening_problem or closing_problem:
             problems = [
                 problem for problem in (opening_problem, closing_problem) if problem
@@ -825,8 +842,70 @@ def _balance_reconciliation(
 
 
 def _has_statement_balance_conflict(rows: list[dict[str, str]], kind: str) -> bool:
+    return bool(_statement_balance_conflicts(rows, kind))
+
+
+def _statement_balance_conflicts(
+    rows: list[dict[str, str]],
+    kind: str,
+) -> list[BalanceConflict]:
     marker = f"statement_{kind}_balance_conflict"
-    return any(marker in row.get("flags", "").split(";") for row in rows)
+    page_marker = f"{marker}_page_"
+    field = f"statement_{kind}_balance"
+    raw_values = [
+        row.get(field, "").strip() for row in rows if row.get(field, "").strip()
+    ]
+    endpoint_conflict = _balance_values_conflict(raw_values)
+    contexts: set[tuple[str, str, str]] = set()
+    for row in rows:
+        flags = row.get("flags", "").split(";")
+        marked = marker in flags
+        if not marked and not (endpoint_conflict and row.get(field, "").strip()):
+            continue
+        marked_pages = sorted(
+            {
+                flag.removeprefix(page_marker)
+                for flag in flags
+                if flag.startswith(page_marker)
+                and flag.removeprefix(page_marker).isdigit()
+            },
+            key=int,
+        )
+        pages = marked_pages or [row.get("source_page", "")]
+        for page in pages:
+            contexts.add(
+                (
+                    _safe_source_label(row.get("source_file", "")),
+                    page,
+                    row.get("statement_section", ""),
+                )
+            )
+    return [
+        {
+            "source_file": source_file,
+            "source_page": source_page,
+            "statement_section": statement_section,
+            "field": field,
+        }
+        for source_file, source_page, statement_section in sorted(contexts)
+    ]
+
+
+def _balance_values_conflict(raw_values: list[str]) -> bool:
+    values: set[Decimal] = set()
+    for raw_value in raw_values:
+        try:
+            value = Decimal(raw_value)
+        except (InvalidOperation, ValueError):
+            return False
+        if not value.is_finite():
+            return False
+        values.add(value)
+    return len(values) > 1
+
+
+def _safe_source_label(source_file: str) -> str:
+    return source_file.replace("\\", "/").rsplit("/", 1)[-1][:128]
 
 
 def _statement_balance(

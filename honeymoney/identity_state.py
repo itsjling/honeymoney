@@ -39,6 +39,8 @@ from honeymoney.overlap_contracts import OverlapManifest
 from honeymoney.persistence import configured_generation_paths, recover_generation
 from honeymoney.schema import (
     CATEGORIZED_COLUMNS,
+    PRE_STATEMENT_SECTION_CATEGORIZED_COLUMNS,
+    PRE_STATEMENT_SECTION_SOURCE_OCCURRENCE_COLUMNS,
     PREVIOUS_CATEGORIZED_COLUMNS,
     PREVIOUS_SOURCE_OCCURRENCE_COLUMNS,
     SOURCE_OCCURRENCE_COLUMNS,
@@ -133,9 +135,18 @@ def load_identity_state(
         occurrence_header = _ledger_header(occurrences_path)
         if (
             not manifest_exists
-            or header not in (CATEGORIZED_COLUMNS, PREVIOUS_CATEGORIZED_COLUMNS)
+            or header
+            not in (
+                CATEGORIZED_COLUMNS,
+                PRE_STATEMENT_SECTION_CATEGORIZED_COLUMNS,
+                PREVIOUS_CATEGORIZED_COLUMNS,
+            )
             or occurrence_header
-            not in (SOURCE_OCCURRENCE_COLUMNS, PREVIOUS_SOURCE_OCCURRENCE_COLUMNS)
+            not in (
+                SOURCE_OCCURRENCE_COLUMNS,
+                PRE_STATEMENT_SECTION_SOURCE_OCCURRENCE_COLUMNS,
+                PREVIOUS_SOURCE_OCCURRENCE_COLUMNS,
+            )
         ):
             raise IdentityError("identity_manifest_invalid")
         rows = read_csv_artifact(categorized_path, CATEGORIZED_COLUMNS).rows
@@ -182,12 +193,16 @@ def load_identity_state(
             overlap_manifest_document=overlap_document,
             overlap_migration_required=overlap_migration_required,
             ledger_schema_migration_required=(
-                header == PREVIOUS_CATEGORIZED_COLUMNS
-                or occurrence_header == PREVIOUS_SOURCE_OCCURRENCE_COLUMNS
+                header != CATEGORIZED_COLUMNS
+                or occurrence_header != SOURCE_OCCURRENCE_COLUMNS
             ),
         )
 
-    if header in (SOURCE_OCCURRENCE_COLUMNS, PREVIOUS_SOURCE_OCCURRENCE_COLUMNS):
+    if header in (
+        SOURCE_OCCURRENCE_COLUMNS,
+        PRE_STATEMENT_SECTION_SOURCE_OCCURRENCE_COLUMNS,
+        PREVIOUS_SOURCE_OCCURRENCE_COLUMNS,
+    ):
         if not manifest_exists:
             raise IdentityError("identity_manifest_missing")
         source_rows = read_csv_artifact(
@@ -205,9 +220,7 @@ def load_identity_state(
             overlap_manifest=overlap,
             overlap_manifest_document=overlap_manifest_document(overlap),
             canonical_migration_required=True,
-            ledger_schema_migration_required=(
-                header == PREVIOUS_SOURCE_OCCURRENCE_COLUMNS
-            ),
+            ledger_schema_migration_required=(header != SOURCE_OCCURRENCE_COLUMNS),
         )
 
     if not manifest_exists:
@@ -236,7 +249,12 @@ def load_identity_state(
                 canonical_migration_required=True,
             )
         if (
-            header in (CATEGORIZED_COLUMNS, PREVIOUS_CATEGORIZED_COLUMNS)
+            header
+            in (
+                CATEGORIZED_COLUMNS,
+                PRE_STATEMENT_SECTION_CATEGORIZED_COLUMNS,
+                PREVIOUS_CATEGORIZED_COLUMNS,
+            )
             or any(field in header for field in ID_FIELDS)
             or any(
                 field in header

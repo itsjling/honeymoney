@@ -70,6 +70,10 @@ next write. `review_needed.csv` also adds the display-only
 Replacement and reset derive typed review reasons before they change legacy
 source rows, so an explicit `reconcile` upgrade is optional.
 
+Statement-section balance scope adds the public text column
+`statement_section`. ADR 0004 headers remain migration input and gain the
+column on the next write.
+
 New public text columns are safe by default. A new numeric or other canonical
 non-text column must be added to `CANONICAL_CSV_COLUMNS` and covered by a
 negative-value or representation-preservation test.

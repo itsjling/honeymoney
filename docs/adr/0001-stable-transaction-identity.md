@@ -89,6 +89,10 @@ The full digest is 64 lowercase hexadecimal characters.
 
 ### Persisted public schema
 
+ADR 0003 now owns the current exact public and hidden CSV headers. ADR 0004
+adds valuation and review-reason fields, and GitHub #60 adds statement-section
+evidence. The headers below record the identity-v2 schema at this decision.
+
 Both `categorized.csv` and `review_needed.csv` add these four text columns
 immediately after `transaction_id`, in this order:
 

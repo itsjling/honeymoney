@@ -86,6 +86,7 @@ _SOURCE_DISPLAY_FIELDS = ("source_file", "source_page", "source_row")
 _STATEMENT_BALANCE_FIELDS = (
     "statement_opening_balance",
     "statement_closing_balance",
+    "statement_section",
 )
 _DUPLICATE_FLAGS = {"duplicate_suspected", "duplicate_review_promoted"}
 _FINANCIAL_FIELDS = (

@@ -988,6 +988,66 @@ class CashFlowWorkflowTest(unittest.TestCase):
             ["matched", "matched", "unavailable"],
         )
 
+    def test_balance_reconciliation_separates_sections_and_statements(
+        self,
+    ) -> None:
+        rows = [
+            {
+                "account_id": "shared",
+                "source_id": source_id,
+                "source_file": source_file,
+                "statement_section": section,
+                "posted_currency": "HKD",
+                "posted_amount": "10.00",
+                "statement_opening_balance": opening,
+                "statement_closing_balance": closing,
+            }
+            for source_id, source_file, section, opening, closing in (
+                (
+                    "source_a",
+                    "april.pdf",
+                    "HKD Savings",
+                    "100.00",
+                    "110.00",
+                ),
+                (
+                    "source_a",
+                    "april.pdf",
+                    "HKD Current",
+                    "200.00",
+                    "210.00",
+                ),
+                (
+                    "source_b",
+                    "may.pdf",
+                    "HKD Savings",
+                    "110.00",
+                    "120.00",
+                ),
+            )
+        ]
+
+        result = reconcile_ledger(rows, {})["balance_reconciliation"]["shared"]
+
+        self.assertEqual(result["status"], "reconciled")
+        self.assertEqual(result["result"], "matched")
+        self.assertEqual(len(result["statements"]), 3)
+        self.assertEqual(
+            {
+                (statement["source_file"], statement["statement_section"])
+                for statement in result["statements"]
+            },
+            {
+                ("april.pdf", "HKD Savings"),
+                ("april.pdf", "HKD Current"),
+                ("may.pdf", "HKD Savings"),
+            },
+        )
+        self.assertEqual(
+            {statement["result"] for statement in result["statements"]},
+            {"matched"},
+        )
+
     def test_balance_reconciliation_reports_conflicting_values(self) -> None:
         rows = [
             {
