@@ -980,32 +980,6 @@ class CashFlowWorkflowTest(unittest.TestCase):
                         "source_file": "invalid-opening.csv",
                         "category": "Other",
                     },
-                    {
-                        "transaction_id": "txn_missing_posted_currency",
-                        "date": "2026-06-11",
-                        "account_id": "bank_missing_posted_currency",
-                        "account_type": "bank",
-                        "posted_amount": "10.00",
-                        "posted_currency": "",
-                        "amount_hkd": "10.00",
-                        "statement_opening_balance": "100.00",
-                        "statement_closing_balance": "110.00",
-                        "source_file": "missing-currency.csv",
-                        "category": "Other",
-                    },
-                    {
-                        "transaction_id": "txn_invalid_posted_activity",
-                        "date": "2026-06-12",
-                        "account_id": "bank_invalid_posted_activity",
-                        "account_type": "bank",
-                        "posted_amount": "not-an-amount",
-                        "posted_currency": "HKD",
-                        "amount_hkd": "",
-                        "statement_opening_balance": "100.00",
-                        "statement_closing_balance": "110.00",
-                        "source_file": "invalid-activity.csv",
-                        "category": "Other",
-                    },
                 ],
             )
 
@@ -1083,26 +1057,6 @@ class CashFlowWorkflowTest(unittest.TestCase):
                 self.assertNotIn("opening_balance", no_safe_endpoints)
                 self.assertNotIn("closing_balance", no_safe_endpoints)
                 self.assertNotIn("difference", no_safe_endpoints)
-            unavailable_inputs = {
-                "bank_missing_posted_currency": "Posted currency is unavailable.",
-                "bank_invalid_posted_activity": (
-                    "One or more posted amounts are unavailable."
-                ),
-            }
-            for account_id, reason in unavailable_inputs.items():
-                calculation_unavailable = balances[account_id]["statements"][0]
-                self.assertEqual(calculation_unavailable["status"], "unavailable")
-                self.assertEqual(calculation_unavailable["result"], "unavailable")
-                self.assertTrue(calculation_unavailable["opening_evidence_found"])
-                self.assertTrue(calculation_unavailable["closing_evidence_found"])
-                self.assertEqual(calculation_unavailable["reason"], reason)
-                self.assertNotIn("opening_balance", calculation_unavailable)
-                self.assertNotIn("closing_balance", calculation_unavailable)
-                self.assertNotIn(
-                    "calculated_closing_balance",
-                    calculation_unavailable,
-                )
-                self.assertNotIn("difference", calculation_unavailable)
 
             human = self._run_cli(["reconcile", "--dry-run"], cwd=root)
             self.assertEqual(human.returncode, 0, human.stderr)
@@ -1147,6 +1101,53 @@ class CashFlowWorkflowTest(unittest.TestCase):
             self.assertNotIn("7777.77", report_html)
             self.assertNotIn("8888.88", report_html)
             self.assertNotIn("9999.99", report_html)
+
+    def test_balance_reconciliation_reports_unavailable_calculation_inputs(
+        self,
+    ) -> None:
+        rows = [
+            {
+                "account_id": "bank_missing_posted_currency",
+                "account_type": "bank",
+                "posted_amount": "10.00",
+                "posted_currency": "",
+                "statement_opening_balance": "100.00",
+                "statement_closing_balance": "110.00",
+                "source_file": "missing-currency.csv",
+            },
+            {
+                "account_id": "bank_invalid_posted_activity",
+                "account_type": "bank",
+                "posted_amount": "not-an-amount",
+                "posted_currency": "HKD",
+                "statement_opening_balance": "100.00",
+                "statement_closing_balance": "110.00",
+                "source_file": "invalid-activity.csv",
+            },
+        ]
+
+        balances = reconcile_ledger(rows, {})["balance_reconciliation"]
+
+        unavailable_inputs = {
+            "bank_missing_posted_currency": "Posted currency is unavailable.",
+            "bank_invalid_posted_activity": (
+                "One or more posted amounts are unavailable."
+            ),
+        }
+        for account_id, reason in unavailable_inputs.items():
+            calculation_unavailable = balances[account_id]["statements"][0]
+            self.assertEqual(calculation_unavailable["status"], "unavailable")
+            self.assertEqual(calculation_unavailable["result"], "unavailable")
+            self.assertTrue(calculation_unavailable["opening_evidence_found"])
+            self.assertTrue(calculation_unavailable["closing_evidence_found"])
+            self.assertEqual(calculation_unavailable["reason"], reason)
+            self.assertNotIn("opening_balance", calculation_unavailable)
+            self.assertNotIn("closing_balance", calculation_unavailable)
+            self.assertNotIn(
+                "calculated_closing_balance",
+                calculation_unavailable,
+            )
+            self.assertNotIn("difference", calculation_unavailable)
 
     def test_period_report_reconciles_the_complete_represented_statement(
         self,
