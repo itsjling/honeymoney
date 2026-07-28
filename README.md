@@ -434,7 +434,10 @@ The HTML and report JSON also show statement-balance coverage by account,
 source, section, and posted currency. Each result says whether safe opening and
 closing evidence was found. Outcomes are `missing_opening`, `missing_closing`,
 `missing_both`, `conflicting_evidence`, `matched`, or `mismatched`. Missing or
-conflicting results stay unavailable and omit all balance values.
+conflicting results stay unavailable and omit all balance values. If both
+endpoints are safe but the posted currency or statement activity is unusable,
+the result is `unavailable`; its reason names the missing input and no balance
+value or difference is returned.
 
 ```bash
 honeymoney reconcile
@@ -615,9 +618,11 @@ The bundled HSBC and Mox PDF profiles also read statement opening and closing
 balances. Reconciliation checks each source, account, and posted currency and
 statement section. It keeps the existing `status` values. The `result` field
 reports `missing_opening`, `missing_closing`, `missing_both`,
-`conflicting_evidence`, `matched`, or `mismatched`. The balance lines do not
-become ledger transactions. A true conflict reports the source, page, section,
-and field without exposing either balance value.
+`conflicting_evidence`, `matched`, or `mismatched`. It reports `unavailable`
+when both endpoints are safe but the posted currency or statement activity
+cannot support a calculation. The balance lines do not become ledger
+transactions. A true conflict reports the source, page, section, and field
+without exposing either balance value.
 
 Migration: remove `hsbc_hk_bank` and `hsbc_hk_bank_pdf` paths or mappings from
 existing configurations. Use `hsbc_one_pdf` for HSBC One PDF statements. For
