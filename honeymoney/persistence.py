@@ -186,6 +186,18 @@ def recover_generation(
         ) from error
 
 
+def require_clean_generation(authoritative_path: Path) -> None:
+    """Fail a read-only operation when recovery or a writer may be pending."""
+    authoritative_path = authoritative_path.resolve()
+    state_path = _state_path(authoritative_path)
+    if (
+        state_path.exists()
+        or _state_temporary_path(state_path).exists()
+        or _lock_path(authoritative_path).exists()
+    ):
+        raise OSError("Workspace recovery is required before read-only inspection")
+
+
 def _entry_for(target: Path, content: str, generation: str) -> GenerationEntry:
     existed = target.exists()
     mode = stat.S_IMODE(target.stat().st_mode) if existed else _default_file_mode()

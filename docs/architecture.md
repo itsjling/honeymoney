@@ -193,6 +193,11 @@ Their source identity, source display, and statement-balance fields stay empty.
 Canonical IDs come from a hidden random workspace namespace, the normalized
 record fingerprint, and the abstract slot number.
 
+Missing-valuation inspection emits a workspace-relative source path only after
+the path produces the stored source namespace. A matching file name alone is
+not proof. Evidence keeps one item per active source occurrence, including
+equal display, page, and row values.
+
 The resolver runs for the whole input batch before categorization, correction
 application, reconciliation, or any transaction-ID dictionary. It resolves a
 logical source from its normalized workspace-safe locator and exact source
@@ -295,6 +300,8 @@ changing it.
   boolean invariant.
 - `honeymoney/valuation.py`: HKD value source, dated and fixed rates, and
   completeness counts.
+- `honeymoney/valuation_inspection.py`: read-only canonical-to-active-source
+  joins for missing valuation diagnosis.
 - `honeymoney/data/profiles/`: bundled institution profiles copied by setup.
 - `tests/fixtures/`: synthetic golden inputs and expected behavior.
 

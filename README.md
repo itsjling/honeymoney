@@ -265,7 +265,7 @@ Prints or edits the active `config.json`; pass `--config PATH` to target another
 ## Structured agent commands
 
 `setup`, `run`, `import`, `status`, `report`, `config`, `profile validate`,
-`evaluate`, `learn`,
+`evaluate`, `learn`, `valuation missing`,
 and fully specified one-shot `review` accept `--json`. JSON mode prints exactly
 one versioned document to stdout, never prompts, and never opens a browser.
 Exit code `0` is success, `1` is strict partial success, and `2` is an input,
@@ -276,6 +276,27 @@ Import, status, pending, report, and reconcile data distinguish
 object reports consolidation, provenance, and ambiguity. The old
 `duplicate_count`, `duplicate_group_count`, and `duplicate_candidates` fields
 remain as derived compatibility fields.
+
+Inspect every canonical row that lacks an HKD value, with its active statement
+evidence:
+
+```bash
+honeymoney valuation missing
+honeymoney valuation missing 2026-05
+honeymoney valuation missing --transaction TRANSACTION_ID --json
+```
+
+The default covers all dates. Period options use the same month and date forms
+as status and report. Each result shows original and posted values, accounting
+flow, valuation state and source, source-occurrence count, and
+file, page, and row evidence. `source_file` is workspace-relative only when the
+current location matches the stored source namespace. `source_display` keeps a
+short stored label when no path can be proved. Repeated evidence stays repeated
+so its length matches the source-occurrence count. The command validates the
+ledger, identity
+manifest, overlap manifest, and active source rows without writing or
+recovering files. Ambiguous or inconsistent provenance stops with a value-free
+error.
 
 ```bash
 honeymoney import ./statement.csv --config ./money/config.json --json

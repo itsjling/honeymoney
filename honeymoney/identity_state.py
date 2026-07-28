@@ -36,7 +36,11 @@ from honeymoney.overlap import (
     validate_overlap_agreement,
 )
 from honeymoney.overlap_contracts import OverlapManifest
-from honeymoney.persistence import configured_generation_paths, recover_generation
+from honeymoney.persistence import (
+    configured_generation_paths,
+    recover_generation,
+    require_clean_generation,
+)
 from honeymoney.schema import (
     CATEGORIZED_COLUMNS,
     PRE_STATEMENT_SECTION_CATEGORIZED_COLUMNS,
@@ -97,13 +101,17 @@ def load_identity_state(
     categorized_path: Path,
     *,
     allowed_generation_paths: Iterable[Path] = (),
+    recover: bool = True,
 ) -> IdentityState:
     """Recover and validate canonical ledger plus source-occurrence ownership."""
     categorized_path = Path(categorized_path)
-    recover_generation(
-        categorized_path,
-        allowed_generation_paths=allowed_generation_paths,
-    )
+    if recover:
+        recover_generation(
+            categorized_path,
+            allowed_generation_paths=allowed_generation_paths,
+        )
+    else:
+        require_clean_generation(categorized_path)
     manifest_path = identity_manifest_path(categorized_path)
     occurrences_path = source_occurrences_path(categorized_path)
     canonical_manifest_path = overlap_manifest_path(categorized_path)
@@ -275,11 +283,14 @@ def load_identity_state(
 def load_configured_identity_state(
     categorized_path: Path,
     config: Config,
+    *,
+    recover: bool = True,
 ) -> IdentityState:
     """Load state with the exact configured generation members allowed."""
     return load_identity_state(
         categorized_path,
         allowed_generation_paths=configured_generation_paths(config),
+        recover=recover,
     )
 
 
