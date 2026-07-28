@@ -39,7 +39,9 @@ during implementation, followed by `./scripts/check.sh` once at the end.
   to operate on them.
 - Never commit statement data, generated ledgers, reports, credentials, or live
   Ollama transcripts.
-- Do not enable network access or add cloud inference to the product pipeline.
+- Do not add cloud inference. Product network access is limited to the
+  user-gated, public-data-only HKMA rate fetch in ADR 0007; no financial row or
+  statement field may enter that request.
 - Avoid reproducing private transaction descriptions or amounts in the final
   response unless they are essential to the user's explicit request.
 

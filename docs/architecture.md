@@ -2,7 +2,9 @@
 
 Honeymoney is a local-first Python CLI. The filesystem is its integration
 boundary: statements and configuration go in, while CSV, JSON, and HTML
-artifacts come out. There is no database or cloud service.
+artifacts come out. There is no database or cloud AI service. The dedicated
+`rates fetch` command may cross one fixed public-data boundary after user
+consent; no other command uses it.
 
 ## Data flow
 
@@ -34,6 +36,19 @@ categorized.csv + review_needed.csv + import_report.json
                  v
 status summaries and self-contained HTML reports
 ```
+
+The optional network path sits before the local rate cache:
+
+```text
+explicit rates fetch + public currencies + date range
+                 |
+                 v
+fixed HKMA HTTPS endpoint -> checked complete pages -> rates.json
+```
+
+The fetch path receives no ledger rows. Only after every response page passes
+the local provider checks does the CLI open identity state and apply the shared
+cache-and-ledger generation.
 
 Imports merge source occurrences by source `transaction_id`. Exact same-account
 occurrences from distinct sources then form canonical multiset slots. The
@@ -319,6 +334,8 @@ changing it.
   following them.
 - `honeymoney/schema.py`: public ledger/review columns and allowed values.
 - `honeymoney/report.py`: offline HTML report generation.
+- `honeymoney/rate_fetch.py`: fixed HKMA HTTPS request construction, explicit
+  public query allowlist, response limits, and complete-page collection.
 - `honeymoney/rates.py`: official HKMA document checks, versioned cache, and
   safe prior-date resolution.
 - `honeymoney/reconciliation.py`: deterministic flow derivation, transfer pairing,
@@ -364,6 +381,11 @@ set flow treatment.
 Only synthetic fixtures may enter git or cloud Codex. Real statement files,
 local workspaces, generated outputs, and live Ollama transcripts stay local.
 Ollama is disabled by default and is never part of CI.
+The only public network exception is `rates fetch`. It sends currency codes,
+dates, and page controls to the fixed HKMA endpoint after consent. It does not
+load ledger rows before the response has passed all page checks. Ordinary
+commands remain offline. The full boundary is in
+[`network-boundary.md`](network-boundary.md).
 
 ## Quality gates
 

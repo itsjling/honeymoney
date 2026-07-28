@@ -2,7 +2,10 @@
 
 Local-first household transaction categorization for exported CSV and text-based PDF statements.
 
-Honeymoney runs on local files. It does not call cloud AI APIs. If Ollama is enabled, it talks to your local Ollama endpoint only.
+Honeymoney keeps statement work local and does not call cloud AI APIs. If
+Ollama is enabled, it talks to your local Ollama endpoint only. The one public
+network command, `rates fetch`, requests official HKMA rate data only after
+clear user consent.
 
 Keep real bank statements out of git. The repo ignores `samples/`, `private_samples/`, and `output/`.
 
@@ -285,12 +288,36 @@ bank's conversion cost. Repeating the import gives the same cache and ledger
 bytes. The cache and affected ledger files publish as one recoverable
 generation.
 
+You may instead fetch named public currencies and dates from the fixed official
+HKMA endpoint:
+
+```bash
+honeymoney rates fetch EUR USD \
+  --start 2026-07-01 --end 2026-07-31 --allow-network
+honeymoney rates fetch EUR \
+  --start 2026-07-01 --end 2026-07-31 --allow-network --json
+```
+
+The command prints the provider, public endpoint, currencies, and date range
+before access. An interactive terminal may omit `--allow-network` and approve
+the shown request. JSON and other non-interactive runs require that flag.
+Ordinary import, review, reconciliation, status, and report commands never use
+this HTTP path.
+
+The request contains only the fixed public endpoint, selected public currency
+fields, date range, sort order, page size, and page offset. HKD is fixed by the
+data set as the base currency. It never contains transaction amounts,
+descriptions, account data, statement paths, ledger rows, or model prompts.
+The command rejects redirects and other hosts, validates all pages, and writes
+nothing until the full response passes the same checks and persistence path as
+`rates import`. See [`docs/network-boundary.md`](docs/network-boundary.md).
+
 Prints or edits the active `config.json`; pass `--config PATH` to target another file. `config edit` validates a temporary editor copy before replacing the original and uses `$VISUAL`, then `$EDITOR`, then `vi`. With no Ollama edit option, the guided editor lists models installed at the configured local endpoint. Selecting or passing a model also enables the Ollama fallback; `--enable` verifies that the configured model is installed before enabling it. Direct `--model`, `--enable`, and `--disable` edits can use `--json`.
 
 ## Structured agent commands
 
 `setup`, `run`, `import`, `status`, `report`, `config`, `profile validate`,
-`evaluate`, `learn`, `valuation missing`, `rates import`,
+`evaluate`, `learn`, `valuation missing`, `rates import`, `rates fetch`,
 and fully specified one-shot `review` accept `--json`. JSON mode prints exactly
 one versioned document to stdout, never prompts, and never opens a browser.
 Exit code `0` is success, `1` is strict partial success, and `2` is an input,
@@ -617,6 +644,8 @@ non-local DNS lookup in both the main test process and child Python processes.
 Ollama behavior uses injected in-memory transports. Once the bootstrap install
 is available, the command does not query dependency indexes or advisory
 services.
+HKMA fetch behavior also uses an injected in-memory HTTP boundary. The default
+test suite never calls the live HKMA endpoint.
 
 Run either gate on its own:
 
