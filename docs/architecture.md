@@ -93,6 +93,16 @@ retain their rows and corrections; a persistence failure restores both inputs
 to the prior generation. Import reports record the requested action and the
 ledger action actually committed for each source.
 
+Before replacement or reset changes a workspace with an older review or
+canonical schema, the import path derives typed review reasons from the prior
+rows in memory. This keeps pending model suggestions and resolved manual choices
+attached to their proven canonical IDs. When a parser change rekeys a source,
+the replacement path projects that state through the same unique source-row
+proof used for corrections. A successful migration and replacement publish as
+one generation. A failed replacement leaves the prior financial generation
+unchanged, and its report describes that preserved generation. Running
+`reconcile` as a separate upgrade step remains safe but is optional.
+
 `honeymoney duplicates` reads unresolved count-mismatch groups from the overlap
 module. `duplicates resolve` validates the current membership-bound group ID,
 then records `same-event` or `keep-all`. Same-event retains the second-largest

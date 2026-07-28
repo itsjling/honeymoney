@@ -53,7 +53,7 @@ from honeymoney.identity import (
     ambiguous_legacy_transaction_ids,
     resolve_batch,
 )
-from honeymoney.identity_state import load_configured_identity_state
+from honeymoney.identity_state import IdentityState, load_configured_identity_state
 from honeymoney.learning import plan_learned_rules
 from honeymoney.ollama import (
     OllamaProgress,
@@ -270,6 +270,12 @@ def _run_pipeline(
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args(argv)
     interactive = not (args.no_interactive or args.json)
+    if args.reset:
+        requested_action = "reset"
+    elif args.replace:
+        requested_action = "replace"
+    else:
+        requested_action = "import"
 
     config = _load_config(args.config_path)
     input_path = Path(args.input_path or config["paths"]["input"])
@@ -286,6 +292,12 @@ def _run_pipeline(
     profiles = importers._load_profiles(config)
     profile_mappings = importers._load_profile_mappings(config)
     identity_state = load_configured_identity_state(categorized_path, config)
+    preserved_ledger_rows = [dict(row) for row in identity_state.rows]
+    preserved_source_rows = [dict(row) for row in (identity_state.source_rows or [])]
+    review_migration_detected = _prepare_replacement_review_migration(
+        identity_state,
+        requested_action,
+    )
     corrections = load_corrections(config)
     migration_source_corrections: dict[str, dict[str, str]] = {}
     migration_correction_updates: dict[str, dict[str, str]] = {}
@@ -333,12 +345,6 @@ def _run_pipeline(
             clear_status=_status.clear,
         )
     )
-    if args.reset:
-        requested_action = "reset"
-    elif args.replace:
-        requested_action = "replace"
-    else:
-        requested_action = "import"
     prior_replacement_overlap = (
         canonicalize_overlaps(
             identity_state.source_rows,
@@ -476,6 +482,29 @@ def _run_pipeline(
         resolution.next_manifest,
         set(resolution.replaced_source_ids),
     )
+    review_history_ambiguous_ids: tuple[str, ...] = ()
+    if (
+        review_migration_detected
+        and prior_replacement_overlap is not None
+        and parser_upgrade_source_ids
+    ):
+        pending_review_state = _pending_review_state_by_id(prior_canonical_rows)
+        if pending_review_state:
+            review_history_projection = project_replacement_corrections(
+                prior_replacement_overlap,
+                overlap_result,
+                identity_state.source_rows,
+                source_rows,
+                pending_review_state,
+                parser_upgrade_source_ids,
+            )
+            _apply_projected_review_state(
+                ledger_rows,
+                review_history_projection.corrections,
+            )
+            review_history_ambiguous_ids = (
+                review_history_projection.ambiguous_transaction_ids
+            )
     if migration_source_corrections:
         migration_projection = project_migration_corrections(
             overlap_result,
@@ -527,7 +556,15 @@ def _run_pipeline(
     _status.update("Applying corrections...")
     apply_corrections(transactions, canonical_corrections)
     apply_history_ambiguity(
-        ledger_rows, correction_projection.ambiguous_transaction_ids
+        ledger_rows,
+        tuple(
+            sorted(
+                {
+                    *correction_projection.ambiguous_transaction_ids,
+                    *review_history_ambiguous_ids,
+                }
+            )
+        ),
     )
     if has_processed_source:
         enforce_overlap_review(ledger_rows, overlap_result)
@@ -538,16 +575,29 @@ def _run_pipeline(
     else:
         categorized_interactively = []
     _status.update("Writing output files...")
-    reconciliation = reconcile_ledger(ledger_rows, config, statement_rows=source_rows)
     final_review_ids = _final_review_ids(corrections)
     final_review_ids.update(
         transaction["transaction_id"] for transaction in categorized_interactively
     )
     if has_processed_source:
+        reconciliation = reconcile_ledger(
+            ledger_rows,
+            config,
+            statement_rows=source_rows,
+        )
         refresh_duplicate_candidates(ledger_rows, final_review_ids=final_review_ids)
         enforce_overlap_review(ledger_rows, overlap_result)
-    _enforce_identity_review(ledger_rows)
-    synchronize_review_states(ledger_rows, legacy=False)
+        _enforce_identity_review(ledger_rows)
+        synchronize_review_states(ledger_rows, legacy=False)
+    else:
+        reconciliation = reconcile_ledger(
+            [dict(row) for row in preserved_ledger_rows],
+            config,
+            statement_rows=[dict(row) for row in preserved_source_rows],
+        )
+        ledger_rows = preserved_ledger_rows
+        source_rows = preserved_source_rows
+        transactions = []
     review_rows = [row for row in transactions if row["needs_review"] == "true"]
     duplicate_count, duplicate_group_count, duplicate_candidates = (
         _duplicate_compatibility(overlap_result.diagnostic)
@@ -579,6 +629,12 @@ def _run_pipeline(
         "interactive": interactive,
         "replace": args.replace or args.reset,
         "reset": args.reset,
+        "migration": {
+            "legacy_review_state_detected": review_migration_detected,
+            "legacy_review_state_applied": (
+                review_migration_detected and has_processed_source
+            ),
+        },
         "output": {
             "categorized_csv": str(categorized_path),
             "review_needed_csv": str(review_needed_path),
@@ -603,14 +659,18 @@ def _run_pipeline(
         "ollama": ollama_report,
         "reconciliation": reconciliation,
     }
-    files = ledger_output_documents(
-        categorized_path,
-        ledger_rows,
-        identity_manifest=resolution.next_manifest,
-        source_occurrences=source_rows,
-        source_evidence=identity_state.source_evidence_rows,
-        overlap_manifest=overlap_result.manifest,
-    )
+    if review_migration_detected and not has_processed_source:
+        with categorized_path.open(encoding="utf-8", newline="") as existing_ledger:
+            files = {categorized_path: existing_ledger.read()}
+    else:
+        files = ledger_output_documents(
+            categorized_path,
+            ledger_rows,
+            identity_manifest=resolution.next_manifest,
+            source_occurrences=source_rows,
+            source_evidence=identity_state.source_evidence_rows,
+            overlap_manifest=overlap_result.manifest,
+        )
     files[import_report_path] = json.dumps(report, indent=2, sort_keys=True) + "\n"
     correction_updates = dict(migration_correction_updates)
     correction_updates.update(
@@ -625,6 +685,9 @@ def _run_pipeline(
         }
     )
     correction_updates.update(review_state_correction_updates(corrections, ledger_rows))
+    if not has_processed_source:
+        correction_updates = {}
+        removed_correction_ids = set()
     if config.get("corrections") and (correction_updates or removed_correction_ids):
         corrections_path, corrections_content, _ = prepare_corrections_document(
             config,
@@ -650,6 +713,66 @@ def _run_pipeline(
     if args.strict and import_warnings:
         return 1
     return 0
+
+
+def _prepare_replacement_review_migration(
+    state: IdentityState,
+    requested_action: str,
+) -> bool:
+    """Make legacy review meaning explicit before source rows can change."""
+    if requested_action not in {"replace", "reset"}:
+        return False
+    if not (
+        state.canonical_migration_required or state.ledger_schema_migration_required
+    ):
+        return False
+
+    seen: set[int] = set()
+    for rows in (state.rows, state.source_rows, state.source_evidence_rows):
+        if rows is None or id(rows) in seen:
+            continue
+        seen.add(id(rows))
+        synchronize_review_states(rows, legacy=True)
+    return True
+
+
+_MIGRATED_REVIEW_STATE_FIELDS = (
+    "category",
+    "flow_type",
+    "flow_source",
+    "owner",
+    "payment_method",
+    "confidence",
+    "needs_review",
+    "review_reasons",
+    "reason",
+    "flags",
+    "notes",
+)
+
+
+def _pending_review_state_by_id(
+    rows: list[dict[str, str]],
+) -> dict[str, dict[str, str]]:
+    return {
+        row["transaction_id"]: {
+            field: row.get(field, "") for field in _MIGRATED_REVIEW_STATE_FIELDS
+        }
+        for row in rows
+        if row.get("transaction_id") and row.get("review_reasons")
+    }
+
+
+def _apply_projected_review_state(
+    rows: list[dict[str, str]],
+    projected: Mapping[str, Mapping[str, str]],
+) -> None:
+    for row in rows:
+        state = projected.get(row.get("transaction_id", ""))
+        if state is None:
+            continue
+        for field in _MIGRATED_REVIEW_STATE_FIELDS:
+            row[field] = str(state.get(field, ""))
 
 
 def _parser_upgrade_rekeyed_source_ids(
@@ -1689,6 +1812,10 @@ def _print_import_summary(report: dict[str, Any]) -> None:
         f"{report['successful_record_count']} successful records, "
         f"{report['unsuccessful_record_count']} unsuccessful records"
     )
+    if report.get("migration", {}).get("legacy_review_state_applied"):
+        print(
+            "Migration: legacy review decisions were made explicit before replacement"
+        )
     uncategorized = report.get("uncategorized_count", 0)
     if uncategorized:
         print(

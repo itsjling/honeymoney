@@ -111,6 +111,15 @@ unavailability is not a statement-processing failure: parsed rows are committed,
 left uncategorized for review, and their prior corrections are cleared as the
 requested reset specifies.
 
+When `--replace` or `--reset` opens an older review or canonical schema,
+Honeymoney makes each pending review reason explicit before it changes source
+rows. A proven parser rekey carries that pending review state to the new
+canonical ID. The migration and successful replacement use one recoverable
+generation, and the import summary reports the migration. If every source
+fails, the summary describes the preserved generation. You may run
+`honeymoney reconcile` first, but this preflight step is no longer required for
+a safe upgrade.
+
 ```bash
 honeymoney profile validate PROFILE
 honeymoney profile validate PROFILE [--config CONFIG] \

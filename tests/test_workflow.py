@@ -27,7 +27,12 @@ from honeymoney.identity_state import (
     load_identity_state,
 )
 from honeymoney.ollama import OllamaHttpRequest, apply_ollama_fallback
-from honeymoney.schema import ALLOWED_CATEGORIES, SOURCE_OCCURRENCE_COLUMNS
+from honeymoney.schema import (
+    ALLOWED_CATEGORIES,
+    PREVIOUS_CATEGORIZED_COLUMNS,
+    PREVIOUS_SOURCE_OCCURRENCE_COLUMNS,
+    SOURCE_OCCURRENCE_COLUMNS,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -672,6 +677,22 @@ def open(source_path):
         ) as fh:
             return list(csv.DictReader(fh))
 
+    def _write_previous_review_schema(
+        self,
+        root: Path,
+        canonical_rows: list[dict[str, str]],
+        source_rows: list[dict[str, str]],
+    ) -> None:
+        output = root / "output"
+        (output / "categorized.csv").write_text(
+            csv_document(PREVIOUS_CATEGORIZED_COLUMNS, canonical_rows),
+            encoding="utf-8",
+        )
+        (output / ".honeymoney-source-occurrences.csv").write_text(
+            csv_document(PREVIOUS_SOURCE_OCCURRENCE_COLUMNS, source_rows),
+            encoding="utf-8",
+        )
+
     def test_synthetic_pdf_import_persists_balances_identity_and_report(
         self,
     ) -> None:
@@ -962,6 +983,328 @@ def open(source_path):
             self.assertIn("Dining", html)
             for transaction_id in canonical_ids:
                 self.assertIn(transaction_id, html)
+
+    def test_replace_migrates_pending_model_review_before_reprocessing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._setup_workspace(tmp)
+            statement = root / "legacy-review.csv"
+            self._write_statement(
+                statement,
+                [
+                    "2026-07-01,MYSTERY SUGGESTION,-10.00,HKD",
+                    "2026-07-02,MANUAL FLOW,-20.00,HKD",
+                ],
+            )
+            imported = self._run_cli(
+                ["import", str(statement), "--no-interactive"],
+                cwd=root,
+            )
+            self.assertEqual(imported.returncode, 0, imported.stderr)
+
+            state = load_identity_state(root / "output" / "categorized.csv")
+            manual_id = next(
+                row["transaction_id"]
+                for row in state.rows
+                if row["merchant"] == "MANUAL FLOW"
+            )
+            reviewed = self._run_cli(
+                [
+                    "review",
+                    "--transaction",
+                    manual_id,
+                    "--as",
+                    "internal-transfer",
+                    "--json",
+                ],
+                cwd=root,
+            )
+            self.assertEqual(reviewed.returncode, 0, reviewed.stderr)
+
+            state = load_identity_state(root / "output" / "categorized.csv")
+            canonical_rows = [dict(row) for row in state.rows]
+            source_rows = [dict(row) for row in state.source_evidence_rows]
+            pending = next(
+                row for row in canonical_rows if row["merchant"] == "MYSTERY SUGGESTION"
+            )
+            pending.update(
+                {
+                    "category": "Dining",
+                    "flow_type": "expense",
+                    "confidence": "0.72",
+                    "needs_review": "true",
+                    "reason": "Local model suggestion",
+                    "flags": "ollama_categorized",
+                }
+            )
+            self._write_previous_review_schema(root, canonical_rows, source_rows)
+
+            replaced = self._run_cli(
+                [
+                    "import",
+                    str(statement),
+                    "--replace",
+                    "--no-interactive",
+                    "--json",
+                ],
+                cwd=root,
+            )
+
+            self.assertEqual(replaced.returncode, 0, replaced.stderr)
+            data = json.loads(replaced.stdout)["data"]
+            self.assertEqual(
+                data["migration"],
+                {
+                    "legacy_review_state_applied": True,
+                    "legacy_review_state_detected": True,
+                },
+            )
+            rows = {row["merchant"]: row for row in self._ledger_rows(root)}
+            self.assertEqual(rows["MYSTERY SUGGESTION"]["category"], "Dining")
+            self.assertEqual(
+                rows["MYSTERY SUGGESTION"]["review_reasons"],
+                "category_suggestion",
+            )
+            self.assertEqual(rows["MYSTERY SUGGESTION"]["needs_review"], "true")
+            self.assertEqual(rows["MANUAL FLOW"]["flow_type"], "internal_transfer")
+            self.assertEqual(rows["MANUAL FLOW"]["needs_review"], "false")
+            self.assertEqual(rows["MANUAL FLOW"]["review_reasons"], "")
+
+            financial_paths = [
+                "output/categorized.csv",
+                "output/review_needed.csv",
+                "output/.honeymoney-identity-manifest.json",
+                "output/.honeymoney-source-occurrences.csv",
+                "output/.honeymoney-overlap-manifest.json",
+                "corrections.csv",
+            ]
+            first_generation = self._artifact_bytes(root, financial_paths)
+            repeated = self._run_cli(
+                [
+                    "import",
+                    str(statement),
+                    "--replace",
+                    "--no-interactive",
+                    "--json",
+                ],
+                cwd=root,
+            )
+            self.assertEqual(repeated.returncode, 0, repeated.stderr)
+            self.assertEqual(
+                self._artifact_bytes(root, financial_paths),
+                first_generation,
+            )
+
+            current = load_identity_state(root / "output" / "categorized.csv")
+            self._write_previous_review_schema(
+                root,
+                [dict(row) for row in current.rows],
+                [dict(row) for row in current.source_evidence_rows],
+            )
+            reset = self._run_cli(
+                ["import", str(statement), "--reset", "--no-interactive"],
+                cwd=root,
+            )
+            self.assertEqual(reset.returncode, 0, reset.stderr)
+            self.assertIn(
+                "Migration: legacy review decisions were made explicit",
+                reset.stdout,
+            )
+            reset_rows = {row["merchant"]: row for row in self._ledger_rows(root)}
+            self.assertNotEqual(
+                reset_rows["MANUAL FLOW"]["flow_type"],
+                "internal_transfer",
+            )
+            with (root / "corrections.csv").open(
+                newline="",
+                encoding="utf-8",
+            ) as handle:
+                correction_ids = {
+                    row["transaction_id"] for row in csv.DictReader(handle)
+                }
+            self.assertNotIn(manual_id, correction_ids)
+
+    def test_replace_projects_pending_legacy_suggestion_through_profile_rekey(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root, fake_modules, statement, profile_path = (
+                self._seed_balance_contract_workspace(tmp, repeated=False)
+            )
+            categorized_path = root / "output" / "categorized.csv"
+            state = load_identity_state(categorized_path)
+            canonical_rows = [dict(row) for row in state.rows]
+            source_rows = [dict(row) for row in state.source_evidence_rows]
+            pending = next(
+                row for row in canonical_rows if row["merchant"] == "SYNTHETIC ONE"
+            )
+            prior_transaction_id = pending["transaction_id"]
+            pending.update(
+                {
+                    "category": "Dining",
+                    "flow_type": "expense",
+                    "flow_source": "ollama",
+                    "confidence": "0.72",
+                    "needs_review": "true",
+                    "reason": "Local model suggestion",
+                    "flags": "ollama_categorized",
+                }
+            )
+            self._write_previous_review_schema(root, canonical_rows, source_rows)
+            profile = json.loads(profile_path.read_text(encoding="utf-8"))
+            profile["account_id"] = "balance_contract_v2"
+            profile["account"] = "Balance Contract V2"
+            profile_path.write_text(json.dumps(profile), encoding="utf-8")
+
+            replaced = self._run_cli(
+                [
+                    "import",
+                    str(statement),
+                    "--replace",
+                    "--no-interactive",
+                    "--json",
+                ],
+                cwd=root,
+                extra_pythonpath=fake_modules,
+            )
+
+            self.assertEqual(replaced.returncode, 0, replaced.stderr)
+            rows = {row["merchant"]: row for row in self._ledger_rows(root)}
+            migrated = rows["SYNTHETIC ONE"]
+            self.assertNotEqual(migrated["transaction_id"], prior_transaction_id)
+            self.assertEqual(migrated["category"], "Dining")
+            self.assertIn(
+                "category_suggestion",
+                migrated["review_reasons"].split(";"),
+            )
+            self.assertEqual(migrated["needs_review"], "true")
+            with (root / "corrections.csv").open(
+                newline="",
+                encoding="utf-8",
+            ) as handle:
+                self.assertEqual(list(csv.DictReader(handle)), [])
+
+    def test_failed_replace_does_not_publish_a_detected_review_migration(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._setup_workspace(tmp)
+            statement = root / "legacy-review.csv"
+            self._write_statement(
+                statement,
+                ["2026-07-01,MYSTERY SUGGESTION,-10.00,HKD"],
+            )
+            imported = self._run_cli(
+                ["import", str(statement), "--no-interactive"],
+                cwd=root,
+            )
+            self.assertEqual(imported.returncode, 0, imported.stderr)
+            state = load_identity_state(root / "output" / "categorized.csv")
+            self._write_previous_review_schema(
+                root,
+                [dict(row) for row in state.rows],
+                [dict(row) for row in state.source_evidence_rows],
+            )
+            financial_paths = [
+                "output/categorized.csv",
+                "output/review_needed.csv",
+                "output/.honeymoney-identity-manifest.json",
+                "output/.honeymoney-source-occurrences.csv",
+                "output/.honeymoney-overlap-manifest.json",
+                "corrections.csv",
+            ]
+            before = self._artifact_bytes(root, financial_paths)
+            statement.write_text(
+                "Not,A,Supported,Statement\n1,2,3,4\n",
+                encoding="utf-8",
+            )
+
+            failed = self._run_cli(
+                [
+                    "import",
+                    str(statement),
+                    "--replace",
+                    "--no-interactive",
+                    "--json",
+                ],
+                cwd=root,
+            )
+
+            self.assertEqual(failed.returncode, 2, failed.stderr)
+            self.assertEqual(json.loads(failed.stdout)["status"], "error")
+            self.assertEqual(self._artifact_bytes(root, financial_paths), before)
+
+    def test_failed_replace_reports_the_preserved_legacy_generation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root, fake_modules, statement, _ = self._seed_pdf_replacement_workspace(tmp)
+            categorized_path = root / "output" / "categorized.csv"
+            state = load_identity_state(categorized_path)
+            canonical_rows = [dict(row) for row in state.rows]
+            source_rows = [dict(row) for row in state.source_evidence_rows]
+            pending = canonical_rows[0]
+            pending.update(
+                {
+                    "category": "Dining",
+                    "flow_type": "expense",
+                    "flow_source": "ollama",
+                    "confidence": "0.72",
+                    "needs_review": "true",
+                    "reason": "Local model suggestion",
+                    "flags": "ollama_categorized",
+                }
+            )
+            pending_id = pending["transaction_id"]
+            self._write_previous_review_schema(root, canonical_rows, source_rows)
+            financial_paths = [
+                "output/categorized.csv",
+                "output/review_needed.csv",
+                "output/.honeymoney-identity-manifest.json",
+                "output/.honeymoney-source-occurrences.csv",
+                "output/.honeymoney-overlap-manifest.json",
+                "corrections.csv",
+            ]
+            before = self._artifact_bytes(root, financial_paths)
+            (fake_modules / "pdfplumber.py").write_text(
+                "def open(path):\n"
+                "    raise RuntimeError('synthetic malformed statement')\n",
+                encoding="utf-8",
+            )
+
+            failed = self._run_cli(
+                [
+                    "import",
+                    str(statement),
+                    "--replace",
+                    "--no-interactive",
+                    "--json",
+                ],
+                cwd=root,
+                extra_pythonpath=fake_modules,
+            )
+
+            self.assertEqual(failed.returncode, 0, failed.stderr)
+            report = json.loads(failed.stdout)["data"]
+            self.assertEqual(report["status"], "partial_success")
+            self.assertEqual(
+                report["migration"],
+                {
+                    "legacy_review_state_applied": False,
+                    "legacy_review_state_detected": True,
+                },
+            )
+            self.assertTrue(
+                all(
+                    count == 0
+                    for count in report["ledger"]["review_reason_counts"].values()
+                )
+            )
+            diagnostic = report["transaction_diagnostics"][pending_id]
+            self.assertEqual(diagnostic["category"], "Dining")
+            self.assertEqual(diagnostic["review_reasons"], [])
+            self.assertEqual(
+                report["transaction_flags"][pending_id],
+                ["ollama_categorized"],
+            )
+            self.assertEqual(self._artifact_bytes(root, financial_paths), before)
 
     def test_current_replace_rekeys_repeated_rows_after_profile_upgrade(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -3642,6 +3985,37 @@ def open(source_path):
                 ),
             )
             self.assertEqual(corrected.returncode, 0, corrected.stderr)
+            state = load_identity_state(categorized)
+            legacy_rows = [dict(item) for item in state.rows]
+            legacy_rows[0].update(
+                {
+                    "category": "Groceries",
+                    "confidence": "1.00",
+                    "needs_review": "true",
+                    "reason": "Synthetic legacy manual review",
+                    "flags": "manual_correction",
+                }
+            )
+            self._write_previous_review_schema(
+                root,
+                legacy_rows,
+                [dict(item) for item in state.source_evidence_rows],
+            )
+            (root / "corrections.csv").write_text(
+                csv_document(
+                    CORRECTION_COLUMNS,
+                    [
+                        {
+                            "transaction_id": row["transaction_id"],
+                            "category": "Groceries",
+                            "confidence": "1.00",
+                            "reason": "Synthetic legacy manual review",
+                            "needs_review": "true",
+                        }
+                    ],
+                ),
+                encoding="utf-8",
+            )
             protected_before = {
                 path: path.read_bytes()
                 for path in (

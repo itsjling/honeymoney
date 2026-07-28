@@ -6,18 +6,24 @@ from decimal import Decimal
 from pathlib import Path
 
 from honeymoney.classification_policy import apply_structural_classification
-from honeymoney.cli import _accounting_decision_patch
+from honeymoney.cli import (
+    _accounting_decision_patch,
+    _prepare_replacement_review_migration,
+)
 from honeymoney.corrections import (
     apply_corrections,
     load_corrections,
     review_state_correction_updates,
     to_review_row,
 )
+from honeymoney.identity import empty_manifest, manifest_document
+from honeymoney.identity_state import IdentityState
 from honeymoney.reconciliation import reconcile_ledger
 from honeymoney.report import build_report_html
 from honeymoney.review_state import (
     REVIEW_REASON_ACCOUNTING_FLOW,
     REVIEW_REASON_CATEGORY,
+    REVIEW_REASON_CATEGORY_SUGGESTION,
     REVIEW_REASON_IDENTITY,
     review_reason_tokens,
     synchronize_review_state,
@@ -57,6 +63,53 @@ def _row(**overrides: str) -> dict[str, str]:
 
 
 class ReviewStateTest(unittest.TestCase):
+    def test_replacement_preflight_types_legacy_model_review_before_rows_change(
+        self,
+    ) -> None:
+        canonical = _row(
+            category="Dining",
+            flow_type="expense",
+            flags="ollama_categorized",
+            review_reasons="",
+        )
+        source = dict(canonical)
+        evidence = dict(canonical)
+        manifest = empty_manifest()
+        state = IdentityState(
+            [canonical],
+            manifest,
+            manifest_document(manifest),
+            source_rows=[source],
+            source_evidence_rows=[evidence],
+            ledger_schema_migration_required=True,
+        )
+
+        self.assertTrue(_prepare_replacement_review_migration(state, "replace"))
+        for row in (canonical, source, evidence):
+            self.assertEqual(
+                review_reason_tokens(row["review_reasons"]),
+                [REVIEW_REASON_CATEGORY_SUGGESTION],
+            )
+            self.assertEqual(row["needs_review"], "true")
+
+        unchanged = _row(
+            category="Dining",
+            flow_type="expense",
+            flags="manual_correction",
+            needs_review="false",
+            review_reasons="",
+        )
+        current_state = IdentityState(
+            [unchanged],
+            manifest,
+            manifest_document(manifest),
+            source_rows=[unchanged],
+            source_evidence_rows=[unchanged],
+            ledger_schema_migration_required=True,
+        )
+        self.assertFalse(_prepare_replacement_review_migration(current_state, "import"))
+        self.assertEqual(unchanged["review_reasons"], "")
+
     def test_stale_saved_category_correction_migrates_to_resolved(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             correction_path = Path(tmp) / "corrections.csv"
