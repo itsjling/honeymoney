@@ -4614,6 +4614,7 @@ def _recover_config_path_generation(
     )
     _resolve_rate_cache_config(recovery_config, config_path.resolve())
     _recover_config_generation(recovery_config)
+    recover_generation(_configured_rate_cache_path(recovery_config))
 
 
 def _identity_diagnostic_warning(diagnostic: Any) -> str:

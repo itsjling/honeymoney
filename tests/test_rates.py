@@ -577,6 +577,82 @@ class RateImportCliTest(unittest.TestCase):
                         self.assertEqual(recovered.returncode, 0, recovered.stderr)
                     self.assertFalse(state_path.exists())
 
+    def test_legacy_default_cache_standalone_generation_is_recovered(
+        self,
+    ) -> None:
+        for recovery_command in ("config", "setup"):
+            with self.subTest(recovery_command=recovery_command):
+                with tempfile.TemporaryDirectory() as tmp:
+                    root = Path(tmp) / "money"
+                    setup = self._run_cli(
+                        ["setup", "--root", str(root), "--json"],
+                        cwd=REPO_ROOT,
+                    )
+                    self.assertEqual(setup.returncode, 0, setup.stderr)
+                    config_path = root / "config.json"
+                    config = json.loads(config_path.read_text(encoding="utf-8"))
+                    config.pop("rate_cache")
+                    config_path.write_text(
+                        json.dumps(config, indent=2, sort_keys=True),
+                        encoding="utf-8",
+                    )
+                    legacy_config_bytes = config_path.read_bytes()
+                    provider_path = root / "hkma.json"
+                    provider_path.write_bytes(
+                        _hkma_document([{"end_of_day": "2026-07-03", "eur": 9.25}])
+                    )
+
+                    interrupted = self._run_cli(
+                        [
+                            "rates",
+                            "import",
+                            str(provider_path),
+                            "--config",
+                            str(config_path),
+                            "--json",
+                        ],
+                        cwd=root,
+                        fault="replace-after:rates.json",
+                    )
+
+                    self.assertEqual(
+                        interrupted.returncode,
+                        75,
+                        interrupted.stderr or interrupted.stdout,
+                    )
+                    state_path = root / ".rates.json.honeymoney-state.json"
+                    self.assertTrue(state_path.exists())
+                    if recovery_command == "config":
+                        recovered = self._run_cli(
+                            ["config", "--config", str(config_path), "--json"],
+                            cwd=root,
+                        )
+                        self.assertEqual(recovered.returncode, 0, recovered.stderr)
+                        self.assertEqual(config_path.read_bytes(), legacy_config_bytes)
+                        observations = json.loads(
+                            (root / "rates.json").read_text(encoding="utf-8")
+                        )["observations"]
+                        self.assertEqual(
+                            [
+                                (item["quote_currency"], item["raw_rate"])
+                                for item in observations
+                            ],
+                            [("EUR", "9.25")],
+                        )
+                    else:
+                        recovered = self._run_cli(
+                            [
+                                "setup",
+                                "--root",
+                                str(root),
+                                "--force",
+                                "--json",
+                            ],
+                            cwd=REPO_ROOT,
+                        )
+                        self.assertEqual(recovered.returncode, 0, recovered.stderr)
+                    self.assertFalse(state_path.exists())
+
     def test_explicit_rate_cache_path_takes_precedence_over_default(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "money"
