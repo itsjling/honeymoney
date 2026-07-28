@@ -45,6 +45,27 @@ class ValuationSummary(TypedDict):
     statuses: dict[str, int]
     missing_count: int
     estimated_count: int
+    cash_flow_blocking_missing_count: int
+    excluded_flow_missing_count: int
+    unresolved_flow_missing_count: int
+    zero_amount_missing_count: int
+    other_flow_missing_count: int
+    cash_flow_complete: bool
+    cash_flow: CashFlowValuationSummary
+
+
+class CashFlowTotals(TypedDict):
+    income: str
+    spending: str
+    refunds: str
+    net_cash_flow: str
+
+
+class CashFlowValuationSummary(TypedDict):
+    currency: str
+    actual: CashFlowTotals
+    estimated: CashFlowTotals
+    combined_estimate: CashFlowTotals
 
 
 def value_transaction(
@@ -157,18 +178,123 @@ def set_matched_exchange_valuation(
 def valuation_summary(rows: Iterable[Mapping[str, str]]) -> ValuationSummary:
     sources = {source: 0 for source in sorted(ALLOWED_VALUATION_SOURCES)}
     statuses = {status: 0 for status in sorted(ALLOWED_VALUATION_STATUSES)}
+    totals = {
+        VALUATION_STATUS_ACTUAL: _empty_cash_flow_totals(),
+        VALUATION_STATUS_ESTIMATED: _empty_cash_flow_totals(),
+    }
+    cash_flow_blocking_missing_count = 0
+    excluded_flow_missing_count = 0
+    unresolved_flow_missing_count = 0
+    zero_amount_missing_count = 0
+    other_flow_missing_count = 0
     for row in rows:
         source = str(row.get("valuation_source", "")) or VALUATION_SOURCE_MISSING
-        status = str(row.get("valuation_status", "")) or VALUATION_STATUS_MISSING
+        amount = _decimal(str(row.get("amount_hkd", "")))
+        status = str(row.get("valuation_status", ""))
+        if not status:
+            status = (
+                VALUATION_STATUS_MISSING
+                if amount is None
+                else (
+                    VALUATION_STATUS_ESTIMATED
+                    if source
+                    in {
+                        VALUATION_SOURCE_DATED_RATE,
+                        VALUATION_SOURCE_HKMA_RATE,
+                        VALUATION_SOURCE_FIXED_RATE,
+                    }
+                    else VALUATION_STATUS_ACTUAL
+                )
+            )
         if source in sources:
             sources[source] += 1
         if status in statuses:
             statuses[status] += 1
+        flow_type = str(row.get("flow_type", "")) or "unresolved"
+        if status in totals and amount is not None:
+            _add_cash_flow_amount(totals[status], flow_type, amount)
+        if status != VALUATION_STATUS_MISSING:
+            continue
+        if flow_type in {
+            "internal_transfer",
+            "credit_card_payment",
+            "investment_transfer",
+        }:
+            excluded_flow_missing_count += 1
+        elif flow_type == "unresolved":
+            unresolved_flow_missing_count += 1
+        elif flow_type in {"income", "expense", "refund"}:
+            posted_amount = _decimal(str(row.get("posted_amount", "")))
+            if posted_amount == 0:
+                zero_amount_missing_count += 1
+            else:
+                cash_flow_blocking_missing_count += 1
+        else:
+            other_flow_missing_count += 1
+    actual = _serialized_cash_flow_totals(totals[VALUATION_STATUS_ACTUAL])
+    estimated = _serialized_cash_flow_totals(totals[VALUATION_STATUS_ESTIMATED])
+    combined = _serialized_cash_flow_totals(
+        {
+            field: (
+                totals[VALUATION_STATUS_ACTUAL][field]
+                + totals[VALUATION_STATUS_ESTIMATED][field]
+            )
+            for field in ("income", "spending", "refunds", "net_cash_flow")
+        }
+    )
     return {
         "sources": sources,
         "statuses": statuses,
         "missing_count": statuses[VALUATION_STATUS_MISSING],
         "estimated_count": statuses[VALUATION_STATUS_ESTIMATED],
+        "cash_flow_blocking_missing_count": cash_flow_blocking_missing_count,
+        "excluded_flow_missing_count": excluded_flow_missing_count,
+        "unresolved_flow_missing_count": unresolved_flow_missing_count,
+        "zero_amount_missing_count": zero_amount_missing_count,
+        "other_flow_missing_count": other_flow_missing_count,
+        "cash_flow_complete": cash_flow_blocking_missing_count == 0,
+        "cash_flow": {
+            "currency": "HKD",
+            "actual": actual,
+            "estimated": estimated,
+            "combined_estimate": combined,
+        },
+    }
+
+
+def _empty_cash_flow_totals() -> dict[str, Decimal]:
+    return {
+        "income": Decimal("0"),
+        "spending": Decimal("0"),
+        "refunds": Decimal("0"),
+        "net_cash_flow": Decimal("0"),
+    }
+
+
+def _add_cash_flow_amount(
+    totals: dict[str, Decimal],
+    flow_type: str,
+    amount: Decimal,
+) -> None:
+    if flow_type == "income":
+        totals["income"] += amount
+    elif flow_type == "expense":
+        totals["spending"] += amount
+    elif flow_type == "refund":
+        totals["refunds"] += amount
+    else:
+        return
+    totals["net_cash_flow"] += amount
+
+
+def _serialized_cash_flow_totals(
+    totals: Mapping[str, Decimal],
+) -> CashFlowTotals:
+    return {
+        "income": _format_decimal(totals["income"]),
+        "spending": _format_decimal(totals["spending"]),
+        "refunds": _format_decimal(totals["refunds"]),
+        "net_cash_flow": _format_decimal(totals["net_cash_flow"]),
     }
 
 

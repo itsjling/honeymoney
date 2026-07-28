@@ -363,6 +363,13 @@ honeymoney status --start 2026-05-01 --end 2026-06-15
 
 Shows how many statements and records have been processed for the period (default: the current calendar month), plus how many records are categorized, uncategorized, and needing review. Accepts a month name (`june`), `YYYY-MM`, or explicit `--start`/`--end` dates.
 
+Status also splits missing HKD values by accounting impact. Missing `income`,
+`expense`, or `refund` values block cash-flow totals. Missing internal
+transfers, card payments, and investment transfers stay visible but do not
+block those totals. Unresolved flows remain a separate group. Actual,
+estimated, and combined-estimate HKD income, spending, refunds, and net cash
+flow use the same period and canonical rows.
+
 ```bash
 honeymoney report
 honeymoney report june --no-open
@@ -376,6 +383,13 @@ Rows without HKD valuation stay out of totals and trigger a visible warning.
 Each row shows the original amount and currency, HKD reporting value, valuation
 source, rate date and provider when present, and actual, estimated, or missing
 status. The page loads nothing from the network.
+
+The HTML and report JSON show total missing values, cash-flow blockers,
+excluded-flow gaps, unresolved-flow gaps, and zero cash-flow rows. They also
+split income, spending, refunds, and net cash flow into actual, estimated, and
+combined-estimate HKD values. Provider-backed, configured exact-date, and fixed
+estimates keep distinct source counts. Combined estimates are budget aids, not
+exact bank conversion costs or tax valuations.
 
 ```bash
 honeymoney reconcile
