@@ -2992,10 +2992,9 @@ def _manual_pair_review(argv: list[str]) -> int:
         }
         proposed_marker = f"{MANUAL_PAIR_FLAG_PREFIX}{proposed_pair_id}"
         proposed_ledger_members = {
-            row["transaction_id"]
+            row.get("transaction_id", "")
             for row in ledger_rows
-            if row.get("transaction_id")
-            and proposed_marker in row.get("flags", "").split(";")
+            if proposed_marker in row.get("flags", "").split(";")
         }
         if (
             nominated_correction_groups
@@ -3142,9 +3141,9 @@ def _require_complete_manual_pair(
     expected_ids = {left["transaction_id"], right["transaction_id"]}
     pair_marker = f"{MANUAL_PAIR_FLAG_PREFIX}{pair_id}"
     ledger_members = {
-        row["transaction_id"]
+        row.get("transaction_id", "")
         for row in ledger_rows
-        if row.get("transaction_id") and pair_marker in row.get("flags", "").split(";")
+        if pair_marker in row.get("flags", "").split(";")
     }
     correction_members = {
         transaction_id
