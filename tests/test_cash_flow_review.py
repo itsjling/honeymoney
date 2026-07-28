@@ -1460,6 +1460,65 @@ class CashFlowReviewTest(unittest.TestCase):
             self.assertNotIn("100.00", replayed.stdout)
             self.assertEqual(self._pair_artifacts(root), before)
 
+    def test_manual_pair_replay_rejects_a_malformed_extra_ledger_member(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._setup_workspace(tmp)
+            self._import_rows(
+                root,
+                "malformed-extra-pair-member.csv",
+                [
+                    "2026-05-04,SYNTHETIC PAIR OUT,-100.00,HKD",
+                    "2026-05-04,SYNTHETIC PAIR IN,100.00,HKD",
+                    "2026-05-05,SYNTHETIC EXTRA,-30.00,HKD",
+                ],
+            )
+            initial = {row["merchant"]: row for row in self._ledger(root)}
+            pair_ids = [
+                initial["SYNTHETIC PAIR OUT"]["transaction_id"],
+                initial["SYNTHETIC PAIR IN"]["transaction_id"],
+            ]
+            paired = self._run_cli(
+                ["review", "pair", *pair_ids, "--yes", "--json"],
+                cwd=root,
+            )
+            self.assertEqual(paired.returncode, 0, paired.stderr)
+            pair_id = json.loads(paired.stdout)["data"]["pair_id"]
+            ledger_path = root / "output" / "categorized.csv"
+            with ledger_path.open(newline="", encoding="utf-8") as handle:
+                reader = csv.DictReader(handle)
+                fieldnames = list(reader.fieldnames or [])
+                rows = list(reader)
+            rows_by_merchant = {row["merchant"]: row for row in rows}
+            extra_id = rows_by_merchant["SYNTHETIC EXTRA"]["transaction_id"]
+            other_pair_id = manual_pair_id([extra_id, "other-synthetic-id"])
+            rows_by_merchant["SYNTHETIC EXTRA"]["flags"] = ";".join(
+                (
+                    f"{MANUAL_PAIR_FLAG_PREFIX}{pair_id}",
+                    f"{MANUAL_PAIR_FLAG_PREFIX}{other_pair_id}",
+                )
+            )
+            with ledger_path.open("w", newline="", encoding="utf-8") as handle:
+                writer = csv.DictWriter(handle, fieldnames=fieldnames)
+                writer.writeheader()
+                writer.writerows(rows)
+            before = self._pair_artifacts(root)
+
+            replayed = self._run_cli(
+                ["review", "pair", *pair_ids, "--yes", "--json"],
+                cwd=root,
+            )
+
+            self.assertEqual(replayed.returncode, 2, replayed.stderr)
+            self.assertEqual(
+                json.loads(replayed.stdout)["errors"][0]["code"],
+                "manual_pair_conflict",
+            )
+            self.assertNotIn("SYNTHETIC", replayed.stdout)
+            self.assertNotIn("100.00", replayed.stdout)
+            self.assertEqual(self._pair_artifacts(root), before)
+
     def test_manual_pair_rejects_correction_only_membership_without_writing(
         self,
     ) -> None:

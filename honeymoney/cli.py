@@ -3135,10 +3135,11 @@ def _require_complete_manual_pair(
 ) -> None:
     """Fail unless the two rows are the whole current stored pair."""
     expected_ids = {left["transaction_id"], right["transaction_id"]}
+    pair_marker = f"{MANUAL_PAIR_FLAG_PREFIX}{pair_id}"
     ledger_members = {
         row["transaction_id"]
         for row in ledger_rows
-        if row.get("transaction_id") and manual_pair_marker(row) == pair_id
+        if row.get("transaction_id") and pair_marker in row.get("flags", "").split(";")
     }
     correction_members = {
         transaction_id
