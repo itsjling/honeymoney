@@ -312,9 +312,17 @@ The request contains only the fixed public endpoint, selected public currency
 fields, date range, sort order, page size, and page offset. HKD is fixed by the
 data set as the base currency. It never contains transaction amounts,
 descriptions, account data, statement paths, ledger rows, or model prompts.
-The command rejects redirects and other hosts, validates all pages, and writes
-nothing until the full response passes the same checks and persistence path as
-`rates import`. See [`docs/network-boundary.md`](docs/network-boundary.md).
+The command rejects redirects and other hosts. It verifies the host and
+certificate with the local system trust plus Honeymoney's packaged CA bundle,
+then validates all pages. It writes nothing until the full response passes the
+same checks and persistence path as `rates import`. See
+[`docs/network-boundary.md`](docs/network-boundary.md).
+
+Fetch failures use stable codes for certificate verification, name resolution,
+connection setup, timeout, HTTP status, malformed response, oversized response,
+and incomplete pagination. The output omits headers, response bodies, and
+private local data. A failure leaves the prior cache and ledger generation
+unchanged, so it is safe to fix the local network or trust problem and retry.
 
 Prints or edits the active `config.json`; pass `--config PATH` to target another file. `config edit` validates a temporary editor copy before replacing the original and uses `$VISUAL`, then `$EDITOR`, then `vi`. With no Ollama edit option, the guided editor lists models installed at the configured local endpoint. Selecting or passing a model also enables the Ollama fallback; `--enable` verifies that the configured model is installed before enabling it. Direct `--model`, `--enable`, and `--disable` edits can use `--json`.
 

@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import socket
+import ssl
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import date
 from http.client import HTTPException, HTTPSConnection
 from math import isfinite
 from urllib.parse import parse_qsl, urlencode, urlsplit
+
+import certifi
 
 from honeymoney.rates import (
     HKMA_BASE_CURRENCY,
@@ -174,10 +178,7 @@ def fetch_hkma_daily_rates(
         except RateFetchError:
             raise
         except (HTTPException, OSError, TimeoutError) as error:
-            raise RateFetchError(
-                "rate_fetch_failed",
-                "The HKMA rate request failed before a complete response arrived.",
-            ) from error
+            raise _transport_error(error) from error
         try:
             page = parse_hkma_daily_page(
                 content,
@@ -186,12 +187,12 @@ def fetch_hkma_daily_rates(
             )
         except RateImportError as error:
             raise RateFetchError(
-                "rate_fetch_response_invalid",
+                "rate_fetch_response_malformed",
                 "The HKMA rate response failed local validation.",
             ) from error
         if tuple(sorted(page.record_dates)) != page.record_dates:
             raise RateFetchError(
-                "rate_fetch_pagination_invalid",
+                "rate_fetch_pagination_incomplete",
                 "The HKMA response pages are not in the requested order.",
             )
         if (
@@ -200,12 +201,12 @@ def fetch_hkma_daily_rates(
             and page.record_dates[0] <= previous_page_final_date
         ):
             raise RateFetchError(
-                "rate_fetch_pagination_invalid",
+                "rate_fetch_pagination_incomplete",
                 "The HKMA response pages are not in the requested order.",
             )
         if seen_dates.intersection(page.record_dates):
             raise RateFetchError(
-                "rate_fetch_pagination_invalid",
+                "rate_fetch_pagination_incomplete",
                 "The HKMA response pages overlap.",
             )
         if any(
@@ -213,7 +214,7 @@ def fetch_hkma_daily_rates(
             for observed_date in page.record_dates
         ):
             raise RateFetchError(
-                "rate_fetch_response_invalid",
+                "rate_fetch_response_malformed",
                 "The HKMA response includes a date outside the requested range.",
             )
         observation_keys = {
@@ -226,7 +227,7 @@ def fetch_hkma_daily_rates(
             for currency in request.currencies
         ):
             raise RateFetchError(
-                "rate_fetch_response_invalid",
+                "rate_fetch_response_malformed",
                 "The HKMA response omits a requested currency.",
             )
         seen_dates.update(page.record_dates)
@@ -269,8 +270,14 @@ def _https_get(url: str, timeout_seconds: float) -> bytes:
             "rate_fetch_request_invalid",
             "The HKMA request boundary rejected an invalid URL.",
         )
-    connection = HTTPSConnection(HKMA_API_HOST, timeout=timeout_seconds)
+    context = _verified_tls_context()
+    connection: HTTPSConnection | None = None
     try:
+        connection = HTTPSConnection(
+            HKMA_API_HOST,
+            timeout=timeout_seconds,
+            context=context,
+        )
         connection.request(
             "GET",
             f"{parts.path}?{parts.query}",
@@ -282,8 +289,8 @@ def _https_get(url: str, timeout_seconds: float) -> bytes:
         response = connection.getresponse()
         if response.status != 200:
             raise RateFetchError(
-                "rate_fetch_failed",
-                "The HKMA rate request returned an error.",
+                "rate_fetch_http_status",
+                f"The HKMA rate request returned HTTP status {response.status}.",
             )
         content = response.read(HKMA_MAX_RESPONSE_BYTES + 1)
         if len(content) > HKMA_MAX_RESPONSE_BYTES:
@@ -295,12 +302,57 @@ def _https_get(url: str, timeout_seconds: float) -> bytes:
     except RateFetchError:
         raise
     except (HTTPException, OSError, TimeoutError) as error:
-        raise RateFetchError(
-            "rate_fetch_failed",
-            "The HKMA rate request failed before a complete response arrived.",
-        ) from error
+        raise _transport_error(error) from error
     finally:
-        connection.close()
+        if connection is not None:
+            connection.close()
+
+
+def _verified_tls_context() -> ssl.SSLContext:
+    try:
+        context = ssl.create_default_context()
+        context.load_verify_locations(cafile=certifi.where())
+    except (OSError, ssl.SSLError) as first_error:
+        try:
+            context = ssl.create_default_context(cafile=certifi.where())
+        except (OSError, ssl.SSLError) as fallback_error:
+            raise RateFetchError(
+                "rate_fetch_certificate_verification",
+                "Honeymoney could not load a verified certificate trust source.",
+            ) from fallback_error
+        if not context.check_hostname or context.verify_mode != ssl.CERT_REQUIRED:
+            raise RateFetchError(
+                "rate_fetch_certificate_verification",
+                "Honeymoney could not load a verified certificate trust source.",
+            ) from first_error
+    if not context.check_hostname or context.verify_mode != ssl.CERT_REQUIRED:
+        raise RateFetchError(
+            "rate_fetch_certificate_verification",
+            "Honeymoney requires certificate and hostname verification.",
+        )
+    return context
+
+
+def _transport_error(error: BaseException) -> RateFetchError:
+    if isinstance(error, ssl.SSLCertVerificationError):
+        return RateFetchError(
+            "rate_fetch_certificate_verification",
+            "The HKMA certificate could not be verified.",
+        )
+    if isinstance(error, socket.gaierror):
+        return RateFetchError(
+            "rate_fetch_name_resolution",
+            "The HKMA host name could not be resolved.",
+        )
+    if isinstance(error, (TimeoutError, socket.timeout)):
+        return RateFetchError(
+            "rate_fetch_timeout",
+            "The HKMA rate request timed out.",
+        )
+    return RateFetchError(
+        "rate_fetch_connection",
+        "The connection to the HKMA rate service failed.",
+    )
 
 
 def _valid_public_query(query: list[tuple[str, str]]) -> bool:

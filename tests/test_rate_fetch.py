@@ -1,12 +1,14 @@
 import csv
 import io
 import json
+import socket
+import ssl
 import sys
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, call, patch
 from urllib.parse import parse_qs, urlsplit
 
 from honeymoney.cli import main, run
@@ -134,7 +136,12 @@ class RateFetchBoundaryTest(unittest.TestCase):
             content = _https_get(url, 4)
 
         self.assertEqual(content, b"checked response")
-        constructor.assert_called_once_with("api.hkma.gov.hk", timeout=4)
+        constructor.assert_called_once()
+        self.assertEqual(constructor.call_args.args, ("api.hkma.gov.hk",))
+        self.assertEqual(constructor.call_args.kwargs["timeout"], 4)
+        context = constructor.call_args.kwargs["context"]
+        self.assertTrue(context.check_hostname)
+        self.assertEqual(context.verify_mode, ssl.CERT_REQUIRED)
         connection.request.assert_called_once()
         request_args = connection.request.call_args
         self.assertEqual(request_args.args[0], "GET")
@@ -148,6 +155,97 @@ class RateFetchBoundaryTest(unittest.TestCase):
         )
         response.read.assert_called_once_with(HKMA_MAX_RESPONSE_BYTES + 1)
         connection.close.assert_called_once()
+
+    def test_http_boundary_uses_system_and_packaged_verified_trust(self) -> None:
+        request = prepare_hkma_fetch(
+            ["EUR"],
+            start="2026-07-01",
+            end="2026-07-03",
+            base_currency="HKD",
+        )
+        url = build_hkma_request_url(request, offset=0)
+        response = Mock(status=200)
+        response.read.return_value = b"checked response"
+        connection = Mock()
+        connection.getresponse.return_value = response
+        context = Mock()
+        context.check_hostname = True
+        context.verify_mode = ssl.CERT_REQUIRED
+
+        with (
+            patch(
+                "honeymoney.rate_fetch.ssl.create_default_context",
+                return_value=context,
+            ) as create_context,
+            patch(
+                "honeymoney.rate_fetch.certifi.where",
+                return_value="/synthetic/certifi.pem",
+            ),
+            patch(
+                "honeymoney.rate_fetch.HTTPSConnection",
+                return_value=connection,
+            ) as constructor,
+        ):
+            self.assertEqual(_https_get(url, 4), b"checked response")
+
+        create_context.assert_called_once_with()
+        context.load_verify_locations.assert_called_once_with(
+            cafile="/synthetic/certifi.pem"
+        )
+        constructor.assert_called_once_with(
+            "api.hkma.gov.hk",
+            timeout=4,
+            context=context,
+        )
+        self.assertTrue(context.check_hostname)
+        self.assertEqual(context.verify_mode, ssl.CERT_REQUIRED)
+
+    def test_http_boundary_falls_back_to_packaged_verified_trust(self) -> None:
+        request = prepare_hkma_fetch(
+            ["EUR"],
+            start="2026-07-01",
+            end="2026-07-03",
+            base_currency="HKD",
+        )
+        url = build_hkma_request_url(request, offset=0)
+        response = Mock(status=200)
+        response.read.return_value = b"checked response"
+        connection = Mock()
+        connection.getresponse.return_value = response
+        system_context = Mock()
+        system_context.load_verify_locations.side_effect = ssl.SSLError(
+            "synthetic system trust failure"
+        )
+        packaged_context = Mock()
+        packaged_context.check_hostname = True
+        packaged_context.verify_mode = ssl.CERT_REQUIRED
+
+        with (
+            patch(
+                "honeymoney.rate_fetch.ssl.create_default_context",
+                side_effect=[system_context, packaged_context],
+            ) as create_context,
+            patch(
+                "honeymoney.rate_fetch.certifi.where",
+                return_value="/synthetic/certifi.pem",
+            ),
+            patch(
+                "honeymoney.rate_fetch.HTTPSConnection",
+                return_value=connection,
+            ) as constructor,
+        ):
+            self.assertEqual(_https_get(url, 4), b"checked response")
+
+        self.assertEqual(
+            create_context.call_args_list,
+            [
+                call(),
+                call(cafile="/synthetic/certifi.pem"),
+            ],
+        )
+        self.assertIs(constructor.call_args.kwargs["context"], packaged_context)
+        self.assertTrue(packaged_context.check_hostname)
+        self.assertEqual(packaged_context.verify_mode, ssl.CERT_REQUIRED)
 
     def test_http_boundary_wraps_status_size_and_transport_failures(self) -> None:
         request = prepare_hkma_fetch(
@@ -169,7 +267,7 @@ class RateFetchBoundaryTest(unittest.TestCase):
             self.assertRaises(RateFetchError) as status_error,
         ):
             _https_get(url, 1)
-        self.assertEqual(status_error.exception.code, "rate_fetch_failed")
+        self.assertEqual(status_error.exception.code, "rate_fetch_http_status")
         failed_connection.close.assert_called_once()
 
         large_response = Mock(status=200)
@@ -191,18 +289,36 @@ class RateFetchBoundaryTest(unittest.TestCase):
         )
         large_connection.close.assert_called_once()
 
-        broken_connection = Mock()
-        broken_connection.request.side_effect = OSError("synthetic")
-        with (
-            patch(
-                "honeymoney.rate_fetch.HTTPSConnection",
-                return_value=broken_connection,
+        failures = (
+            (
+                ssl.SSLCertVerificationError(1, "PRIVATE CERTIFICATE DETAIL"),
+                "rate_fetch_certificate_verification",
             ),
-            self.assertRaises(RateFetchError) as transport_error,
-        ):
-            _https_get(url, 1)
-        self.assertEqual(transport_error.exception.code, "rate_fetch_failed")
-        broken_connection.close.assert_called_once()
+            (
+                socket.gaierror(-2, "PRIVATE DNS DETAIL"),
+                "rate_fetch_name_resolution",
+            ),
+            (TimeoutError("PRIVATE TIMEOUT DETAIL"), "rate_fetch_timeout"),
+            (
+                ConnectionRefusedError("PRIVATE CONNECTION DETAIL"),
+                "rate_fetch_connection",
+            ),
+        )
+        for raised, code in failures:
+            with self.subTest(code=code):
+                broken_connection = Mock()
+                broken_connection.request.side_effect = raised
+                with (
+                    patch(
+                        "honeymoney.rate_fetch.HTTPSConnection",
+                        return_value=broken_connection,
+                    ),
+                    self.assertRaises(RateFetchError) as transport_error,
+                ):
+                    _https_get(url, 1)
+                self.assertEqual(transport_error.exception.code, code)
+                self.assertNotIn("PRIVATE", str(transport_error.exception))
+                broken_connection.close.assert_called_once()
 
     def test_mocked_pages_are_complete_ordered_and_filtered(self) -> None:
         request = prepare_hkma_fetch(
@@ -269,7 +385,7 @@ class RateFetchBoundaryTest(unittest.TestCase):
 
         with self.assertRaises(RateFetchError) as timed_out:
             fetch_hkma_daily_rates(request, transport=timeout)
-        self.assertEqual(timed_out.exception.code, "rate_fetch_failed")
+        self.assertEqual(timed_out.exception.code, "rate_fetch_timeout")
 
         first_page = _document(
             [
@@ -286,7 +402,7 @@ class RateFetchBoundaryTest(unittest.TestCase):
             )
         self.assertEqual(
             bad_response.exception.code,
-            "rate_fetch_response_invalid",
+            "rate_fetch_response_malformed",
         )
 
         overlapping = Mock(
@@ -303,7 +419,7 @@ class RateFetchBoundaryTest(unittest.TestCase):
             )
         self.assertEqual(
             bad_pages.exception.code,
-            "rate_fetch_pagination_invalid",
+            "rate_fetch_pagination_incomplete",
         )
 
         reversed_pages = Mock(
@@ -325,7 +441,7 @@ class RateFetchBoundaryTest(unittest.TestCase):
             )
         self.assertEqual(
             reversed_order.exception.code,
-            "rate_fetch_pagination_invalid",
+            "rate_fetch_pagination_incomplete",
         )
 
         unordered = Mock(
@@ -344,7 +460,7 @@ class RateFetchBoundaryTest(unittest.TestCase):
             )
         self.assertEqual(
             bad_order.exception.code,
-            "rate_fetch_pagination_invalid",
+            "rate_fetch_pagination_incomplete",
         )
 
         outside = Mock(
@@ -356,7 +472,7 @@ class RateFetchBoundaryTest(unittest.TestCase):
                 transport=outside,
                 page_size=3,
             )
-        self.assertEqual(bad_date.exception.code, "rate_fetch_response_invalid")
+        self.assertEqual(bad_date.exception.code, "rate_fetch_response_malformed")
 
         partial_request = prepare_hkma_fetch(
             ["EUR", "USD"],
@@ -375,7 +491,7 @@ class RateFetchBoundaryTest(unittest.TestCase):
             )
         self.assertEqual(
             incomplete_currency.exception.code,
-            "rate_fetch_response_invalid",
+            "rate_fetch_response_malformed",
         )
 
     def test_invalid_range_currency_and_timeout_stop_before_transport(self) -> None:
@@ -585,6 +701,45 @@ class RateFetchCliTest(unittest.TestCase):
             )
             fetch.assert_not_called()
 
+    def test_human_fetch_error_includes_the_stable_code(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "money"
+            with redirect_stdout(io.StringIO()):
+                self.assertEqual(main(["setup", "--root", str(root), "--json"]), 0)
+            stderr = io.StringIO()
+            argv = [
+                "honeymoney",
+                "rates",
+                "fetch",
+                "EUR",
+                "--start",
+                "2026-07-01",
+                "--end",
+                "2026-07-03",
+                "--allow-network",
+                "--config",
+                str(root / "config.json"),
+            ]
+            with (
+                patch.object(sys, "argv", argv),
+                patch(
+                    "honeymoney.cli.fetch_hkma_daily_rates",
+                    side_effect=RateFetchError(
+                        "rate_fetch_timeout",
+                        "The HKMA rate request timed out.",
+                    ),
+                ),
+                redirect_stdout(io.StringIO()),
+                redirect_stderr(stderr),
+            ):
+                result = run()
+
+            self.assertEqual(result, 2)
+            self.assertIn(
+                "rate_fetch_timeout: The HKMA rate request timed out.",
+                stderr.getvalue(),
+            )
+
     def test_interactive_consent_follows_the_public_request_preview(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "money"
@@ -736,12 +891,39 @@ class RateFetchCliTest(unittest.TestCase):
             root = Path(tmp) / "money"
             with redirect_stdout(io.StringIO()):
                 self.assertEqual(main(["setup", "--root", str(root), "--json"]), 0)
-            before = (root / "rates.json").read_bytes()
+            (root / "input" / "foreign.csv").write_text(
+                "Date,Description,Amount,Currency\n"
+                "2026-07-05,SYNTHETIC RETRY PURCHASE,-10.00,EUR\n",
+                encoding="utf-8",
+            )
+            with redirect_stdout(io.StringIO()):
+                self.assertEqual(
+                    main(
+                        [
+                            "run",
+                            "--config",
+                            str(root / "config.json"),
+                            "--no-interactive",
+                            "--json",
+                        ]
+                    ),
+                    0,
+                )
+            generation_paths = (
+                root / "rates.json",
+                root / "output" / "categorized.csv",
+                root / "output" / "review_needed.csv",
+                root / "output" / "import_report.json",
+                root / "output" / ".honeymoney-identity-manifest.json",
+                root / "output" / ".honeymoney-source-occurrences.csv",
+                root / "output" / ".honeymoney-overlap-manifest.json",
+            )
+            before = {path: path.read_bytes() for path in generation_paths}
             with (
                 patch(
                     "honeymoney.cli.fetch_hkma_daily_rates",
                     side_effect=RateFetchError(
-                        "rate_fetch_failed",
+                        "rate_fetch_timeout",
                         "Synthetic provider failure.",
                     ),
                 ),
@@ -762,5 +944,47 @@ class RateFetchCliTest(unittest.TestCase):
                         str(root / "config.json"),
                     ]
                 )
-            self.assertEqual((root / "rates.json").read_bytes(), before)
-            self.assertFalse((root / "output" / "categorized.csv").exists())
+            self.assertEqual(
+                {path: path.read_bytes() for path in generation_paths},
+                before,
+            )
+
+            observations = parse_hkma_daily_document(
+                _document([{"end_of_day": "2026-07-03", "eur": 9.25}]),
+                base_currency="HKD",
+            )
+            with (
+                patch(
+                    "honeymoney.cli.fetch_hkma_daily_rates",
+                    return_value=RateFetchResult(
+                        observations=observations,
+                        request_urls=(HKMA_API_ENDPOINT + "?public-query",),
+                    ),
+                ),
+                redirect_stdout(io.StringIO()),
+                redirect_stderr(io.StringIO()),
+            ):
+                self.assertEqual(
+                    main(
+                        [
+                            "rates",
+                            "fetch",
+                            "EUR",
+                            "--start",
+                            "2026-07-01",
+                            "--end",
+                            "2026-07-03",
+                            "--allow-network",
+                            "--config",
+                            str(root / "config.json"),
+                            "--json",
+                        ]
+                    ),
+                    0,
+                )
+            with (root / "output" / "categorized.csv").open(
+                newline="",
+                encoding="utf-8",
+            ) as handle:
+                [row] = list(csv.DictReader(handle))
+            self.assertEqual(row["amount_hkd"], "-92.50")

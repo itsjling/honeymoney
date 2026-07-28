@@ -35,7 +35,10 @@ The HTTP boundary accepts one request shape:
 HKD is the data set's fixed base currency. The code rejects other hosts, paths,
 ports, credentials, fragments, query keys, field names, and sort values before
 opening a connection. It uses a direct TLS connection to the fixed host. It
-does not follow redirects or use a proxy.
+does not follow redirects or use a proxy. TLS keeps certificate and hostname
+verification on. The client augments the local system trust with the packaged
+`certifi` CA bundle and can use that bundle alone when a local Python install
+cannot load its system trust.
 
 ## Data that may leave the machine
 
@@ -66,6 +69,21 @@ error, timeout, bad document, out-of-range date, repeated page, or incomplete
 page causes no cache or ledger write. After success, the shared rate operation
 publishes only the cache and any derived valuation generation. Its retained
 write protocol restores the prior cache and ledger if publication fails.
+
+Human and versioned JSON errors use these privacy-safe classes:
+
+- `rate_fetch_certificate_verification`
+- `rate_fetch_name_resolution`
+- `rate_fetch_connection`
+- `rate_fetch_timeout`
+- `rate_fetch_http_status`
+- `rate_fetch_response_malformed`
+- `rate_fetch_response_too_large`
+- `rate_fetch_pagination_incomplete`
+
+Messages may include an HTTP status but never include request headers, response
+bodies, transaction data, account data, or local paths. A retry starts from the
+same prior generation.
 
 Tests replace the HTTP transport with in-memory responses and inspect each full
 outbound URL. The default suite blocks live non-local sockets.

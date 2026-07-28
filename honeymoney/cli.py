@@ -4772,7 +4772,11 @@ def run() -> int:
             else (
                 duplicate_details["message"]
                 if duplicate_details is not None
-                else str(error)
+                else (
+                    f"{rate_fetch_details['code']}: {rate_fetch_details['message']}"
+                    if rate_fetch_details is not None
+                    else str(error)
+                )
             ),
             file=sys.stderr,
         )
