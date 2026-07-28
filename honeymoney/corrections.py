@@ -648,17 +648,26 @@ def apply_correction_operation(
             and corrected == baseline
         ):
             corrected_ledger[index] = original
-    repair_source_data_review_state(
-        corrected_ledger,
-        source_rows,
-        operation_overlap_manifest,
-        transaction_ids=None if migration_required else corrected_ids,
-    )
-    for transaction_id, patch in review_state_correction_updates(
-        merged_corrections,
-        corrected_ledger,
-    ).items():
-        merged_corrections[transaction_id].update(patch)
+    ordinary_repair_ids = {
+        row["transaction_id"]
+        for row in corrected_ledger
+        if row.get("transaction_id") in corrected_ids
+        and "source_provenance_ambiguous" in row.get("flags", "").split(";")
+        and "overlap_history_ambiguous" not in row.get("flags", "").split(";")
+    }
+    if migration_required or ordinary_repair_ids:
+        repaired_ids = repair_source_data_review_state(
+            corrected_ledger,
+            source_rows,
+            operation_overlap_manifest,
+            transaction_ids=None if migration_required else ordinary_repair_ids,
+        )
+        for transaction_id, patch in review_state_correction_updates(
+            merged_corrections,
+            corrected_ledger,
+        ).items():
+            if migration_required or transaction_id in repaired_ids:
+                merged_corrections[transaction_id].update(patch)
     review_rows = [
         to_review_row(row)
         for row in corrected_ledger
