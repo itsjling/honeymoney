@@ -15,6 +15,9 @@ EXPECTED_PDF_RANGES = {
     "pdfplumber": ">=0.11.10,<0.12",
     "pymupdf": ">=1.28,<1.29",
 }
+EXPECTED_BASE_RANGES = {
+    "certifi": ">=2026.7.22,<2027",
+}
 
 
 def _metadata_requirements(text: str) -> list[Requirement]:
@@ -36,6 +39,28 @@ def _assert_pdf_metadata(text: str, artifact: Path) -> None:
         )
     for name, expected_range in EXPECTED_PDF_RANGES.items():
         actual_range = str(pdf_requirements[name].specifier)
+        expected = str(Requirement(f"{name}{expected_range}").specifier)
+        if actual_range != expected:
+            raise ValueError(
+                f"{artifact.name} {name} range is {actual_range!r}, expected {expected!r}"
+            )
+        if "==" in actual_range:
+            raise ValueError(f"{artifact.name} unexpectedly hard-pins {name}")
+
+
+def _assert_base_metadata(text: str, artifact: Path) -> None:
+    requirements = _metadata_requirements(text)
+    base_requirements = {
+        requirement.name.casefold(): requirement
+        for requirement in requirements
+        if requirement.marker is None
+    }
+    if set(base_requirements) != set(EXPECTED_BASE_RANGES):
+        raise ValueError(
+            f"{artifact.name} base dependency mismatch: {sorted(base_requirements)}"
+        )
+    for name, expected_range in EXPECTED_BASE_RANGES.items():
+        actual_range = str(base_requirements[name].specifier)
         expected = str(Requirement(f"{name}{expected_range}").specifier)
         if actual_range != expected:
             raise ValueError(
@@ -89,9 +114,16 @@ def main() -> int:
             f"found {len(wheels)} wheel(s) and {len(sdists)} sdist(s)"
         )
 
-    _assert_pdf_metadata(_wheel_metadata(wheels[0]), wheels[0])
-    _assert_pdf_metadata(_sdist_metadata(sdists[0]), sdists[0])
-    print("Distribution metadata verified: bounded PDF extras, no constraints shipped")
+    wheel_metadata = _wheel_metadata(wheels[0])
+    sdist_metadata = _sdist_metadata(sdists[0])
+    _assert_base_metadata(wheel_metadata, wheels[0])
+    _assert_base_metadata(sdist_metadata, sdists[0])
+    _assert_pdf_metadata(wheel_metadata, wheels[0])
+    _assert_pdf_metadata(sdist_metadata, sdists[0])
+    print(
+        "Distribution metadata verified: bounded runtime and PDF dependencies, "
+        "no constraints shipped"
+    )
     return 0
 
 

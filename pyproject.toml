@@ -3,7 +3,9 @@ name = "honeymoney"
 version = "0.1.0"
 description = "Local private spending categorization for household transaction exports"
 requires-python = ">=3.10"
-dependencies = []
+dependencies = [
+  "certifi>=2026.7.22,<2027",
+]
 
 [project.optional-dependencies]
 pdf = [
