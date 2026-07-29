@@ -15,8 +15,8 @@ python3 -m mypy
 The named scope in `pyproject.toml` checks normalization, category policy,
 duplicate evaluation, overlap planning and decisions, persistence,
 identity-state loading, corrections, reconciliation, CSV/schema helpers, and
-the shared public contracts. It rejects explicit `Any`, untyped definitions,
-and unused ignores.
+report assembly and the shared public contracts. It rejects explicit `Any`,
+untyped definitions, and unused ignores.
 
 The implementation modules not yet checked are:
 
@@ -25,7 +25,6 @@ The implementation modules not yet checked are:
 - `honeymoney/identity.py`
 - `honeymoney/importers.py`
 - `honeymoney/ollama.py`
-- `honeymoney/report.py`
 - `honeymoney/rules.py`
 
 The checked `identity_contracts.py`, `overlap_contracts.py`, and

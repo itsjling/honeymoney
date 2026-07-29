@@ -129,7 +129,8 @@ fixed mappings for the same account and currency, and any dynamic mapping that
 can overlap another mapping for the same account. If one statement yields
 different values for the same opening or closing target, import keeps the
 transactions, stores no disputed balance, and adds a privacy-safe conflict
-flag. Reconciliation then reports an unavailable result with a clear reason.
+flag. Reconciliation then reports `conflicting_evidence`, marks that endpoint
+unsafe, and keeps the result unavailable without showing either value.
 
 `balance_mappings` forms part of the extractor contract. Adding or changing it
 changes `extractor_contract_id`, even when the PDF bytes stay the same. During

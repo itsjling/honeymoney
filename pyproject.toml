@@ -62,6 +62,7 @@ files = [
   "honeymoney/parser_contracts.py",
   "honeymoney/persistence.py",
   "honeymoney/reconciliation.py",
+  "honeymoney/report.py",
   "honeymoney/rules.pyi",
   "honeymoney/schema.py",
 ]

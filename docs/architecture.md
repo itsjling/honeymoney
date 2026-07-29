@@ -183,10 +183,15 @@ groups hidden source occurrences by source identity, account, statement
 section, and posted currency. It uses
 `source_file` only for legacy rows that
 lack `source_id`. The existing `status` field stays `reconciled`, `difference`,
-or `unavailable`. The added `result` field reports `matched`, `mismatched`, or
-`unavailable`; unavailable results include a reason. Conflicting balance values
-add a safe row flag and make the result unavailable. Conflict output names the
-source, page, section, and field but omits the values.
+or `unavailable`. Each statement result also says whether safe opening and
+closing evidence was found. Its outcome is `missing_opening`,
+`missing_closing`, `missing_both`, `conflicting_evidence`, `matched`, or
+`mismatched`. If both endpoints are safe but posted currency or activity input
+is unusable, its outcome remains `unavailable` and its reason names that input.
+Partial, conflicting, and unavailable results contain no calculated values.
+Conflicting balance values add a safe row flag. Conflict output names the
+source, page, section, and field but omits the values. Missing evidence alone
+does not mark a transaction for source-data review.
 
 Canonical cash-flow and report totals use the public ledger. The maximum
 per-source multiplicity sets the canonical count for each exact overlap group.

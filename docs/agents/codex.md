@@ -28,8 +28,8 @@ the conversion and file the next bounded step.
 
 The current excluded implementation modules are
 `categorization_memory.py`, `cli.py`, `identity.py`, `importers.py`,
-`ollama.py`, `report.py`, and `rules.py`. Their public identity and parser
-boundaries use the checked contracts in `contracts.py`,
+`ollama.py`, and `rules.py`. Their public identity and parser boundaries use
+the checked contracts in `contracts.py`,
 `identity_contracts.py`, `overlap_contracts.py`, and `parser_contracts.py`,
 plus checked stubs for the exact callable surface of `identity.py`,
 `importers.py`, and `rules.py`. The overlap planner and its duplicate decisions

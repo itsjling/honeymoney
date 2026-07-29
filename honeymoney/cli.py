@@ -108,6 +108,7 @@ from honeymoney.rates import (
     validate_rate_cache,
 )
 from honeymoney.reconciliation import (
+    complete_statement_rows,
     reconcile_ledger,
     transaction_direction,
     validate_reconciliation_config,
@@ -3673,6 +3674,16 @@ def _report_command(argv: list[str]) -> int:
         _duplicate_compatibility(period_overlap)
     )
     period_label = f"{start.isoformat()} to {end.isoformat()}"
+    period_statement_rows = complete_statement_rows(
+        state.source_rows,
+        period_source_rows,
+    )
+    period_summary = reconcile_ledger(
+        [dict(row) for row in rows],
+        config,
+        statement_rows=period_statement_rows,
+    )
+    balance_reconciliation = period_summary["balance_reconciliation"]
 
     report_path = Path(args.output_path or categorized_path.parent / "report.html")
     report_path.parent.mkdir(parents=True, exist_ok=True)
@@ -3681,6 +3692,7 @@ def _report_command(argv: list[str]) -> int:
             rows,
             period_label,
             source_occurrence_count=len(period_source_rows),
+            balance_reconciliation=balance_reconciliation,
         ),
         encoding="utf-8",
     )
@@ -3694,6 +3706,7 @@ def _report_command(argv: list[str]) -> int:
                 "missing_base_currency_count": missing_base_currency_count(rows),
                 "valuation": valuation_summary(rows),
                 "review_reason_counts": review_summary(rows),
+                "balance_reconciliation": balance_reconciliation,
                 "overlap": period_overlap,
                 "duplicate_count": duplicate_count,
                 "duplicate_group_count": duplicate_group_count,
@@ -3837,8 +3850,26 @@ def _reconcile_command(argv: list[str]) -> int:
         f"{overlap_diagnostic['consolidated_occurrence_count']} consolidated, "
         f"{overlap_diagnostic['ambiguous_group_count']} ambiguous groups"
     )
-    for account in summary["balance_reconciliation"].values():
+    for account_id, account in summary["balance_reconciliation"].items():
         for statement in account["statements"]:
+            source_file = statement["source_file"] or "(unknown)"
+            statement_section = statement["statement_section"] or "(none)"
+            posted_currency = statement["posted_currency"] or "(unknown)"
+            opening = "found" if statement["opening_evidence_found"] else "missing"
+            closing = "found" if statement["closing_evidence_found"] else "missing"
+            coverage = (
+                "Balance coverage: "
+                f"account={account_id or '(unknown)'} "
+                f"source={source_file} "
+                f"section={statement_section} "
+                f"currency={posted_currency} "
+                f"result={statement['result']} "
+                f"opening={opening} "
+                f"closing={closing}"
+            )
+            if reason := statement.get("reason"):
+                coverage += f" reason={reason}"
+            print(coverage)
             for conflict in statement.get("conflicts", []):
                 print(
                     "Balance issue: "
