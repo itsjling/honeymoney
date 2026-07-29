@@ -69,8 +69,10 @@ content.
 The prior statement-section ledger, review, and hidden source headers remain
 valid input. Honeymoney adds empty `valuation_rate_date` and
 `valuation_provider` cells in memory and writes the current headers on the next
-ledger change. Old configs without `rate_cache` still load. The rate-import
-command requires that field; `setup` creates it and an empty versioned cache.
+ledger change. Old configs without `rate_cache` use `rates.json` beside the
+active config, which is the same path that `setup` writes. Honeymoney keeps
+this default in memory and does not edit the config. An explicit cache path
+always wins.
 
 ## Consequences
 

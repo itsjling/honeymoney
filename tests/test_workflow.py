@@ -4854,6 +4854,9 @@ def open(path):
     def test_checked_in_example_outputs_match_current_pipeline(self) -> None:
         examples_dir = REPO_ROOT / "examples"
         expected_dir = examples_dir / "expected-output"
+        default_rate_cache = examples_dir / "rates.json"
+        self.assertFalse(default_rate_cache.exists())
+        self.addCleanup(default_rate_cache.unlink, missing_ok=True)
         with tempfile.TemporaryDirectory() as tmp:
             output_dir = Path(tmp)
             result = subprocess.run(

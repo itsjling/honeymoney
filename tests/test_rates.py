@@ -298,6 +298,409 @@ class RateImportCliTest(unittest.TestCase):
             check=False,
         )
 
+    def test_legacy_config_uses_stable_workspace_rate_cache_default(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "money"
+            setup = self._run_cli(
+                ["setup", "--root", str(root), "--json"],
+                cwd=REPO_ROOT,
+            )
+            self.assertEqual(setup.returncode, 0, setup.stderr)
+            config_path = root / "config.json"
+            config = json.loads(config_path.read_text(encoding="utf-8"))
+            config.pop("rate_cache")
+            config_path.write_text(
+                json.dumps(config, indent=2, sort_keys=True),
+                encoding="utf-8",
+            )
+            cache_path = root / "rates.json"
+            cache_path.unlink()
+            legacy_config_bytes = config_path.read_bytes()
+            provider_path = root / "hkma.json"
+            provider_path.write_bytes(
+                _hkma_document([{"end_of_day": "2026-07-03", "eur": 9.25}])
+            )
+
+            imported = self._run_cli(
+                [
+                    "rates",
+                    "import",
+                    str(provider_path),
+                    "--config",
+                    str(config_path),
+                    "--json",
+                ],
+                cwd=REPO_ROOT,
+            )
+
+            self.assertEqual(imported.returncode, 0, imported.stderr)
+            payload = json.loads(imported.stdout)
+            self.assertEqual(
+                payload["data"]["rate_cache"],
+                {
+                    "defaulted": True,
+                    "path": str(cache_path.resolve()),
+                },
+            )
+            self.assertEqual(
+                payload["artifacts"]["rate_cache_json"],
+                str(cache_path.resolve()),
+            )
+            self.assertEqual(config_path.read_bytes(), legacy_config_bytes)
+            self.assertTrue(cache_path.exists())
+            stable_cache_bytes = cache_path.read_bytes()
+
+            repeated = self._run_cli(
+                [
+                    "rates",
+                    "import",
+                    str(provider_path),
+                    "--config",
+                    str(config_path),
+                ],
+                cwd=REPO_ROOT,
+            )
+
+            self.assertEqual(repeated.returncode, 0, repeated.stderr)
+            self.assertIn(
+                f"Rate cache: {cache_path.resolve()} (default)", repeated.stdout
+            )
+            self.assertEqual(cache_path.read_bytes(), stable_cache_bytes)
+            self.assertEqual(config_path.read_bytes(), legacy_config_bytes)
+
+            (root / "input" / "foreign.csv").write_text(
+                "Date,Description,Amount,Currency\n"
+                "2026-07-05,SYNTHETIC LEGACY CACHE PURCHASE,-10.00,EUR\n",
+                encoding="utf-8",
+            )
+            first_run = self._run_cli(
+                [
+                    "run",
+                    "--config",
+                    str(config_path),
+                    "--no-interactive",
+                    "--json",
+                ],
+                cwd=REPO_ROOT,
+            )
+            self.assertEqual(first_run.returncode, 0, first_run.stderr)
+            ledger_path = root / "output" / "categorized.csv"
+            with ledger_path.open(newline="", encoding="utf-8") as handle:
+                [ledger_row] = list(csv.DictReader(handle))
+            self.assertEqual(ledger_row["amount_hkd"], "-92.50")
+            self.assertEqual(
+                len(json.loads(cache_path.read_text(encoding="utf-8"))["resolutions"]),
+                1,
+            )
+            first_reconcile = self._run_cli(
+                [
+                    "reconcile",
+                    "--config",
+                    str(config_path),
+                    "--json",
+                ],
+                cwd=REPO_ROOT,
+            )
+            self.assertEqual(first_reconcile.returncode, 0, first_reconcile.stderr)
+            stable_generation = {
+                str(path.relative_to(root)): path.read_bytes()
+                for path in sorted(root.rglob("*"))
+                if path.is_file()
+            }
+            second_run = self._run_cli(
+                [
+                    "reconcile",
+                    "--config",
+                    str(config_path),
+                    "--json",
+                ],
+                cwd=REPO_ROOT,
+            )
+            self.assertEqual(second_run.returncode, 0, second_run.stderr)
+            self.assertEqual(
+                {
+                    str(path.relative_to(root)): path.read_bytes()
+                    for path in sorted(root.rglob("*"))
+                    if path.is_file()
+                },
+                stable_generation,
+            )
+
+            provider_path.write_bytes(
+                _hkma_document([{"end_of_day": "2026-07-03", "eur": 9.25, "usd": 7.8}])
+            )
+            before_failed_import = {
+                str(path.relative_to(root)): path.read_bytes()
+                for path in sorted(root.rglob("*"))
+                if path.is_file()
+            }
+            failed = self._run_cli(
+                [
+                    "rates",
+                    "import",
+                    str(provider_path),
+                    "--config",
+                    str(config_path),
+                    "--json",
+                ],
+                cwd=REPO_ROOT,
+                fault="replace-before:categorized.csv",
+            )
+            self.assertEqual(failed.returncode, 2)
+            self.assertEqual(
+                {
+                    str(path.relative_to(root)): path.read_bytes()
+                    for path in sorted(root.rglob("*"))
+                    if path.is_file()
+                },
+                before_failed_import,
+            )
+
+    def test_legacy_default_cache_is_trusted_by_config_and_setup_recovery(
+        self,
+    ) -> None:
+        for recovery_command in ("config", "setup"):
+            with self.subTest(recovery_command=recovery_command):
+                with tempfile.TemporaryDirectory() as tmp:
+                    root = Path(tmp) / "money"
+                    setup = self._run_cli(
+                        ["setup", "--root", str(root), "--json"],
+                        cwd=REPO_ROOT,
+                    )
+                    self.assertEqual(setup.returncode, 0, setup.stderr)
+                    config_path = root / "config.json"
+                    config = json.loads(config_path.read_text(encoding="utf-8"))
+                    config.pop("rate_cache")
+                    config_path.write_text(
+                        json.dumps(config, indent=2, sort_keys=True),
+                        encoding="utf-8",
+                    )
+                    legacy_config_bytes = config_path.read_bytes()
+                    provider_path = root / "hkma.json"
+                    provider_path.write_bytes(
+                        _hkma_document([{"end_of_day": "2026-07-03", "eur": 9.25}])
+                    )
+                    imported_rates = self._run_cli(
+                        [
+                            "rates",
+                            "import",
+                            str(provider_path),
+                            "--config",
+                            str(config_path),
+                            "--json",
+                        ],
+                        cwd=root,
+                    )
+                    self.assertEqual(
+                        imported_rates.returncode,
+                        0,
+                        imported_rates.stderr,
+                    )
+                    (root / "input" / "foreign.csv").write_text(
+                        "Date,Description,Amount,Currency\n"
+                        "2026-07-05,SYNTHETIC RECOVERY PURCHASE,-10.00,EUR\n",
+                        encoding="utf-8",
+                    )
+                    imported = self._run_cli(
+                        [
+                            "run",
+                            "--config",
+                            str(config_path),
+                            "--no-interactive",
+                            "--json",
+                        ],
+                        cwd=root,
+                    )
+                    self.assertEqual(imported.returncode, 0, imported.stderr)
+                    provider_path.write_bytes(
+                        _hkma_document(
+                            [
+                                {
+                                    "end_of_day": "2026-07-03",
+                                    "eur": 9.25,
+                                    "usd": 7.80,
+                                }
+                            ]
+                        )
+                    )
+
+                    interrupted = self._run_cli(
+                        [
+                            "rates",
+                            "import",
+                            str(provider_path),
+                            "--config",
+                            str(config_path),
+                            "--json",
+                        ],
+                        cwd=root,
+                        fault="replace-after:categorized.csv",
+                    )
+
+                    self.assertEqual(
+                        interrupted.returncode,
+                        75,
+                        interrupted.stderr or interrupted.stdout,
+                    )
+                    state_path = (
+                        root / "output" / ".categorized.csv.honeymoney-state.json"
+                    )
+                    self.assertTrue(state_path.exists())
+                    if recovery_command == "config":
+                        recovered = self._run_cli(
+                            ["config", "--config", str(config_path), "--json"],
+                            cwd=root,
+                        )
+                        self.assertEqual(recovered.returncode, 0, recovered.stderr)
+                        self.assertEqual(config_path.read_bytes(), legacy_config_bytes)
+                        observations = json.loads(
+                            (root / "rates.json").read_text(encoding="utf-8")
+                        )["observations"]
+                        self.assertIn(
+                            ("USD", "7.8"),
+                            [
+                                (item["quote_currency"], item["raw_rate"])
+                                for item in observations
+                            ],
+                        )
+                    else:
+                        recovered = self._run_cli(
+                            [
+                                "setup",
+                                "--root",
+                                str(root),
+                                "--force",
+                                "--json",
+                            ],
+                            cwd=REPO_ROOT,
+                        )
+                        self.assertEqual(recovered.returncode, 0, recovered.stderr)
+                    self.assertFalse(state_path.exists())
+
+    def test_legacy_default_cache_standalone_generation_is_recovered(
+        self,
+    ) -> None:
+        for recovery_command in ("config", "setup"):
+            with self.subTest(recovery_command=recovery_command):
+                with tempfile.TemporaryDirectory() as tmp:
+                    root = Path(tmp) / "money"
+                    setup = self._run_cli(
+                        ["setup", "--root", str(root), "--json"],
+                        cwd=REPO_ROOT,
+                    )
+                    self.assertEqual(setup.returncode, 0, setup.stderr)
+                    config_path = root / "config.json"
+                    config = json.loads(config_path.read_text(encoding="utf-8"))
+                    config.pop("rate_cache")
+                    config_path.write_text(
+                        json.dumps(config, indent=2, sort_keys=True),
+                        encoding="utf-8",
+                    )
+                    legacy_config_bytes = config_path.read_bytes()
+                    provider_path = root / "hkma.json"
+                    provider_path.write_bytes(
+                        _hkma_document([{"end_of_day": "2026-07-03", "eur": 9.25}])
+                    )
+
+                    interrupted = self._run_cli(
+                        [
+                            "rates",
+                            "import",
+                            str(provider_path),
+                            "--config",
+                            str(config_path),
+                            "--json",
+                        ],
+                        cwd=root,
+                        fault="replace-after:rates.json",
+                    )
+
+                    self.assertEqual(
+                        interrupted.returncode,
+                        75,
+                        interrupted.stderr or interrupted.stdout,
+                    )
+                    state_path = root / ".rates.json.honeymoney-state.json"
+                    self.assertTrue(state_path.exists())
+                    if recovery_command == "config":
+                        recovered = self._run_cli(
+                            ["config", "--config", str(config_path), "--json"],
+                            cwd=root,
+                        )
+                        self.assertEqual(recovered.returncode, 0, recovered.stderr)
+                        self.assertEqual(config_path.read_bytes(), legacy_config_bytes)
+                        observations = json.loads(
+                            (root / "rates.json").read_text(encoding="utf-8")
+                        )["observations"]
+                        self.assertEqual(
+                            [
+                                (item["quote_currency"], item["raw_rate"])
+                                for item in observations
+                            ],
+                            [("EUR", "9.25")],
+                        )
+                    else:
+                        recovered = self._run_cli(
+                            [
+                                "setup",
+                                "--root",
+                                str(root),
+                                "--force",
+                                "--json",
+                            ],
+                            cwd=REPO_ROOT,
+                        )
+                        self.assertEqual(recovered.returncode, 0, recovered.stderr)
+                    self.assertFalse(state_path.exists())
+
+    def test_explicit_rate_cache_path_takes_precedence_over_default(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "money"
+            setup = self._run_cli(
+                ["setup", "--root", str(root), "--json"],
+                cwd=REPO_ROOT,
+            )
+            self.assertEqual(setup.returncode, 0, setup.stderr)
+            config_path = root / "config.json"
+            config = json.loads(config_path.read_text(encoding="utf-8"))
+            custom_path = root / "local-cache" / "official-rates.json"
+            custom_path.parent.mkdir()
+            config["rate_cache"] = str(custom_path)
+            config_path.write_text(
+                json.dumps(config, indent=2, sort_keys=True),
+                encoding="utf-8",
+            )
+            provider_path = root / "hkma.json"
+            provider_path.write_bytes(
+                _hkma_document([{"end_of_day": "2026-07-03", "eur": 9.25}])
+            )
+
+            imported = self._run_cli(
+                [
+                    "rates",
+                    "import",
+                    str(provider_path),
+                    "--config",
+                    str(config_path),
+                    "--json",
+                ],
+                cwd=REPO_ROOT,
+            )
+
+            self.assertEqual(imported.returncode, 0, imported.stderr)
+            self.assertEqual(
+                json.loads(imported.stdout)["data"]["rate_cache"],
+                {
+                    "defaulted": False,
+                    "path": str(custom_path.resolve()),
+                },
+            )
+            self.assertTrue(custom_path.exists())
+            self.assertEqual(
+                json.loads((root / "rates.json").read_text(encoding="utf-8")),
+                empty_rate_cache(),
+            )
+
     def test_import_revalues_and_persists_as_one_repeatable_generation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "money"

@@ -42,6 +42,13 @@ replace the transaction representation. Coverage work must test behavior, not
 private implementation details, and it must use only committed synthetic
 fixtures.
 
+The next bounded CLI conversion will extract the JSON envelope, command-error
+mapping, and rate and source-data result shapes from `cli.py` into a checked
+`cli_contracts.py` module. It will add that module to the strict scope and keep
+the existing command tests at its boundary. Adding all of `cli.py` in this
+feature stack would also require unrelated conversions in the imported
+identity, parser, rule, and Ollama implementations.
+
 This is a ratchet:
 
 - never remove a checked file or weaken a rule;

@@ -452,6 +452,65 @@ class RateFetchBoundaryTest(unittest.TestCase):
 
 
 class RateFetchCliTest(unittest.TestCase):
+    def test_fetch_uses_workspace_cache_default_for_legacy_config(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "money"
+            with redirect_stdout(io.StringIO()):
+                self.assertEqual(main(["setup", "--root", str(root), "--json"]), 0)
+            config_path = root / "config.json"
+            config = json.loads(config_path.read_text(encoding="utf-8"))
+            config.pop("rate_cache")
+            config_path.write_text(
+                json.dumps(config, indent=2, sort_keys=True),
+                encoding="utf-8",
+            )
+            legacy_config_bytes = config_path.read_bytes()
+            cache_path = root / "rates.json"
+            cache_path.unlink()
+            observations = parse_hkma_daily_document(
+                _document([{"end_of_day": "2026-07-03", "eur": 9.25}]),
+                base_currency="HKD",
+            )
+            stdout = io.StringIO()
+            with (
+                patch(
+                    "honeymoney.cli.fetch_hkma_daily_rates",
+                    return_value=RateFetchResult(
+                        observations=observations,
+                        request_urls=(HKMA_API_ENDPOINT + "?public-query",),
+                    ),
+                ),
+                redirect_stdout(stdout),
+                redirect_stderr(io.StringIO()),
+            ):
+                result = main(
+                    [
+                        "rates",
+                        "fetch",
+                        "EUR",
+                        "--start",
+                        "2026-07-01",
+                        "--end",
+                        "2026-07-03",
+                        "--allow-network",
+                        "--config",
+                        str(config_path),
+                        "--json",
+                    ]
+                )
+
+            self.assertEqual(result, 0)
+            payload = json.loads(stdout.getvalue())
+            self.assertEqual(
+                payload["data"]["rate_cache"],
+                {
+                    "defaulted": True,
+                    "path": str(cache_path.resolve()),
+                },
+            )
+            self.assertTrue(cache_path.exists())
+            self.assertEqual(config_path.read_bytes(), legacy_config_bytes)
+
     def test_noninteractive_fetch_requires_opt_in_before_http(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "money"

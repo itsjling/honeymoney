@@ -82,9 +82,12 @@ while
 import generation. Corrections and remembered rules remain independent inputs,
 but operations that change them and the ledger publish them through the same
 recoverable persistence boundary.
-The versioned `rates.json` cache is also an input. A local HKMA document import
-checks and normalizes every observation before it publishes the cache and
-revalued ledger through that boundary.
+The versioned `rates.json` cache is also an input. A config that omits
+`rate_cache` resolves it to `rates.json` beside the active config, inside the
+identity workspace root. An explicit cache path wins. This default exists only
+in loaded config state and never rewrites the user's config. A local HKMA
+document import checks and normalizes every observation before it publishes
+the cache and revalued ledger through that boundary.
 
 Each operation writes and flushes complete staged files and prior-file backups
 before replacing any public path. Non-ledger artifacts are replaced first and
