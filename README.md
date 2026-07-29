@@ -193,7 +193,12 @@ owners. A valid pair gets one stable manual transfer group, stays paired on
 later reconciliation and proven replacement, and remains outside income and
 spending. A changed or missing member makes the remaining row unresolved and
 returns it to review. A later accounting decision clears both pair links in
-the same write and returns the other member to review.
+the same write and returns the other member to review. Repeating the same
+nomination returns `result=already_paired` and `changed=false`, even when the
+first pair write retired the nominated source IDs. This no-op reports the
+current pair and transaction IDs and writes no files. It succeeds only when
+each old ID maps to one current row and those two rows form the whole stored
+pair.
 
 ```json
 [

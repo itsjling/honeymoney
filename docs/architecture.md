@@ -184,7 +184,11 @@ checks account, posted currency, amount, sign, and owner. Missing, extra, or
 changed members fail closed as unresolved accounting review. Valid manual pairs
 run before automatic matching and keep `flow_source=correction`. A later
 non-transfer review clears both pair markers atomically and returns the other
-member to review.
+member to review. Pair replay maps a retired nominated source ID only through a
+single active canonical slot with the same checked identity fingerprint. Both
+mapped rows must have reciprocal links and make up the full ledger and
+correction membership for one pair. An exact replay returns `changed=false`
+before any generation write.
 
 PDF profiles may map statement opening and closing balance lines. The importer
 scans raw word or table lines, then puts each balance on the first or last

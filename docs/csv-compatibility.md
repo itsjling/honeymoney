@@ -86,7 +86,8 @@ gain these columns on the next write.
 Manual cash-movement pairing adds the text field `manual_pair_id` to
 `corrections.csv`. Older correction headers remain valid and gain the field on
 the next write. Only `review pair` creates this field; structured `correct`
-input cannot set it.
+input cannot set it. Replaying an accepted pair through proven retired source
+IDs returns the current canonical IDs without rewriting the correction file.
 
 New public text columns are safe by default. A new numeric or other canonical
 non-text column must be added to `CANONICAL_CSV_COLUMNS` and covered by a

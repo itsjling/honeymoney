@@ -12,7 +12,9 @@ from unittest.mock import Mock, patch
 
 from honeymoney.csv_artifacts import csv_document
 from honeymoney.identity_state import identity_manifest_path, load_identity_state
+from honeymoney.manual_pairs import MANUAL_PAIR_FLAG_PREFIX, manual_pair_id
 from honeymoney.overlap import overlap_manifest_path, source_occurrences_path
+from honeymoney.persistence import GenerationConflictError
 from honeymoney.schema import SOURCE_OCCURRENCE_COLUMNS
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -96,6 +98,83 @@ class CashFlowReviewTest(unittest.TestCase):
             for path in paths
             if path.exists()
         }
+
+    def _pair_artifacts(self, root: Path) -> dict[str, bytes]:
+        paths = [
+            *sorted((root / "output").iterdir()),
+            root / "corrections.csv",
+        ]
+        return {
+            str(path.relative_to(root)): path.read_bytes()
+            for path in paths
+            if path.is_file()
+        }
+
+    def _append_idless_manual_pair_member(self, root: Path, pair_id: str) -> None:
+        ledger_path = root / "output" / "categorized.csv"
+        with ledger_path.open(newline="", encoding="utf-8") as handle:
+            reader = csv.DictReader(handle)
+            fieldnames = list(reader.fieldnames or [])
+            rows = list(reader)
+        [template, *_] = rows
+        extra = {field: "" for field in fieldnames}
+        extra.update(
+            {
+                "date": "2026-05-05",
+                "account_id": template["account_id"],
+                "account_type": template["account_type"],
+                "original_amount": "-1.00",
+                "original_currency": "HKD",
+                "posted_amount": "-1.00",
+                "posted_currency": "HKD",
+                "amount_hkd": "-1.00",
+                "merchant": "SYNTHETIC IDLESS MEMBER",
+                "original_description": "SYNTHETIC IDLESS MEMBER",
+                "category": "Other",
+                "flow_type": "expense",
+                "flow_source": "deterministic",
+                "confidence": "1.00",
+                "needs_review": "false",
+                "flags": f"{MANUAL_PAIR_FLAG_PREFIX}{pair_id}",
+                "reconciliation_status": "unmatched",
+            }
+        )
+        with ledger_path.open("w", newline="", encoding="utf-8") as handle:
+            writer = csv.DictWriter(handle, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows([*rows, extra])
+        loaded = load_identity_state(ledger_path)
+        self.assertTrue(
+            any(
+                not row.get("transaction_id")
+                and f"{MANUAL_PAIR_FLAG_PREFIX}{pair_id}"
+                in row.get("flags", "").split(";")
+                for row in loaded.rows
+            )
+        )
+
+    def _append_raw_correction_rows(
+        self,
+        root: Path,
+        additions: list[dict[str, str]],
+    ) -> None:
+        correction_path = root / "corrections.csv"
+        with correction_path.open(newline="", encoding="utf-8") as handle:
+            reader = csv.DictReader(handle)
+            fieldnames = list(reader.fieldnames or [])
+            rows = list(reader)
+        with correction_path.open("w", newline="", encoding="utf-8") as handle:
+            writer = csv.DictWriter(handle, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(
+                [
+                    *rows,
+                    *(
+                        {field: addition.get(field, "") for field in fieldnames}
+                        for addition in additions
+                    ),
+                ]
+            )
 
     def test_filtered_review_marks_only_unresolved_may_inflow_as_income(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -955,7 +1034,7 @@ class CashFlowReviewTest(unittest.TestCase):
                 updated["EQUAL OUTFLOW"]["flow_type"], "internal_transfer"
             )
 
-    def test_manual_same_account_pair_survives_reconcile_and_replacement(
+    def test_manual_pair_replay_survives_migration_reconcile_and_replacement(
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -976,14 +1055,28 @@ class CashFlowReviewTest(unittest.TestCase):
                 cwd=root,
             )
             self.assertEqual(imported.returncode, 0, imported.stderr)
+            categorized_path = root / "output" / "categorized.csv"
+            state = load_identity_state(categorized_path)
+            source_rows = state.source_rows
+            self.assertIsNotNone(source_rows)
+            assert source_rows is not None
+            categorized_path.write_text(
+                csv_document(SOURCE_OCCURRENCE_COLUMNS, source_rows),
+                encoding="utf-8",
+            )
+            source_occurrences_path(categorized_path).unlink()
+            overlap_manifest_path(categorized_path).unlink()
             rows = {row["merchant"]: row for row in self._ledger(root)}
+            nominated_ids = [
+                rows["SYNTHETIC CASH OUT"]["transaction_id"],
+                rows["SYNTHETIC CASH IN"]["transaction_id"],
+            ]
 
             paired = self._run_cli(
                 [
                     "review",
                     "pair",
-                    rows["SYNTHETIC CASH OUT"]["transaction_id"],
-                    rows["SYNTHETIC CASH IN"]["transaction_id"],
+                    *nominated_ids,
                     "--yes",
                     "--json",
                 ],
@@ -995,11 +1088,19 @@ class CashFlowReviewTest(unittest.TestCase):
             self.assertEqual(payload["command"], "review.pair")
             self.assertEqual(payload["data"]["paired_count"], 2)
             self.assertFalse(payload["data"]["unchanged"])
+            self.assertTrue(payload["data"]["changed"])
+            self.assertEqual(payload["data"]["result"], "paired")
             self.assertNotIn("SYNTHETIC CASH", paired.stdout)
             self.assertNotIn("cash-movements.csv", paired.stdout)
             linked = {row["merchant"]: row for row in self._ledger(root)}
             outgoing = linked["SYNTHETIC CASH OUT"]
             incoming = linked["SYNTHETIC CASH IN"]
+            current_ids = sorted(
+                [outgoing["transaction_id"], incoming["transaction_id"]]
+            )
+            self.assertNotEqual(set(current_ids), set(nominated_ids))
+            self.assertEqual(payload["data"]["transaction_ids"], current_ids)
+            self.assertEqual(payload["data"]["pair_id"], outgoing["transfer_group_id"])
             self.assertEqual(
                 {row["category"] for row in linked.values()},
                 {"Internal Transfer"},
@@ -1038,22 +1139,92 @@ class CashFlowReviewTest(unittest.TestCase):
                 {outgoing["transfer_group_id"]},
             )
 
+            replay_before = self._pair_artifacts(root)
+            repeated_with_current_ids = self._run_cli(
+                [
+                    "review",
+                    "pair",
+                    *current_ids,
+                    "--yes",
+                    "--json",
+                ],
+                cwd=root,
+            )
+            self.assertEqual(
+                repeated_with_current_ids.returncode,
+                0,
+                repeated_with_current_ids.stderr,
+            )
+            current_replay_data = json.loads(repeated_with_current_ids.stdout)["data"]
+            self.assertTrue(current_replay_data["unchanged"])
+            self.assertFalse(current_replay_data["changed"])
+            self.assertEqual(current_replay_data["result"], "already_paired")
+            self.assertEqual(
+                current_replay_data["pair_id"],
+                outgoing["transfer_group_id"],
+            )
+            self.assertEqual(
+                current_replay_data["transaction_ids"],
+                current_ids,
+            )
+            self.assertEqual(self._pair_artifacts(root), replay_before)
+
             repeated = self._run_cli(
                 [
                     "review",
                     "pair",
-                    outgoing["transaction_id"],
-                    incoming["transaction_id"],
+                    *nominated_ids,
                     "--yes",
                     "--json",
                 ],
                 cwd=root,
             )
             self.assertEqual(repeated.returncode, 0, repeated.stderr)
-            self.assertTrue(json.loads(repeated.stdout)["data"]["unchanged"])
+            repeated_data = json.loads(repeated.stdout)["data"]
+            self.assertTrue(repeated_data["unchanged"])
+            self.assertFalse(repeated_data["changed"])
+            self.assertEqual(repeated_data["result"], "already_paired")
+            self.assertEqual(repeated_data["pair_id"], outgoing["transfer_group_id"])
+            self.assertEqual(repeated_data["transaction_ids"], current_ids)
+            self.assertNotIn("SYNTHETIC CASH", repeated.stdout)
+            self.assertNotIn("500.00", repeated.stdout)
+            self.assertEqual(self._pair_artifacts(root), replay_before)
+
+            human = self._run_cli(
+                [
+                    "review",
+                    "pair",
+                    *nominated_ids,
+                    "--yes",
+                ],
+                cwd=root,
+            )
+            self.assertEqual(human.returncode, 0, human.stderr)
+            self.assertIn("already paired", human.stdout)
+            self.assertIn(outgoing["transfer_group_id"], human.stdout)
+            for transaction_id in current_ids:
+                self.assertIn(transaction_id, human.stdout)
+            self.assertNotIn("SYNTHETIC CASH", human.stdout)
+            self.assertNotIn("500.00", human.stdout)
+            self.assertEqual(self._pair_artifacts(root), replay_before)
+
             reconciled = self._run_cli(["reconcile", "--json"], cwd=root)
             self.assertEqual(reconciled.returncode, 0, reconciled.stderr)
             self.assertEqual(json.loads(reconciled.stdout)["data"]["paired_groups"], 1)
+            reconciled_artifacts = self._pair_artifacts(root)
+            replayed_after_reconcile = self._run_cli(
+                ["review", "pair", *nominated_ids, "--yes", "--json"],
+                cwd=root,
+            )
+            self.assertEqual(
+                replayed_after_reconcile.returncode,
+                0,
+                replayed_after_reconcile.stderr,
+            )
+            self.assertFalse(
+                json.loads(replayed_after_reconcile.stdout)["data"]["changed"]
+            )
+            self.assertEqual(self._pair_artifacts(root), reconciled_artifacts)
 
             replaced = self._run_cli(
                 [
@@ -1075,6 +1246,20 @@ class CashFlowReviewTest(unittest.TestCase):
                 {row["reconciliation_status"] for row in replacement_rows},
                 {"paired"},
             )
+            replaced_artifacts = self._pair_artifacts(root)
+            replayed_after_replace = self._run_cli(
+                ["review", "pair", *nominated_ids, "--yes", "--json"],
+                cwd=root,
+            )
+            self.assertEqual(
+                replayed_after_replace.returncode,
+                0,
+                replayed_after_replace.stderr,
+            )
+            self.assertFalse(
+                json.loads(replayed_after_replace.stdout)["data"]["changed"]
+            )
+            self.assertEqual(self._pair_artifacts(root), replaced_artifacts)
 
             report = self._run_cli(
                 ["report", "2026-05", "--no-open"],
@@ -1084,6 +1269,70 @@ class CashFlowReviewTest(unittest.TestCase):
             html = (root / "output" / "report.html").read_text(encoding="utf-8")
             self.assertIn('id="tile-income">0.00</div>', html)
             self.assertIn('id="tile-spending">0.00</div>', html)
+            report_artifacts = self._pair_artifacts(root)
+            replayed_after_report = self._run_cli(
+                ["review", "pair", *nominated_ids, "--yes", "--json"],
+                cwd=root,
+            )
+            self.assertEqual(
+                replayed_after_report.returncode,
+                0,
+                replayed_after_report.stderr,
+            )
+            self.assertFalse(
+                json.loads(replayed_after_report.stdout)["data"]["changed"]
+            )
+            self.assertEqual(self._pair_artifacts(root), report_artifacts)
+
+    def test_manual_pair_replay_rejects_unnominated_source_evidence_ids(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._setup_workspace(tmp)
+            self._import_rows(
+                root,
+                "source-evidence-pair.csv",
+                [
+                    "2026-05-04,SYNTHETIC PAIR OUT,-100.00,HKD",
+                    "2026-05-04,SYNTHETIC PAIR IN,100.00,HKD",
+                ],
+            )
+            categorized_path = root / "output" / "categorized.csv"
+            state = load_identity_state(categorized_path)
+            source_evidence = state.source_evidence_rows
+            self.assertIsNotNone(source_evidence)
+            assert source_evidence is not None
+            current = {row["merchant"]: row for row in self._ledger(root)}
+            current_ids = [
+                current["SYNTHETIC PAIR OUT"]["transaction_id"],
+                current["SYNTHETIC PAIR IN"]["transaction_id"],
+            ]
+            evidence = {row["merchant"]: row for row in source_evidence}
+            evidence_ids = [
+                evidence["SYNTHETIC PAIR OUT"]["transaction_id"],
+                evidence["SYNTHETIC PAIR IN"]["transaction_id"],
+            ]
+            self.assertTrue(set(current_ids).isdisjoint(evidence_ids))
+            paired = self._run_cli(
+                ["review", "pair", *current_ids, "--yes", "--json"],
+                cwd=root,
+            )
+            self.assertEqual(paired.returncode, 0, paired.stderr)
+            before = self._pair_artifacts(root)
+
+            replayed = self._run_cli(
+                ["review", "pair", *evidence_ids, "--yes", "--json"],
+                cwd=root,
+            )
+
+            self.assertEqual(replayed.returncode, 2, replayed.stderr)
+            self.assertEqual(
+                json.loads(replayed.stdout)["errors"][0]["code"],
+                "manual_pair_conflict",
+            )
+            self.assertNotIn("SYNTHETIC", replayed.stdout)
+            self.assertNotIn("100.00", replayed.stdout)
+            self.assertEqual(self._pair_artifacts(root), before)
 
     def test_review_decision_atomically_supersedes_a_manual_pair(self) -> None:
         cases = (
@@ -1183,7 +1432,7 @@ class CashFlowReviewTest(unittest.TestCase):
             "flags": "",
             "review_reasons": "accounting_flow",
         }
-        result = Mock(remaining_review_count=0)
+        result = Mock(remaining_review_count=0, ledger_rows=[left, right])
 
         with (
             patch.object(
@@ -1261,6 +1510,26 @@ class CashFlowReviewTest(unittest.TestCase):
             self.assertEqual(remaining["reconciliation_status"], "unmatched")
             self.assertIn("manual_transfer_pair_invalid", remaining["flags"])
             self.assertIn("accounting_flow", remaining["review_reasons"].split(";"))
+            missing_before = self._pair_artifacts(root)
+            replayed_missing = self._run_cli(
+                [
+                    "review",
+                    "pair",
+                    first["transaction_id"],
+                    second["transaction_id"],
+                    "--yes",
+                    "--json",
+                ],
+                cwd=root,
+            )
+            self.assertEqual(replayed_missing.returncode, 2, replayed_missing.stderr)
+            self.assertEqual(
+                json.loads(replayed_missing.stdout)["errors"][0]["code"],
+                "manual_pair_stale_transaction",
+            )
+            self.assertNotIn("SYNTHETIC", replayed_missing.stdout)
+            self.assertNotIn("100.00", replayed_missing.stdout)
+            self.assertEqual(self._pair_artifacts(root), missing_before)
 
             statement.write_text("\n".join(original), encoding="utf-8")
             restored = self._run_cli(
@@ -1279,6 +1548,664 @@ class CashFlowReviewTest(unittest.TestCase):
                     for row in restored_rows
                 )
             )
+
+    def test_manual_pair_replay_rejects_extra_stored_members_without_writing(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._setup_workspace(tmp)
+            self._import_rows(
+                root,
+                "extra-pair-member.csv",
+                [
+                    "2026-05-04,SYNTHETIC PAIR OUT,-100.00,HKD",
+                    "2026-05-04,SYNTHETIC PAIR IN,100.00,HKD",
+                    "2026-05-05,SYNTHETIC EXTRA,-30.00,HKD",
+                ],
+            )
+            rows = {row["merchant"]: row for row in self._ledger(root)}
+            pair_ids = [
+                rows["SYNTHETIC PAIR OUT"]["transaction_id"],
+                rows["SYNTHETIC PAIR IN"]["transaction_id"],
+            ]
+            paired = self._run_cli(
+                ["review", "pair", *pair_ids, "--yes", "--json"],
+                cwd=root,
+            )
+            self.assertEqual(paired.returncode, 0, paired.stderr)
+            pair_id = json.loads(paired.stdout)["data"]["pair_id"]
+            correction_path = root / "corrections.csv"
+            with correction_path.open(newline="", encoding="utf-8") as handle:
+                reader = csv.DictReader(handle)
+                fieldnames = list(reader.fieldnames or [])
+                corrections = list(reader)
+            corrections.append(
+                {
+                    **{field: "" for field in fieldnames},
+                    "transaction_id": rows["SYNTHETIC EXTRA"]["transaction_id"],
+                    "manual_pair_id": pair_id,
+                }
+            )
+            with correction_path.open("w", newline="", encoding="utf-8") as handle:
+                writer = csv.DictWriter(handle, fieldnames=fieldnames)
+                writer.writeheader()
+                writer.writerows(corrections)
+            before = self._pair_artifacts(root)
+
+            replayed = self._run_cli(
+                ["review", "pair", *pair_ids, "--yes", "--json"],
+                cwd=root,
+            )
+
+            self.assertEqual(replayed.returncode, 2, replayed.stderr)
+            self.assertEqual(
+                json.loads(replayed.stdout)["errors"][0]["code"],
+                "manual_pair_conflict",
+            )
+            self.assertNotIn("SYNTHETIC", replayed.stdout)
+            self.assertNotIn("100.00", replayed.stdout)
+            self.assertEqual(self._pair_artifacts(root), before)
+
+    def test_manual_pair_replay_rejects_a_malformed_extra_ledger_member(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._setup_workspace(tmp)
+            self._import_rows(
+                root,
+                "malformed-extra-pair-member.csv",
+                [
+                    "2026-05-04,SYNTHETIC PAIR OUT,-100.00,HKD",
+                    "2026-05-04,SYNTHETIC PAIR IN,100.00,HKD",
+                    "2026-05-05,SYNTHETIC EXTRA,-30.00,HKD",
+                ],
+            )
+            initial = {row["merchant"]: row for row in self._ledger(root)}
+            pair_ids = [
+                initial["SYNTHETIC PAIR OUT"]["transaction_id"],
+                initial["SYNTHETIC PAIR IN"]["transaction_id"],
+            ]
+            paired = self._run_cli(
+                ["review", "pair", *pair_ids, "--yes", "--json"],
+                cwd=root,
+            )
+            self.assertEqual(paired.returncode, 0, paired.stderr)
+            pair_id = json.loads(paired.stdout)["data"]["pair_id"]
+            ledger_path = root / "output" / "categorized.csv"
+            with ledger_path.open(newline="", encoding="utf-8") as handle:
+                reader = csv.DictReader(handle)
+                fieldnames = list(reader.fieldnames or [])
+                rows = list(reader)
+            rows_by_merchant = {row["merchant"]: row for row in rows}
+            extra_id = rows_by_merchant["SYNTHETIC EXTRA"]["transaction_id"]
+            other_pair_id = manual_pair_id([extra_id, "other-synthetic-id"])
+            rows_by_merchant["SYNTHETIC EXTRA"]["flags"] = ";".join(
+                (
+                    f"{MANUAL_PAIR_FLAG_PREFIX}{pair_id}",
+                    f"{MANUAL_PAIR_FLAG_PREFIX}{other_pair_id}",
+                )
+            )
+            with ledger_path.open("w", newline="", encoding="utf-8") as handle:
+                writer = csv.DictWriter(handle, fieldnames=fieldnames)
+                writer.writeheader()
+                writer.writerows(rows)
+            before = self._pair_artifacts(root)
+
+            replayed = self._run_cli(
+                ["review", "pair", *pair_ids, "--yes", "--json"],
+                cwd=root,
+            )
+
+            self.assertEqual(replayed.returncode, 2, replayed.stderr)
+            self.assertEqual(
+                json.loads(replayed.stdout)["errors"][0]["code"],
+                "manual_pair_conflict",
+            )
+            self.assertNotIn("SYNTHETIC", replayed.stdout)
+            self.assertNotIn("100.00", replayed.stdout)
+            self.assertEqual(self._pair_artifacts(root), before)
+
+    def test_manual_pair_rejects_lossy_raw_correction_membership_without_writing(
+        self,
+    ) -> None:
+        for case in ("idless", "duplicate"):
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as tmp:
+                root = self._setup_workspace(tmp)
+                self._import_rows(
+                    root,
+                    f"raw-{case}-new-pair.csv",
+                    [
+                        "2026-05-04,SYNTHETIC PAIR OUT,-100.00,HKD",
+                        "2026-05-04,SYNTHETIC PAIR IN,100.00,HKD",
+                    ],
+                )
+                rows = {row["merchant"]: row for row in self._ledger(root)}
+                pair_ids = [
+                    rows["SYNTHETIC PAIR OUT"]["transaction_id"],
+                    rows["SYNTHETIC PAIR IN"]["transaction_id"],
+                ]
+                pair_id = manual_pair_id(pair_ids)
+                additions = (
+                    [{"transaction_id": "", "manual_pair_id": pair_id}]
+                    if case == "idless"
+                    else [
+                        {
+                            "transaction_id": pair_ids[0],
+                            "manual_pair_id": pair_id,
+                        },
+                        {
+                            "transaction_id": pair_ids[0],
+                            "category": "Dining",
+                        },
+                    ]
+                )
+                self._append_raw_correction_rows(root, additions)
+                before = self._pair_artifacts(root)
+
+                rejected = self._run_cli(
+                    ["review", "pair", *pair_ids, "--yes", "--json"],
+                    cwd=root,
+                )
+
+                self.assertEqual(rejected.returncode, 2, rejected.stderr)
+                self.assertEqual(
+                    json.loads(rejected.stdout)["errors"][0]["code"],
+                    "manual_pair_conflict",
+                )
+                self.assertNotIn("SYNTHETIC", rejected.stdout)
+                self.assertNotIn("100.00", rejected.stdout)
+                self.assertEqual(self._pair_artifacts(root), before)
+
+    def test_manual_pair_replay_rejects_lossy_raw_correction_membership(
+        self,
+    ) -> None:
+        for case in ("idless", "duplicate"):
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as tmp:
+                root = self._setup_workspace(tmp)
+                self._import_rows(
+                    root,
+                    f"raw-{case}-replay.csv",
+                    [
+                        "2026-05-04,SYNTHETIC PAIR OUT,-100.00,HKD",
+                        "2026-05-04,SYNTHETIC PAIR IN,100.00,HKD",
+                    ],
+                )
+                rows = {row["merchant"]: row for row in self._ledger(root)}
+                pair_ids = [
+                    rows["SYNTHETIC PAIR OUT"]["transaction_id"],
+                    rows["SYNTHETIC PAIR IN"]["transaction_id"],
+                ]
+                paired = self._run_cli(
+                    ["review", "pair", *pair_ids, "--yes", "--json"],
+                    cwd=root,
+                )
+                self.assertEqual(paired.returncode, 0, paired.stderr)
+                pair_id = json.loads(paired.stdout)["data"]["pair_id"]
+                if case == "idless":
+                    additions = [{"transaction_id": "", "manual_pair_id": pair_id}]
+                else:
+                    correction_path = root / "corrections.csv"
+                    with correction_path.open(
+                        newline="",
+                        encoding="utf-8",
+                    ) as handle:
+                        corrections = list(csv.DictReader(handle))
+                    additions = [
+                        next(
+                            correction
+                            for correction in corrections
+                            if correction["transaction_id"] == pair_ids[0]
+                        )
+                    ]
+                self._append_raw_correction_rows(root, additions)
+                before = self._pair_artifacts(root)
+
+                replayed = self._run_cli(
+                    ["review", "pair", *pair_ids, "--yes", "--json"],
+                    cwd=root,
+                )
+
+                self.assertEqual(replayed.returncode, 2, replayed.stderr)
+                self.assertEqual(
+                    json.loads(replayed.stdout)["errors"][0]["code"],
+                    "manual_pair_conflict",
+                )
+                self.assertNotIn("SYNTHETIC", replayed.stdout)
+                self.assertNotIn("100.00", replayed.stdout)
+                self.assertEqual(self._pair_artifacts(root), before)
+
+    def test_manual_pair_replay_rechecks_generation_after_read(self) -> None:
+        import honeymoney.cli as cli
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._setup_workspace(tmp)
+            self._import_rows(
+                root,
+                "concurrent-read-replay.csv",
+                [
+                    "2026-05-04,SYNTHETIC PAIR OUT,-100.00,HKD",
+                    "2026-05-04,SYNTHETIC PAIR IN,100.00,HKD",
+                ],
+            )
+            rows = {row["merchant"]: row for row in self._ledger(root)}
+            pair_ids = [
+                rows["SYNTHETIC PAIR OUT"]["transaction_id"],
+                rows["SYNTHETIC PAIR IN"]["transaction_id"],
+            ]
+            paired = self._run_cli(
+                ["review", "pair", *pair_ids, "--yes", "--json"],
+                cwd=root,
+            )
+            self.assertEqual(paired.returncode, 0, paired.stderr)
+            ledger_path = root / "output" / "categorized.csv"
+            read_ledger = cli.read_ledger
+            published_generation: dict[str, bytes] = {}
+
+            def read_then_publish(path, *, config=None):
+                stale_rows = read_ledger(path, config=config)
+                with ledger_path.open(newline="", encoding="utf-8") as handle:
+                    reader = csv.DictReader(handle)
+                    fieldnames = list(reader.fieldnames or [])
+                    current_rows = list(reader)
+                current_rows[0]["notes"] = "Synthetic concurrent update"
+                with ledger_path.open("w", newline="", encoding="utf-8") as handle:
+                    writer = csv.DictWriter(handle, fieldnames=fieldnames)
+                    writer.writeheader()
+                    writer.writerows(current_rows)
+                published_generation.update(self._pair_artifacts(root))
+                return stale_rows
+
+            output = io.StringIO()
+            with (
+                patch.object(cli, "read_ledger", side_effect=read_then_publish),
+                redirect_stdout(output),
+                self.assertRaises(GenerationConflictError),
+            ):
+                cli._manual_pair_review(
+                    [
+                        *pair_ids,
+                        "--config",
+                        str(root / "config.json"),
+                        "--yes",
+                        "--json",
+                    ]
+                )
+
+            self.assertEqual(output.getvalue(), "")
+            self.assertEqual(self._pair_artifacts(root), published_generation)
+            [published_row, *_] = self._ledger(root)
+            self.assertEqual(published_row["notes"], "Synthetic concurrent update")
+
+    def test_manual_pair_replay_rechecks_generation_before_reporting(self) -> None:
+        import honeymoney.cli as cli
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._setup_workspace(tmp)
+            self._import_rows(
+                root,
+                "concurrent-replay.csv",
+                [
+                    "2026-05-04,SYNTHETIC PAIR OUT,-100.00,HKD",
+                    "2026-05-04,SYNTHETIC PAIR IN,100.00,HKD",
+                ],
+            )
+            rows = {row["merchant"]: row for row in self._ledger(root)}
+            pair_ids = [
+                rows["SYNTHETIC PAIR OUT"]["transaction_id"],
+                rows["SYNTHETIC PAIR IN"]["transaction_id"],
+            ]
+            paired = self._run_cli(
+                ["review", "pair", *pair_ids, "--yes", "--json"],
+                cwd=root,
+            )
+            self.assertEqual(paired.returncode, 0, paired.stderr)
+            ledger_path = root / "output" / "categorized.csv"
+            published_generation: dict[str, bytes] = {}
+            require_complete = cli._require_complete_manual_pair
+
+            def require_then_publish(*args, **kwargs) -> None:
+                require_complete(*args, **kwargs)
+                with ledger_path.open(newline="", encoding="utf-8") as handle:
+                    reader = csv.DictReader(handle)
+                    fieldnames = list(reader.fieldnames or [])
+                    current_rows = list(reader)
+                current_rows[0]["notes"] = "Synthetic concurrent update"
+                with ledger_path.open("w", newline="", encoding="utf-8") as handle:
+                    writer = csv.DictWriter(handle, fieldnames=fieldnames)
+                    writer.writeheader()
+                    writer.writerows(current_rows)
+                published_generation.update(self._pair_artifacts(root))
+
+            output = io.StringIO()
+            with (
+                patch.object(
+                    cli,
+                    "_require_complete_manual_pair",
+                    side_effect=require_then_publish,
+                ),
+                redirect_stdout(output),
+                self.assertRaises(GenerationConflictError),
+            ):
+                cli._manual_pair_review(
+                    [
+                        *pair_ids,
+                        "--config",
+                        str(root / "config.json"),
+                        "--yes",
+                        "--json",
+                    ]
+                )
+
+            self.assertEqual(output.getvalue(), "")
+            self.assertEqual(self._pair_artifacts(root), published_generation)
+            [published_row, *_] = self._ledger(root)
+            self.assertEqual(published_row["notes"], "Synthetic concurrent update")
+
+    def test_manual_pair_replay_snapshots_custom_output_after_recovery(self) -> None:
+        import honeymoney.cli as cli
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._setup_workspace(tmp)
+            statement = root / "custom-output-replay.csv"
+            statement.write_text(
+                "\n".join(
+                    [
+                        "Date,Description,Amount,Currency",
+                        "2026-05-04,SYNTHETIC PAIR OUT,-100.00,HKD",
+                        "2026-05-04,SYNTHETIC PAIR IN,100.00,HKD",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            custom_output = root / "custom" / "ledger.csv"
+            imported = self._run_cli(
+                [
+                    "import",
+                    str(statement),
+                    "--output",
+                    str(custom_output),
+                    "--no-interactive",
+                ],
+                cwd=root,
+            )
+            self.assertEqual(imported.returncode, 0, imported.stderr)
+            with custom_output.open(newline="", encoding="utf-8") as handle:
+                rows = {row["merchant"]: row for row in csv.DictReader(handle)}
+            pair_ids = [
+                rows["SYNTHETIC PAIR OUT"]["transaction_id"],
+                rows["SYNTHETIC PAIR IN"]["transaction_id"],
+            ]
+            paired = self._run_cli(
+                [
+                    "review",
+                    "pair",
+                    *pair_ids,
+                    "--output",
+                    str(custom_output),
+                    "--yes",
+                    "--json",
+                ],
+                cwd=root,
+            )
+            self.assertEqual(paired.returncode, 0, paired.stderr)
+            recover_generation = cli.recover_generation
+            recovered_generation: dict[str, bytes] = {}
+
+            def recover_then_publish(
+                path,
+                *,
+                allowed_generation_paths=(),
+            ) -> None:
+                recover_generation(
+                    path,
+                    allowed_generation_paths=allowed_generation_paths,
+                )
+                if (
+                    Path(path).resolve() != custom_output.resolve()
+                    or recovered_generation
+                ):
+                    return
+                with custom_output.open(newline="", encoding="utf-8") as handle:
+                    reader = csv.DictReader(handle)
+                    fieldnames = list(reader.fieldnames or [])
+                    current_rows = list(reader)
+                current_rows[0]["notes"] = "Synthetic recovered generation"
+                with custom_output.open(
+                    "w",
+                    newline="",
+                    encoding="utf-8",
+                ) as handle:
+                    writer = csv.DictWriter(handle, fieldnames=fieldnames)
+                    writer.writeheader()
+                    writer.writerows(current_rows)
+                artifact_paths = [
+                    *sorted(custom_output.parent.iterdir()),
+                    root / "corrections.csv",
+                ]
+                recovered_generation.update(
+                    {
+                        str(artifact.relative_to(root)): artifact.read_bytes()
+                        for artifact in artifact_paths
+                        if artifact.is_file()
+                    }
+                )
+
+            output = io.StringIO()
+            with (
+                patch.object(
+                    cli,
+                    "recover_generation",
+                    side_effect=recover_then_publish,
+                ),
+                redirect_stdout(output),
+            ):
+                return_code = cli._manual_pair_review(
+                    [
+                        *pair_ids,
+                        "--config",
+                        str(root / "config.json"),
+                        "--output",
+                        str(custom_output),
+                        "--yes",
+                        "--json",
+                    ]
+                )
+
+            self.assertEqual(return_code, 0)
+            self.assertEqual(
+                json.loads(output.getvalue())["data"]["result"],
+                "already_paired",
+            )
+            artifact_paths = [
+                *sorted(custom_output.parent.iterdir()),
+                root / "corrections.csv",
+            ]
+            self.assertEqual(
+                {
+                    str(artifact.relative_to(root)): artifact.read_bytes()
+                    for artifact in artifact_paths
+                    if artifact.is_file()
+                },
+                recovered_generation,
+            )
+
+    def test_manual_pair_rejects_correction_only_membership_without_writing(
+        self,
+    ) -> None:
+        cases = ("missing_member", "conflicting_pair")
+        for case in cases:
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as tmp:
+                root = self._setup_workspace(tmp)
+                self._import_rows(
+                    root,
+                    "correction-only-pair.csv",
+                    [
+                        "2026-05-04,SYNTHETIC PAIR OUT,-100.00,HKD",
+                        "2026-05-04,SYNTHETIC PAIR IN,100.00,HKD",
+                    ],
+                )
+                rows = {row["merchant"]: row for row in self._ledger(root)}
+                pair_ids = [
+                    rows["SYNTHETIC PAIR OUT"]["transaction_id"],
+                    rows["SYNTHETIC PAIR IN"]["transaction_id"],
+                ]
+                stored_pair_id = (
+                    manual_pair_id(pair_ids)
+                    if case == "missing_member"
+                    else manual_pair_id([pair_ids[0], "retired-transaction"])
+                )
+                correction_path = root / "corrections.csv"
+                with correction_path.open(newline="", encoding="utf-8") as handle:
+                    fieldnames = list(csv.DictReader(handle).fieldnames or [])
+                correction = {field: "" for field in fieldnames}
+                correction["transaction_id"] = pair_ids[0]
+                correction["manual_pair_id"] = stored_pair_id
+                with correction_path.open("w", newline="", encoding="utf-8") as handle:
+                    writer = csv.DictWriter(handle, fieldnames=fieldnames)
+                    writer.writeheader()
+                    writer.writerow(correction)
+                before = self._pair_artifacts(root)
+
+                replayed = self._run_cli(
+                    ["review", "pair", *pair_ids, "--yes", "--json"],
+                    cwd=root,
+                )
+
+                self.assertEqual(replayed.returncode, 2, replayed.stderr)
+                self.assertEqual(
+                    json.loads(replayed.stdout)["errors"][0]["code"],
+                    "manual_pair_conflict",
+                )
+                self.assertNotIn("SYNTHETIC", replayed.stdout)
+                self.assertNotIn("100.00", replayed.stdout)
+                self.assertEqual(self._pair_artifacts(root), before)
+
+    def test_manual_pair_rejects_ledger_only_membership_without_writing(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._setup_workspace(tmp)
+            self._import_rows(
+                root,
+                "ledger-only-pair.csv",
+                [
+                    "2026-05-04,SYNTHETIC PAIR OUT,-100.00,HKD",
+                    "2026-05-04,SYNTHETIC PAIR IN,100.00,HKD",
+                    "2026-05-05,SYNTHETIC EXTRA,-30.00,HKD",
+                ],
+            )
+            ledger_path = root / "output" / "categorized.csv"
+            with ledger_path.open(newline="", encoding="utf-8") as handle:
+                reader = csv.DictReader(handle)
+                fieldnames = list(reader.fieldnames or [])
+                rows = list(reader)
+            rows_by_merchant = {row["merchant"]: row for row in rows}
+            pair_ids = [
+                rows_by_merchant["SYNTHETIC PAIR OUT"]["transaction_id"],
+                rows_by_merchant["SYNTHETIC PAIR IN"]["transaction_id"],
+            ]
+            pair_id = manual_pair_id(pair_ids)
+            rows_by_merchant["SYNTHETIC EXTRA"]["flags"] = (
+                f"{MANUAL_PAIR_FLAG_PREFIX}{pair_id}"
+            )
+            with ledger_path.open("w", newline="", encoding="utf-8") as handle:
+                writer = csv.DictWriter(handle, fieldnames=fieldnames)
+                writer.writeheader()
+                writer.writerows(rows)
+            before = self._pair_artifacts(root)
+
+            rejected = self._run_cli(
+                ["review", "pair", *pair_ids, "--yes", "--json"],
+                cwd=root,
+            )
+
+            self.assertEqual(rejected.returncode, 2, rejected.stderr)
+            self.assertEqual(
+                json.loads(rejected.stdout)["errors"][0]["code"],
+                "manual_pair_conflict",
+            )
+            self.assertNotIn("SYNTHETIC", rejected.stdout)
+            self.assertNotIn("100.00", rejected.stdout)
+            self.assertEqual(self._pair_artifacts(root), before)
+
+    def test_manual_pair_rejects_idless_ledger_membership_without_writing(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._setup_workspace(tmp)
+            self._import_rows(
+                root,
+                "idless-new-pair.csv",
+                [
+                    "2026-05-04,SYNTHETIC PAIR OUT,-100.00,HKD",
+                    "2026-05-04,SYNTHETIC PAIR IN,100.00,HKD",
+                ],
+            )
+            rows = {row["merchant"]: row for row in self._ledger(root)}
+            pair_ids = [
+                rows["SYNTHETIC PAIR OUT"]["transaction_id"],
+                rows["SYNTHETIC PAIR IN"]["transaction_id"],
+            ]
+            self._append_idless_manual_pair_member(
+                root,
+                manual_pair_id(pair_ids),
+            )
+            before = self._pair_artifacts(root)
+
+            rejected = self._run_cli(
+                ["review", "pair", *pair_ids, "--yes", "--json"],
+                cwd=root,
+            )
+
+            self.assertEqual(rejected.returncode, 2, rejected.stderr)
+            self.assertEqual(
+                json.loads(rejected.stdout)["errors"][0]["code"],
+                "manual_pair_conflict",
+            )
+            self.assertNotIn("SYNTHETIC", rejected.stdout)
+            self.assertNotIn("100.00", rejected.stdout)
+            self.assertEqual(self._pair_artifacts(root), before)
+
+    def test_manual_pair_replay_rejects_idless_ledger_membership_without_writing(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._setup_workspace(tmp)
+            self._import_rows(
+                root,
+                "idless-replay.csv",
+                [
+                    "2026-05-04,SYNTHETIC PAIR OUT,-100.00,HKD",
+                    "2026-05-04,SYNTHETIC PAIR IN,100.00,HKD",
+                ],
+            )
+            rows = {row["merchant"]: row for row in self._ledger(root)}
+            pair_ids = [
+                rows["SYNTHETIC PAIR OUT"]["transaction_id"],
+                rows["SYNTHETIC PAIR IN"]["transaction_id"],
+            ]
+            paired = self._run_cli(
+                ["review", "pair", *pair_ids, "--yes", "--json"],
+                cwd=root,
+            )
+            self.assertEqual(paired.returncode, 0, paired.stderr)
+            pair_id = json.loads(paired.stdout)["data"]["pair_id"]
+            self._append_idless_manual_pair_member(root, pair_id)
+            before = self._pair_artifacts(root)
+
+            replayed = self._run_cli(
+                ["review", "pair", *pair_ids, "--yes", "--json"],
+                cwd=root,
+            )
+
+            self.assertEqual(replayed.returncode, 2, replayed.stderr)
+            self.assertEqual(
+                json.loads(replayed.stdout)["errors"][0]["code"],
+                "manual_pair_conflict",
+            )
+            self.assertNotIn("SYNTHETIC", replayed.stdout)
+            self.assertNotIn("100.00", replayed.stdout)
+            self.assertEqual(self._pair_artifacts(root), before)
 
     def test_manual_pair_rejects_stale_same_sign_and_conflicting_rows_atomically(
         self,
