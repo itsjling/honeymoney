@@ -68,7 +68,11 @@ Exact ADR 0003 headers remain migration input and gain the new columns on the
 next write. `review_needed.csv` also adds the display-only
 `review_reason_labels` column. JSON envelopes use schema version 2.
 Replacement and reset derive typed review reasons before they change legacy
-source rows, so an explicit `reconcile` upgrade is optional.
+source rows, so an explicit `reconcile` upgrade is optional. Replacement,
+migration, and reconciliation then derive `source_data_issue` from current
+active parser, balance, and provenance evidence. They remove stale ledger and
+correction tokens, including balance-page detail flags, when no current
+evidence supports them.
 
 Statement-section balance scope adds the public text column
 `statement_section`. ADR 0004 headers remain migration input and gain the
