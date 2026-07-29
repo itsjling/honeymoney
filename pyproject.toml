@@ -67,6 +67,7 @@ files = [
   "honeymoney/rules.pyi",
   "honeymoney/schema.py",
   "honeymoney/source_data_review.py",
+  "honeymoney/workspace_upgrade.py",
 ]
 strict = true
 disallow_any_explicit = true

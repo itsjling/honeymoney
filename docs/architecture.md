@@ -95,6 +95,21 @@ before replacing any public path. Non-ledger artifacts are replaced first and
 point. The containing directories are then synchronized. This ordering is a
 recovery protocol, not a claim that several filesystem replacements are atomic.
 
+Fresh setup writes `.honeymoney-managed-files.json` with the installed
+HoneyMoney version, bundle origin, workspace-relative path, and SHA-256 digest
+for each shipped profile. `setup --upgrade` manages only those profiles. It
+updates a file only when the record proves its origin and its current digest
+still matches the recorded digest. Missing records, local changes, symbolic
+links, and unsafe paths fail closed. Configured input and output paths and all
+user-owned state remain outside the write set. Evidence from a newer
+HoneyMoney release also fails closed to prevent a downgrade.
+
+An upgrade uses the managed-file record as its generation commit point. It
+stages complete profile files and prior-file backups, then publishes the record
+last. A pre-commit failure restores the old files. If an interruption happens
+after the record commit, the next upgrade completes that generation before it
+builds a new plan.
+
 Hidden generation state beside `categorized.csv` contains only paths, modes,
 and content digests. If a write fails before the ledger commit point, the old
 files are restored. If interruption occurs after it, the next command that
@@ -354,6 +369,9 @@ changing it.
   [CSV compatibility](csv-compatibility.md).
 - `honeymoney/persistence.py`: staged filesystem generation commits, authoritative
   ledger replacement, directory synchronization, and retained-state recovery.
+- `honeymoney/workspace_upgrade.py`: bundled-profile ownership evidence,
+  privacy-safe upgrade plans, protected-path checks, and recoverable profile
+  publication.
 - `honeymoney/rules.py`: deterministic rule validation and application.
 - `honeymoney/learning.py`: conservative managed-rule planning from active exact
   human corrections.

@@ -78,10 +78,42 @@ Creates a starter local workspace with:
 - `rates.json`
 - `profile_mappings.json`
 - `profiles/` with `starter_csv.json` plus the bundled HSBC One, HSBC credit-card, and Mox bank/card profiles, all linked in `config.json`
+- `.honeymoney-managed-files.json`, which records the origin and digest of each bundled profile
 - `input/`
 - `output/`
 
 Use `--root DIR` to skip the prompt.
+
+Upgrade an existing workspace after installing a new HoneyMoney version:
+
+```bash
+honeymoney setup --upgrade --root ./money --dry-run
+honeymoney setup --upgrade --root ./money
+```
+
+The first command prints a plan and changes nothing. The second asks for
+confirmation in a terminal. Scripts and JSON clients must pass `--yes`:
+
+```bash
+honeymoney setup --upgrade --root ./money --yes --json
+```
+
+An upgrade can create a missing bundled profile or update one when the managed
+file record proves both its HoneyMoney origin and its unchanged local digest.
+It reports local changes as conflicts and leaves them byte-for-byte unchanged.
+It also leaves config, rules, corrections, rate data, profile mappings, custom
+profiles, statement input, ledgers, and reports unchanged. A workspace made by
+an older release without managed-file records does not gain ownership from a
+familiar file name; differing files fail closed.
+An older HoneyMoney install also refuses evidence written by a newer release,
+so `--upgrade` cannot act as a downgrade.
+
+Plans use `create`, `update`, `unchanged`, `conflict`, and `preserved` results.
+Profile writes and the managed-file record publish as one recoverable
+generation. Repeating a completed upgrade changes no bytes.
+
+`setup --force` remains a separate destructive command. It warns before it
+replaces existing starter files and cannot be combined with `--upgrade`.
 
 When a statement matches more than one profile (or none, as with PDFs), the import prompts you to pick the profile and offers to remember the choice in `profile_mappings.json` so future imports of similarly named files select it automatically.
 

@@ -155,6 +155,17 @@ from honeymoney.valuation_inspection import (
     ValuationInspectionError,
     inspect_missing_valuations,
 )
+from honeymoney.workspace_upgrade import (
+    MANAGED_FILES_NAME,
+    UpgradePlan,
+    UpgradeResult,
+    apply_upgrade_plan,
+    build_upgrade_plan,
+    managed_files_document,
+    recover_upgrade_generation,
+    require_clean_upgrade_generation,
+    result_counts,
+)
 
 JSON_SCHEMA_VERSION = 2
 IDENTITY_MIGRATION_AMBIGUITY_FLAG = "identity_migration_ambiguous"
@@ -950,6 +961,8 @@ A local-first CLI for importing, categorizing, and reviewing household transacti
 
 Commands:
   honeymoney setup                 Create a local starter workspace
+  honeymoney setup --upgrade --root DIR
+                                   Safely refresh proven bundled profiles
   honeymoney run                   Process configured CSV/PDF exports
   honeymoney import [PATH]         Import a pasted CSV/PDF path
   honeymoney review [--category CATEGORY]
@@ -2385,15 +2398,36 @@ def _setup_command(argv: list[str]) -> int:
     )
     parser.add_argument("--root")
     parser.add_argument("--force", action="store_true")
+    parser.add_argument("--upgrade", action="store_true")
+    parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--yes", action="store_true")
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args(argv)
 
     if args.json and not args.root:
         raise ValueError("honeymoney setup --json requires --root")
+    if args.upgrade and args.force:
+        raise ValueError("honeymoney setup --upgrade cannot be combined with --force")
+    if not args.upgrade and (args.dry_run or args.yes):
+        raise ValueError("honeymoney setup --dry-run and --yes require --upgrade")
     root = _setup_root(args.root)
+    if args.upgrade:
+        return _upgrade_workspace(
+            root,
+            dry_run=args.dry_run,
+            approved=args.yes,
+            json_output=args.json,
+        )
     existing_config_path = root / "config.json"
     if existing_config_path.exists():
         _recover_config_path_generation(existing_config_path)
+    force_warning = (
+        "Warning: --force replaces existing starter workspace files."
+        if args.force
+        else None
+    )
+    if force_warning and not args.json:
+        print(force_warning, file=sys.stderr)
     _write_starter_workspace(root, force=args.force)
     rate_cache_path = (root / "rates.json").resolve()
     if args.json:
@@ -2411,9 +2445,11 @@ def _setup_command(argv: list[str]) -> int:
                 "config_json": str(root / "config.json"),
                 "corrections_csv": str(root / "corrections.csv"),
                 "rate_cache_json": str(rate_cache_path),
+                "managed_files_json": str(root / MANAGED_FILES_NAME),
                 "input_directory": str(root / "input"),
                 "output_directory": str(root / "output"),
             },
+            warnings=[force_warning] if force_warning else None,
         )
         return 0
     print(f"Created Honeymoney workspace at {root}")
@@ -2424,6 +2460,175 @@ def _setup_command(argv: list[str]) -> int:
     print(f"  2. Edit {root / 'config.json'} and {root / 'rules.json'} as needed")
     print(f"  3. Run cd {root} && honeymoney run")
     return 0
+
+
+def _upgrade_workspace(
+    root: Path,
+    *,
+    dry_run: bool,
+    approved: bool,
+    json_output: bool,
+) -> int:
+    if not root.is_dir():
+        raise ValueError(f"Workspace does not exist: {root}")
+    config_path = root / "config.json"
+    if not config_path.is_file():
+        raise ValueError(f"Workspace config does not exist: {config_path}")
+    config = _read_config_document(config_path)
+    desired_documents = _installed_profile_documents(root)
+    if dry_run:
+        require_clean_upgrade_generation(root)
+    else:
+        recover_upgrade_generation(root, desired_documents)
+    plan = build_upgrade_plan(
+        root,
+        desired_documents,
+        protected_directories=_upgrade_protected_paths(root, config),
+        preserved_results=_upgrade_preserved_results(),
+    )
+
+    if dry_run:
+        if json_output:
+            _emit_upgrade_json(root, plan, applied=False, dry_run=True)
+        else:
+            _print_upgrade_plan(plan)
+            print("Dry run; no files changed.")
+        return 1 if plan.has_conflicts else 0
+
+    if plan.changed and not approved:
+        if json_output:
+            _emit_upgrade_json(
+                root,
+                plan,
+                applied=False,
+                dry_run=False,
+                status="error",
+                errors=[
+                    {
+                        "type": "ApprovalRequired",
+                        "message": "Pass --yes to approve this non-interactive upgrade",
+                    }
+                ],
+            )
+            return 2
+        _print_upgrade_plan(plan)
+        if not sys.stdin.isatty():
+            print(
+                "No files changed. Pass --yes to approve a non-interactive upgrade.",
+                file=sys.stderr,
+            )
+            return 2
+        if input("Apply this upgrade? [y/N]: ").strip().casefold() not in {"y", "yes"}:
+            print("Upgrade declined; no files changed.")
+            return 0
+
+    apply_upgrade_plan(root, plan)
+    if json_output:
+        _emit_upgrade_json(root, plan, applied=plan.changed, dry_run=False)
+    else:
+        _print_upgrade_plan(plan)
+        if plan.changed:
+            print("Workspace upgrade complete.")
+        else:
+            print("Workspace is already current; no files changed.")
+    return 1 if plan.has_conflicts else 0
+
+
+def _emit_upgrade_json(
+    root: Path,
+    plan: UpgradePlan,
+    *,
+    applied: bool,
+    dry_run: bool,
+    status: str | None = None,
+    errors: list[Any] | None = None,
+) -> None:
+    _emit_json(
+        "setup",
+        status or ("partial_success" if plan.has_conflicts else "success"),
+        data={
+            "operation": "upgrade",
+            "root": str(root),
+            "applied": applied,
+            "dry_run": dry_run,
+            "changed": plan.changed,
+            "result_counts": result_counts(plan.results),
+            "results": list(plan.results),
+        },
+        artifacts={"managed_files_json": str(root / MANAGED_FILES_NAME)},
+        errors=errors,
+    )
+
+
+def _print_upgrade_plan(plan: UpgradePlan) -> None:
+    print("Workspace upgrade plan:")
+    for item in plan.results:
+        print(f"  {item['result']:<9} {item['path']} ({item['kind']})")
+
+
+def _installed_profile_documents(root: Path) -> dict[Path, str]:
+    profiles_dir = root / "profiles"
+    documents = {
+        profiles_dir / "starter_csv.json": json.dumps(
+            _starter_csv_profile(),
+            indent=2,
+            sort_keys=True,
+        )
+    }
+    profile_resources = resources.files("honeymoney").joinpath("data/profiles")
+    for resource in sorted(profile_resources.iterdir(), key=lambda item: item.name):
+        if resource.name.endswith(".json"):
+            documents[profiles_dir / resource.name] = resource.read_text(
+                encoding="utf-8"
+            )
+    return documents
+
+
+def _upgrade_protected_paths(root: Path, config: Mapping[str, Any]) -> list[Path]:
+    paths = config.get("paths")
+    path_values = paths if isinstance(paths, Mapping) else {}
+    input_path = _workspace_config_path(root, path_values.get("input"), "input")
+    output_path = _workspace_config_path(
+        root,
+        path_values.get("output"),
+        "output/categorized.csv",
+    )
+    protected = [input_path, output_path.parent, root / "config.json"]
+    for field, default in (
+        ("profile_mappings", "profile_mappings.json"),
+        ("rules", "rules.json"),
+        ("corrections", "corrections.csv"),
+        ("rate_cache", "rates.json"),
+    ):
+        protected.append(_workspace_config_path(root, config.get(field), default))
+    return protected
+
+
+def _workspace_config_path(root: Path, value: object, default: str) -> Path:
+    raw_path = Path(value if isinstance(value, str) and value.strip() else default)
+    return (raw_path if raw_path.is_absolute() else root / raw_path).resolve()
+
+
+def _upgrade_preserved_results() -> list[UpgradeResult]:
+    items = (
+        ("config.json", "configuration"),
+        ("<configured-input>", "statement_input"),
+        ("<configured-output>", "generated_output"),
+        ("<configured-corrections>", "corrections"),
+        ("<configured-rules>", "rules"),
+        ("<configured-rate-cache>", "rate_cache"),
+        ("<configured-profile-mappings>", "profile_mappings"),
+        ("<configured-custom-profiles>", "custom_profiles"),
+    )
+    return [
+        {
+            "path": path,
+            "kind": kind,
+            "result": "preserved",
+            "reason": "user-owned workspace state is never changed",
+        }
+        for path, kind in items
+    ]
 
 
 def _setup_root(root_arg: str | None) -> Path:
@@ -4955,19 +5160,17 @@ def _write_starter_workspace(root: Path, force: bool) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     profiles_dir.mkdir(parents=True, exist_ok=True)
 
+    profile_documents = _installed_profile_documents(root)
     profile_path = profiles_dir / "starter_csv.json"
+    starter_profile_paths = [path for path in profile_documents if path != profile_path]
     rules_path = root / "rules.json"
     corrections_path = root / "corrections.csv"
     rate_cache_path = root / "rates.json"
     profile_mappings_path = root / "profile_mappings.json"
     config_path = root / "config.json"
 
-    _write_json_file(
-        profile_path,
-        _starter_csv_profile(),
-        force,
-    )
-    starter_profile_paths = _copy_starter_profiles(profiles_dir, force)
+    for path, content in profile_documents.items():
+        _write_text_file(path, content, force)
     _write_json_file(profile_mappings_path, {"filename_patterns": []}, force)
     _write_json_file(rules_path, _starter_rules(), force)
     _write_text_file(
@@ -5009,6 +5212,11 @@ def _write_starter_workspace(root: Path, force: bool) -> None:
         },
         force,
     )
+    _write_text_file(
+        root / MANAGED_FILES_NAME,
+        managed_files_document(root, [profile_path, *starter_profile_paths]),
+        force,
+    )
 
 
 def _starter_csv_profile() -> dict[str, Any]:
@@ -5032,18 +5240,6 @@ def _starter_csv_profile() -> dict[str, Any]:
             },
         },
     }
-
-
-def _copy_starter_profiles(profiles_dir: Path, force: bool) -> list[Path]:
-    copied = []
-    profile_resources = resources.files("honeymoney").joinpath("data/profiles")
-    for resource in sorted(profile_resources.iterdir(), key=lambda item: item.name):
-        if not resource.name.endswith(".json"):
-            continue
-        destination = profiles_dir / resource.name
-        _write_text_file(destination, resource.read_text(encoding="utf-8"), force)
-        copied.append(destination)
-    return copied
 
 
 def _starter_rules() -> dict[str, Any]:

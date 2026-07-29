@@ -74,6 +74,8 @@ Live Ollama smoke and benchmark scripts remain explicit local-only commands in
 JSON mode never prompts or opens a browser:
 
 ```bash
+honeymoney setup --upgrade --root ./money --dry-run --json
+honeymoney setup --upgrade --root ./money --yes --json
 honeymoney import /path/to/statement.csv --config ./money/config.json --json
 honeymoney status 2026-05 --config ./money/config.json --json
 honeymoney pending 2026-05 --config ./money/config.json --json
@@ -91,6 +93,12 @@ honeymoney profile validate ./money/profiles/starter_csv.json \
 Every response is one JSON object with `schema_version`, `command`, `status`,
 `data`, `artifacts`, `warnings`, and `errors`. Progress and diagnostics remain
 on stderr so stdout can be parsed directly.
+
+Workspace upgrade JSON includes a privacy-safe plan. Its results are `create`,
+`update`, `unchanged`, `conflict`, or `preserved`; it never includes file
+contents or financial rows. Dry runs need no approval. A non-interactive write
+needs `--yes`. The command updates only unchanged profiles whose managed origin
+and prior digest are recorded.
 
 Schema version 2 adds typed review reasons and HKD valuation source and status.
 `pending` includes stable reason tokens and plain labels. Valuation gaps appear
