@@ -9,7 +9,6 @@ import os
 import re
 import shlex
 import shutil
-import stat
 import subprocess
 import sys
 import tempfile
@@ -87,10 +86,14 @@ from honeymoney.overlap import (
 from honeymoney.persistence import (
     GenerationConflictError,
     configured_generation_paths,
+    ensure_private_directory,
     generation_hashes,
     generation_member_paths,
     persist_generation,
+    private_atomic_write_text,
     recover_generation,
+    require_generation_snapshot,
+    snapshot_generation,
 )
 from honeymoney.rate_fetch import (
     HKMA_API_ENDPOINT,
@@ -404,12 +407,15 @@ def _run_pipeline(
     review_needed_path = output_dir / "review_needed.csv"
     import_report_path = output_dir / "import_report.json"
 
-    output_dir.mkdir(parents=True, exist_ok=True)
+    ensure_private_directory(output_dir)
 
     input_files = importers._discover_input_files(input_path)
     profiles = importers._load_profiles(config)
     profile_mappings = importers._load_profile_mappings(config)
-    identity_state = load_configured_identity_state(categorized_path, config)
+    expected_generation, identity_state = _load_configured_identity_generation(
+        categorized_path,
+        config,
+    )
     preserved_ledger_rows = [dict(row) for row in identity_state.rows]
     preserved_source_rows = [dict(row) for row in (identity_state.source_rows or [])]
     review_migration_detected = _prepare_replacement_review_migration(
@@ -831,7 +837,11 @@ def _run_pipeline(
         rate_cache_content = rate_cache_document(next_rate_cache)
         if not _document_matches(rate_cache_path, rate_cache_content):
             files[rate_cache_path] = rate_cache_content
-    persist_generation(categorized_path, files)
+    persist_generation(
+        categorized_path,
+        files,
+        expected_generation_hashes=expected_generation,
+    )
     _status.clear()
 
     if print_import_summary:
@@ -1032,7 +1042,9 @@ def _learn_command(argv: list[str]) -> int:
 
     config = _load_config(args.config_path)
     categorized_path = Path(config["paths"]["output"])
-    state = load_configured_identity_state(categorized_path, config)
+    expected_generation, state = _load_configured_identity_generation(
+        categorized_path, config
+    )
     if state.canonical_migration_required:
         raise ValueError("The active ledger must be migrated before learning rules")
     plan = plan_learned_rules(state.rows, load_corrections(config))
@@ -1059,6 +1071,7 @@ def _learn_command(argv: list[str]) -> int:
     next_document = dict(document)
     next_document["rules"] = next_rules
     next_content = json.dumps(next_document, indent=2, sort_keys=True) + "\n"
+    require_generation_snapshot(expected_generation)
 
     if args.yes and next_content != rules_path.read_text(encoding="utf-8"):
         persist_generation(
@@ -1067,6 +1080,7 @@ def _learn_command(argv: list[str]) -> int:
                 rules_path: next_content,
                 categorized_path: categorized_path.read_text(encoding="utf-8"),
             },
+            expected_generation_hashes=expected_generation,
         )
 
     counts = plan.counts()
@@ -1492,6 +1506,12 @@ def _apply_rate_observations(
     rate_cache_path = _configured_rate_cache_path(config)
     categorized_path = Path(config["paths"]["output"])
     if not categorized_path.exists():
+        expected_generation = snapshot_generation(
+            rate_cache_path,
+            {*configured_generation_paths(config), categorized_path},
+        )
+        config["_rate_cache"] = load_rate_cache(rate_cache_path)
+        require_generation_snapshot(expected_generation)
         cache = merge_rate_cache(
             _loaded_rate_cache(config),
             observations,
@@ -1503,6 +1523,7 @@ def _apply_rate_observations(
             persist_generation(
                 rate_cache_path,
                 {rate_cache_path: cache_content},
+                expected_generation_hashes=expected_generation,
             )
         return _RateApplicationResult(
             rate_cache_path=rate_cache_path,
@@ -1515,7 +1536,9 @@ def _apply_rate_observations(
             changed=changed,
         )
 
-    state = load_configured_identity_state(categorized_path, config)
+    expected_generation, state = _load_configured_identity_generation(
+        categorized_path, config
+    )
     if state.source_rows is None or state.overlap_manifest is None:
         raise IdentityError("identity_manifest_invalid")
     migration_required = (
@@ -1608,7 +1631,11 @@ def _apply_rate_observations(
             documents[correction_path] = correction_content
     changed = _documents_changed(documents)
     if changed:
-        persist_generation(categorized_path, documents)
+        persist_generation(
+            categorized_path,
+            documents,
+            expected_generation_hashes=expected_generation,
+        )
     requested_keys = set(requested_pairs)
     resolved_count = sum(
         (
@@ -1931,7 +1958,9 @@ def _duplicates_resolve_command(argv: list[str]) -> int:
 
     config = _load_config(args.config_path)
     categorized_path = Path(args.output_path or config["paths"]["output"])
-    state = load_configured_identity_state(categorized_path, config)
+    expected_generation, state = _load_configured_identity_generation(
+        categorized_path, config
+    )
     if state.canonical_migration_required:
         raise DuplicateResolutionError("duplicate_canonical_migration_required")
     corrections = load_corrections(config)
@@ -2013,7 +2042,11 @@ def _duplicates_resolve_command(argv: list[str]) -> int:
             removed_transaction_ids=removed_correction_ids,
         )
         files[corrections_path] = corrections_document
-    persist_generation(categorized_path, files)
+    persist_generation(
+        categorized_path,
+        files,
+        expected_generation_hashes=expected_generation,
+    )
 
     if args.json:
         _emit_json(
@@ -4243,7 +4276,9 @@ def _status_command(argv: list[str]) -> int:
     rows = _rows_in_period(ledger_rows, start, end)
     categorized = [row for row in rows if _is_categorized(row)]
     statements = {
-        row.get("source_file", "") for row in source_rows if row.get("source_file")
+        row.get("source_id") or f"legacy:{row.get('source_file', '')}"
+        for row in source_rows
+        if row.get("source_id") or row.get("source_file")
     }
     review = [row for row in rows if row.get("needs_review") == "true"]
     if state.canonical_migration_required:
@@ -4417,15 +4452,14 @@ def _report_command(argv: list[str]) -> int:
     balance_reconciliation = period_summary["balance_reconciliation"]
 
     report_path = Path(args.output_path or categorized_path.parent / "report.html")
-    report_path.parent.mkdir(parents=True, exist_ok=True)
-    report_path.write_text(
+    private_atomic_write_text(
+        report_path,
         build_report_html(
             rows,
             period_label,
             source_occurrence_count=len(period_source_rows),
             balance_reconciliation=balance_reconciliation,
         ),
-        encoding="utf-8",
     )
     if args.json:
         _emit_json(
@@ -4466,11 +4500,13 @@ def _reconcile_command(argv: list[str]) -> int:
 
     config = _load_config(args.config_path)
     categorized_path = Path(args.output_path or config["paths"]["output"])
+    expected_generation = _snapshot_configured_generation(categorized_path, config)
     corrections = load_corrections(config)
     effective_corrections = corrections
     removed_correction_ids: set[str] = set()
     final_review_ids = _final_review_ids(corrections)
-    state = load_configured_identity_state(categorized_path, config)
+    state = load_configured_identity_state(categorized_path, config, recover=False)
+    require_generation_snapshot(expected_generation)
     if (
         state.canonical_migration_required
         and not state.bootstrap_required
@@ -4557,6 +4593,7 @@ def _reconcile_command(argv: list[str]) -> int:
             overlap_result=overlap_result,
             identity_manifest_document=state.manifest_document,
             correction_document=correction_document,
+            expected_generation=expected_generation,
         )
 
     artifacts = {"categorized_csv": str(categorized_path.resolve())}
@@ -4847,31 +4884,8 @@ def _normalize_json_correction(index: int, item: dict[str, Any]) -> dict[str, st
 
 
 def _atomic_write_text_files(files: dict[Path, str]) -> None:
-    staged: list[tuple[Path, Path]] = []
-    try:
-        for target, content in files.items():
-            target.parent.mkdir(parents=True, exist_ok=True)
-            existing_mode = (
-                stat.S_IMODE(target.stat().st_mode) if target.exists() else None
-            )
-            descriptor, temporary_name = tempfile.mkstemp(
-                dir=target.parent,
-                prefix=f".{target.name}.",
-                suffix=".tmp",
-            )
-            temporary_path = Path(temporary_name)
-            with os.fdopen(descriptor, "w", encoding="utf-8", newline="") as fh:
-                fh.write(content)
-                fh.flush()
-                os.fsync(fh.fileno())
-            if existing_mode is not None:
-                os.chmod(temporary_path, existing_mode)
-            staged.append((temporary_path, target))
-        for temporary_path, target in staged:
-            os.replace(temporary_path, target)
-    finally:
-        for temporary_path, _ in staged:
-            temporary_path.unlink(missing_ok=True)
+    for target, content in files.items():
+        private_atomic_write_text(target, content)
 
 
 def _resolve_period(
@@ -4954,6 +4968,7 @@ def _write_ledger_outputs(
     overlap_result: CanonicalizationResult | None = None,
     identity_manifest_document: str | None = None,
     correction_document: tuple[Path, str] | None = None,
+    expected_generation: Mapping[Path, str | None] | None = None,
 ) -> None:
     refresh_duplicate_candidates(ledger_rows, final_review_ids=final_review_ids)
     enforce_overlap_review(ledger_rows, overlap_result)
@@ -4967,7 +4982,11 @@ def _write_ledger_outputs(
     )
     if correction_document is not None:
         documents[correction_document[0]] = correction_document[1]
-    persist_generation(categorized_path, documents)
+    persist_generation(
+        categorized_path,
+        documents,
+        expected_generation_hashes=expected_generation,
+    )
 
 
 def _active_source_ids_by_fingerprint(
@@ -5156,9 +5175,10 @@ def _write_starter_workspace(root: Path, force: bool) -> None:
     input_dir = root / "input"
     output_dir = root / "output"
     profiles_dir = root / "profiles"
-    input_dir.mkdir(parents=True, exist_ok=True)
-    output_dir.mkdir(parents=True, exist_ok=True)
-    profiles_dir.mkdir(parents=True, exist_ok=True)
+    ensure_private_directory(root)
+    ensure_private_directory(input_dir)
+    ensure_private_directory(output_dir)
+    ensure_private_directory(profiles_dir)
 
     profile_documents = _installed_profile_documents(root)
     profile_path = profiles_dir / "starter_csv.json"
@@ -5277,13 +5297,17 @@ def _starter_rules() -> dict[str, Any]:
 def _write_json_file(path: Path, data: dict[str, Any], force: bool) -> None:
     if path.exists() and not force:
         raise ValueError(f"Refusing to overwrite {path}; pass --force to replace it")
-    path.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
+    private_atomic_write_text(
+        path,
+        json.dumps(data, indent=2, sort_keys=True),
+        overwrite=force,
+    )
 
 
 def _write_text_file(path: Path, content: str, force: bool) -> None:
     if path.exists() and not force:
         raise ValueError(f"Refusing to overwrite {path}; pass --force to replace it")
-    path.write_text(content, encoding="utf-8")
+    private_atomic_write_text(path, content, overwrite=force)
 
 
 def _load_config(config_path: str | None) -> dict[str, Any]:
@@ -5356,6 +5380,33 @@ def _loaded_rate_cache(config: Mapping[str, object]) -> RateCache:
     if not isinstance(value, Mapping):
         raise ValueError("The loaded rate cache is invalid")
     return validate_rate_cache(value)
+
+
+def _snapshot_configured_generation(
+    categorized_path: Path,
+    config: dict[str, Any],
+) -> dict[Path, str | None]:
+    """Capture a coherent ledger generation and refresh its cached rate input."""
+    expected_generation = snapshot_generation(
+        categorized_path,
+        configured_generation_paths(config),
+    )
+    rate_cache = config.get("rate_cache")
+    if isinstance(rate_cache, str) and rate_cache.strip():
+        config["_rate_cache"] = load_rate_cache(Path(rate_cache))
+    require_generation_snapshot(expected_generation)
+    return expected_generation
+
+
+def _load_configured_identity_generation(
+    categorized_path: Path,
+    config: dict[str, Any],
+) -> tuple[dict[Path, str | None], IdentityState]:
+    """Load identity state from one unchanged configured generation."""
+    expected_generation = _snapshot_configured_generation(categorized_path, config)
+    state = load_configured_identity_state(categorized_path, config, recover=False)
+    require_generation_snapshot(expected_generation)
+    return expected_generation, state
 
 
 def _recover_config_generation(config: dict[str, Any]) -> None:
@@ -5446,7 +5497,7 @@ def _final_review_ids(corrections: dict[str, dict[str, str]]) -> set[str]:
 
 
 def _write_report(path: Path, report: dict[str, Any]) -> None:
-    path.write_text(json.dumps(report, indent=2, sort_keys=True), encoding="utf-8")
+    private_atomic_write_text(path, json.dumps(report, indent=2, sort_keys=True))
 
 
 def run() -> int:

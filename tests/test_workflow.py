@@ -27,6 +27,7 @@ from honeymoney.identity_state import (
     load_identity_state,
 )
 from honeymoney.ollama import OllamaHttpRequest, apply_ollama_fallback
+from honeymoney.persistence import GenerationConflictError
 from honeymoney.schema import (
     ALLOWED_CATEGORIES,
     PREVIOUS_CATEGORIZED_COLUMNS,
@@ -544,6 +545,59 @@ def open(source_path):
                     ".honeymoney-overlap-manifest.json",
                 ):
                     self.assertFalse((root / "output" / name).exists())
+
+    def test_import_does_not_overwrite_a_generation_changed_after_read(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._setup_workspace(tmp)
+            first = root / "first.csv"
+            self._write_statement(first, ["2026-05-04,SYNTHETIC FIRST,-12.00,HKD"])
+            imported = self._run_cli(
+                ["import", str(first), "--no-interactive"], cwd=root
+            )
+            self.assertEqual(imported.returncode, 0, imported.stderr)
+
+            second = root / "second.csv"
+            self._write_statement(second, ["2026-05-05,SYNTHETIC SECOND,-8.00,HKD"])
+            ledger_path = root / "output" / "categorized.csv"
+            real_persist = cli.persist_generation
+            concurrent_ledger: bytes | None = None
+
+            def persist_after_concurrent_change(
+                authoritative_path: Path,
+                files: dict[Path, str],
+                **kwargs: object,
+            ) -> None:
+                nonlocal concurrent_ledger
+                ledger_path.write_bytes(ledger_path.read_bytes() + b"\n")
+                concurrent_ledger = ledger_path.read_bytes()
+                real_persist(authoritative_path, files, **kwargs)
+
+            prior_cwd = Path.cwd()
+            try:
+                os.chdir(root)
+                with (
+                    patch.object(
+                        cli,
+                        "persist_generation",
+                        side_effect=persist_after_concurrent_change,
+                    ),
+                    redirect_stdout(io.StringIO()),
+                    self.assertRaises(GenerationConflictError),
+                ):
+                    cli._import_command(
+                        [
+                            str(second),
+                            "--config",
+                            str(root / "config.json"),
+                            "--no-interactive",
+                            "--json",
+                        ]
+                    )
+            finally:
+                os.chdir(prior_cwd)
+
+            self.assertIsNotNone(concurrent_ledger)
+            self.assertEqual(ledger_path.read_bytes(), concurrent_ledger)
 
     def test_interactive_import_failure_restores_the_correction_input(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -5000,6 +5054,40 @@ def open(path):
                 "@import",
             ]:
                 self.assertNotIn(external_reference, html)
+
+    def test_report_refuses_a_symbolic_link_target(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._setup_workspace(tmp)
+            statement = root / "may.csv"
+            self._write_statement(
+                statement,
+                ["2026-05-04,SYNTHETIC REPORT,-12.00,HKD"],
+            )
+            imported = self._run_cli(
+                ["import", str(statement), "--no-interactive"], cwd=root
+            )
+            self.assertEqual(imported.returncode, 0, imported.stderr)
+            protected = root / "protected.txt"
+            protected.write_text("keep me\n", encoding="utf-8")
+            report_path = root / "output" / "report.html"
+            report_path.symlink_to(protected)
+
+            result = self._run_cli(
+                [
+                    "report",
+                    "--month",
+                    "2026-05",
+                    "--output",
+                    str(report_path),
+                    "--no-open",
+                    "--json",
+                ],
+                cwd=root,
+            )
+
+            self.assertEqual(result.returncode, 2, result.stderr)
+            self.assertEqual(protected.read_text(encoding="utf-8"), "keep me\n")
+            self.assertTrue(report_path.is_symlink())
 
     def test_report_command_defaults_to_current_calendar_month(self) -> None:
         class FixedDate(date):

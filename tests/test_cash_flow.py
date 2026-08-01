@@ -7,6 +7,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from time import perf_counter
 
 from honeymoney.identity_state import LEGACY_CATEGORIZED_COLUMNS
 from honeymoney.manual_pairs import ManualPairError, validate_manual_pair_facts
@@ -17,6 +18,76 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 class CashFlowWorkflowTest(unittest.TestCase):
+    def test_transfer_matching_handles_calendar_bounds(self) -> None:
+        for transaction_date in ("0001-01-01", "9999-12-31"):
+            with self.subTest(transaction_date=transaction_date):
+                rows = [
+                    {
+                        "transaction_id": "txn_synthetic_out",
+                        "date": transaction_date,
+                        "account_id": "synthetic_one",
+                        "account_type": "bank",
+                        "amount_hkd": "-10.00",
+                        "category": "Other",
+                    },
+                    {
+                        "transaction_id": "txn_synthetic_in",
+                        "date": transaction_date,
+                        "account_id": "synthetic_two",
+                        "account_type": "bank",
+                        "amount_hkd": "10.00",
+                        "category": "Other",
+                    },
+                ]
+
+                summary = reconcile_ledger(
+                    rows,
+                    {"reconciliation": {"date_window_days": 3}},
+                )
+
+                self.assertEqual(summary["paired_groups"], 1)
+                self.assertEqual(
+                    {row["reconciliation_status"] for row in rows},
+                    {"paired"},
+                )
+
+    def test_large_nonmatching_ledger_avoids_all_pairs_scan(self) -> None:
+        rows = [
+            {
+                "transaction_id": f"txn_{index:032x}",
+                "date": f"2026-05-{index % 28 + 1:02d}",
+                "account_id": f"account-{index % 8}",
+                "account_type": "bank",
+                "original_amount": str(-(index + 1)),
+                "original_currency": "HKD",
+                "posted_amount": str(-(index + 1)),
+                "posted_currency": "HKD",
+                "amount_hkd": str(-(index + 1)),
+                "category": "Unknown",
+                "flow_type": "unresolved",
+                "flow_source": "deterministic",
+                "merchant": "SYNTHETIC NONMATCH",
+                "original_description": "SYNTHETIC NONMATCH",
+                "needs_review": "true",
+                "review_reasons": "category_decision;accounting_flow",
+                "flags": "uncategorized",
+            }
+            for index in range(2_500)
+        ]
+
+        started = perf_counter()
+        result = reconcile_ledger(
+            rows,
+            {
+                "base_currency": "HKD",
+                "reconciliation": {"date_window_days": 3},
+            },
+        )
+        elapsed = perf_counter() - started
+
+        self.assertEqual(result["paired_groups"], 0)
+        self.assertLess(elapsed, 1.5)
+
     def _legacy_id(self, label: str) -> str:
         return "txn_" + hashlib.sha256(label.encode("utf-8")).hexdigest()[:16]
 

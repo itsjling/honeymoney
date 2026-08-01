@@ -14,6 +14,7 @@ from unittest.mock import patch
 
 import pdfplumber
 
+from honeymoney import importers
 from honeymoney.cli import _load_config_document, _preview_profile_input, main
 from honeymoney.identity import (
     IdentityError,
@@ -21,6 +22,7 @@ from honeymoney.identity import (
     logical_locator,
     resolve_batch,
     source_namespace_id,
+    source_revision,
 )
 from honeymoney.importers import (
     _import_pdf,
@@ -1404,6 +1406,194 @@ class PdfBalanceReconciliationTest(unittest.TestCase):
         self.assertEqual(rows[0]["statement_closing_balance"], "95.00")
 
 
+class PdfResourceLimitTest(unittest.TestCase):
+    def test_source_capture_rejects_oversized_pdf_before_retaining_its_bytes(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            statement = Path(tmp) / "statement.pdf"
+            statement.write_bytes(b"12345")
+
+            with (
+                patch.object(importers, "MAX_PDF_INPUT_BYTES", 4),
+                self.assertRaisesRegex(ValueError, "PDF input exceeds"),
+            ):
+                importers._capture_input_source(statement, {})
+
+    def test_pdf_reuses_words_and_tables_across_balance_and_transaction_parsing(
+        self,
+    ) -> None:
+        class Page:
+            def __init__(self) -> None:
+                self.word_calls = 0
+                self.table_calls = 0
+
+            def extract_words(self, **kwargs):
+                self.word_calls += 1
+                return []
+
+            def extract_tables(self):
+                self.table_calls += 1
+                return []
+
+        page = Page()
+
+        class Pdf:
+            pages = [page]
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            statement = root / "statement.pdf"
+            statement.write_bytes(b"%PDF-1.4 synthetic")
+            fake_pdfplumber = types.SimpleNamespace(open=lambda path: Pdf())
+            with patch.dict(sys.modules, {"pdfplumber": fake_pdfplumber}):
+                _import_pdf(
+                    statement,
+                    load_profile("hsbc_hk_credit_card_pdf.json"),
+                    {"base_currency": "HKD", "exchange_rates": {"HKD": 1}},
+                    root,
+                )
+
+        self.assertEqual(page.word_calls, 1)
+        self.assertEqual(page.table_calls, 1)
+
+    def test_pdf_rejects_oversized_input_before_opening_it(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            statement = root / "statement.pdf"
+            statement.write_bytes(b"%PDF-1.4 synthetic")
+            with patch.object(importers, "MAX_PDF_INPUT_BYTES", 4):
+                with self.assertRaisesRegex(ValueError, "PDF input exceeds"):
+                    _import_pdf(
+                        statement,
+                        load_profile("mox_bank_pdf.json"),
+                        {"base_currency": "HKD", "exchange_rates": {"HKD": 1}},
+                        root,
+                    )
+
+    def test_pdf_rejects_too_many_pages_before_extracting_them(self) -> None:
+        class Page:
+            def extract_words(self, **kwargs):
+                raise AssertionError("page extraction should not start")
+
+            def extract_tables(self):
+                raise AssertionError("page extraction should not start")
+
+        class Pdf:
+            pages = [Page(), Page()]
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            statement = root / "statement.pdf"
+            statement.write_bytes(b"%PDF-1.4 synthetic")
+            fake_pdfplumber = types.SimpleNamespace(open=lambda path: Pdf())
+            with (
+                patch.dict(sys.modules, {"pdfplumber": fake_pdfplumber}),
+                patch.object(importers, "MAX_PDF_PAGES", 1),
+                self.assertRaisesRegex(ValueError, "PDF page count exceeds"),
+            ):
+                _import_pdf(
+                    statement,
+                    load_profile("mox_bank_pdf.json"),
+                    {"base_currency": "HKD", "exchange_rates": {"HKD": 1}},
+                    root,
+                )
+
+    def test_pdf_rejects_excess_extracted_text(self) -> None:
+        class Page:
+            def extract_words(self, **kwargs):
+                return [{"text": "SYNTHETIC", "x0": 10, "top": 10}]
+
+            def extract_tables(self):
+                return []
+
+        class Pdf:
+            pages = [Page()]
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            statement = root / "statement.pdf"
+            statement.write_bytes(b"%PDF-1.4 synthetic")
+            fake_pdfplumber = types.SimpleNamespace(open=lambda path: Pdf())
+            with (
+                patch.dict(sys.modules, {"pdfplumber": fake_pdfplumber}),
+                patch.object(importers, "MAX_PDF_EXTRACTED_TEXT_CHARS", 4),
+                self.assertRaisesRegex(ValueError, "PDF extracted text exceeds"),
+            ):
+                _import_pdf(
+                    statement,
+                    load_profile("mox_bank_pdf.json"),
+                    {"base_currency": "HKD", "exchange_rates": {"HKD": 1}},
+                    root,
+                )
+
+    def test_pdf_text_fallback_counts_toward_extracted_text_limit(self) -> None:
+        class Page:
+            def extract_words(self, **kwargs):
+                return []
+
+            def extract_tables(self):
+                return []
+
+        class Pdf:
+            pages = [Page()]
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            statement = root / "statement.pdf"
+            statement.write_bytes(b"%PDF-1.4 synthetic")
+            fake_pdfplumber = types.SimpleNamespace(open=lambda path: Pdf())
+            with (
+                patch.dict(sys.modules, {"pdfplumber": fake_pdfplumber}),
+                patch.object(importers, "MAX_PDF_EXTRACTED_TEXT_CHARS", 4),
+                patch.object(importers, "_pymupdf_page_text_length", return_value=5),
+                self.assertRaisesRegex(ValueError, "PDF extracted text exceeds"),
+            ):
+                _import_pdf(
+                    statement,
+                    load_profile("mox_bank_pdf.json"),
+                    {"base_currency": "HKD", "exchange_rates": {"HKD": 1}},
+                    root,
+                )
+
+    def test_pdf_rejects_excess_transaction_rows(self) -> None:
+        profile = load_profile("mox_credit_card_pdf.json")
+        tables = [
+            [
+                ["17 May 18 May SYNTHETIC PURCHASE ONE -10.00"],
+                ["18 May 19 May SYNTHETIC PURCHASE TWO -20.00"],
+            ]
+        ]
+
+        with patch.object(importers, "MAX_PDF_TRANSACTION_ROWS", 1):
+            with self.assertRaisesRegex(ValueError, "PDF transaction rows exceed"):
+                _import_fake_pdf(profile, tables=tables)
+
+
 class PdfByteFixtureReviewTest(unittest.TestCase):
     def test_pdf_byte_goldens_are_reproducible_and_privacy_reviewed(self) -> None:
         fixture_root = FIXTURE_DIR / "import_profiles"
@@ -1464,6 +1654,46 @@ class PdfByteFixtureReviewTest(unittest.TestCase):
 
 
 class IdentityParserInputsTest(unittest.TestCase):
+    def test_source_revision_uses_the_same_bytes_as_csv_parsing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            statement = root / "statement.csv"
+            parsed_bytes = (
+                b"Date,Description,Amount,Currency\n"
+                b"2026-01-01,SYNTHETIC PARSED,-1.00,HKD\n"
+            )
+            replacement_bytes = (
+                b"Date,Description,Amount,Currency\n"
+                b"2026-01-01,SYNTHETIC REPLACEMENT,-2.00,HKD\n"
+            )
+            statement.write_bytes(parsed_bytes)
+            config = _identity_config(root)
+            real_import_csv = importers._import_csv
+
+            def import_then_replace(*args: object, **kwargs: object) -> object:
+                result = real_import_csv(*args, **kwargs)
+                statement.write_bytes(replacement_bytes)
+                return result
+
+            with patch.object(
+                importers,
+                "_import_csv",
+                side_effect=import_then_replace,
+            ):
+                rows, _, _, sources = _import_transactions(
+                    [statement],
+                    [starter_profile()],
+                    config,
+                    root,
+                    False,
+                    {},
+                    None,
+                    include_identity_sources=True,
+                )
+
+            self.assertEqual(rows[0]["merchant"], "SYNTHETIC PARSED")
+            self.assertEqual(sources[0].revision, source_revision(parsed_bytes))
+
     def test_config_root_is_private_and_independent_of_input_shape(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

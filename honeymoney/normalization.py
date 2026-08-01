@@ -240,13 +240,28 @@ def _signed_amount(
     amount_column = columns.get("amount")
     if amount_column:
         raw_amount = _value(row, amount_column)
-        amount = _parse_decimal(raw_amount, invalid_columns, amount_column)
+        amount = _parse_decimal(
+            raw_amount,
+            invalid_columns,
+            amount_column,
+            blank_is_invalid=True,
+        )
         return _apply_amount_sign(raw_amount, amount, row, columns)
 
     debit_column = columns.get("debit")
     credit_column = columns.get("credit")
-    debit = _parse_decimal(_value(row, debit_column), invalid_columns, debit_column)
-    credit = _parse_decimal(_value(row, credit_column), invalid_columns, credit_column)
+    raw_debit = _value(row, debit_column)
+    raw_credit = _value(row, credit_column)
+    debit = _parse_decimal(raw_debit, invalid_columns, debit_column)
+    credit = _parse_decimal(raw_credit, invalid_columns, credit_column)
+    if not raw_debit.strip() and not raw_credit.strip():
+        invalid_columns.extend(
+            str(column) for column in (debit_column, credit_column) if column
+        )
+    elif debit != Decimal("0") and credit != Decimal("0"):
+        invalid_columns.extend(
+            str(column) for column in (debit_column, credit_column) if column
+        )
     if debit != Decimal("0"):
         return -abs(debit)
     if credit != Decimal("0"):
@@ -263,7 +278,12 @@ def _posted_amount(
     posted_column = columns.get("posted_amount")
     if posted_column:
         raw_amount = _value(row, posted_column)
-        amount = _parse_decimal(raw_amount, invalid_columns, posted_column)
+        amount = _parse_decimal(
+            raw_amount,
+            invalid_columns,
+            posted_column,
+            blank_is_invalid=True,
+        )
         return _apply_amount_sign(raw_amount, amount, row, columns)
     return fallback
 
@@ -308,9 +328,15 @@ def _amount_hkd(
 
 
 def _parse_decimal(
-    value: str, invalid_columns: list[str] | None = None, column: str | None = None
+    value: str,
+    invalid_columns: list[str] | None = None,
+    column: str | None = None,
+    *,
+    blank_is_invalid: bool = False,
 ) -> Decimal:
-    if not value:
+    if not value.strip():
+        if blank_is_invalid and invalid_columns is not None and column:
+            invalid_columns.append(str(column))
         return Decimal("0")
     cleaned = value.replace(",", "").strip()
     upper_cleaned = cleaned.upper()

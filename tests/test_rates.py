@@ -8,10 +8,13 @@ import unittest
 from copy import deepcopy
 from decimal import Decimal
 from pathlib import Path
+from unittest.mock import patch
 
+from honeymoney import cli
 from honeymoney.corrections import CORRECTION_COLUMNS
 from honeymoney.csv_artifacts import csv_document
 from honeymoney.identity_state import load_configured_identity_state
+from honeymoney.persistence import GenerationConflictError
 from honeymoney.rates import (
     HKMA_PROVIDER,
     RateImportError,
@@ -297,6 +300,44 @@ class RateImportCliTest(unittest.TestCase):
             stderr=subprocess.PIPE,
             check=False,
         )
+
+    def test_standalone_rate_import_rejects_a_concurrently_created_ledger(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            categorized_path = root / "output" / "categorized.csv"
+            cache_path = root / "rates.json"
+            config = {
+                "base_currency": "HKD",
+                "paths": {"output": str(categorized_path)},
+                "rate_cache": str(cache_path),
+                "_rate_cache": empty_rate_cache(),
+            }
+            observations = parse_hkma_daily_document(
+                _hkma_document([{"end_of_day": "2026-07-03", "eur": 9.25}]),
+                base_currency="HKD",
+            )
+            real_persist = cli.persist_generation
+
+            def create_ledger_then_persist(*args, **kwargs):
+                categorized_path.parent.mkdir(parents=True)
+                categorized_path.write_text("concurrent ledger\n", encoding="utf-8")
+                return real_persist(*args, **kwargs)
+
+            with patch.object(
+                cli,
+                "persist_generation",
+                side_effect=create_ledger_then_persist,
+            ):
+                with self.assertRaises(GenerationConflictError):
+                    cli._apply_rate_observations(config, observations)
+
+            self.assertFalse(cache_path.exists())
+            self.assertEqual(
+                categorized_path.read_text(encoding="utf-8"),
+                "concurrent ledger\n",
+            )
 
     def test_legacy_config_uses_stable_workspace_rate_cache_default(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

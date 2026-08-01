@@ -1046,6 +1046,55 @@ class AgentCliTest(unittest.TestCase):
             )
             self.assertTrue(report_path.exists())
 
+    def test_status_counts_same_named_external_statements_by_source_id(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            root = self._setup_workspace(tmp)
+            first_dir = base / "external-one"
+            second_dir = base / "external-two"
+            first_dir.mkdir()
+            second_dir.mkdir()
+            first = first_dir / "statement.csv"
+            second = second_dir / "statement.csv"
+            first.write_text(
+                "Date,Description,Amount,Currency\n"
+                "2026-05-04,SYNTHETIC FIRST,-10.00,HKD\n",
+                encoding="utf-8",
+            )
+            second.write_text(
+                "Date,Description,Amount,Currency\n"
+                "2026-05-05,SYNTHETIC SECOND,-20.00,HKD\n",
+                encoding="utf-8",
+            )
+            for statement in (first, second):
+                imported = self._run_cli(
+                    [
+                        "import",
+                        str(statement),
+                        "--config",
+                        str(root / "config.json"),
+                        "--no-interactive",
+                        "--json",
+                    ],
+                    cwd=root,
+                )
+                self.assertEqual(imported.returncode, 0, imported.stderr)
+
+            status = self._run_cli(
+                [
+                    "status",
+                    "--month",
+                    "2026-05",
+                    "--config",
+                    str(root / "config.json"),
+                    "--json",
+                ],
+                cwd=root,
+            )
+
+            self.assertEqual(status.returncode, 0, status.stderr)
+            self.assertEqual(self._json(status)["data"]["statements_processed"], 2)
+
     def test_json_mode_returns_structured_validation_errors(self) -> None:
         result = self._run_cli(["import", "--json"])
 
@@ -1283,7 +1332,7 @@ class AgentCliTest(unittest.TestCase):
                 list((root / "output").glob(".*honeymoney-state.json")), []
             )
 
-    def test_successful_correction_preserves_existing_artifact_permissions(
+    def test_successful_correction_narrows_existing_artifact_permissions(
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1317,7 +1366,8 @@ class AgentCliTest(unittest.TestCase):
 
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(
-                {path: path.stat().st_mode & 0o777 for path in modes}, modes
+                {path: path.stat().st_mode & 0o777 for path in modes},
+                {path: mode & 0o600 for path, mode in modes.items()},
             )
 
     def test_remembered_one_shot_failure_restores_rules_and_review_artifacts(

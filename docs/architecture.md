@@ -114,9 +114,10 @@ Hidden generation state beside `categorized.csv` contains only paths, modes,
 and content digests. If a write fails before the ledger commit point, the old
 files are restored. If interruption occurs after it, the next command that
 loads the active workspace configuration completes the new generation before
-continuing. Recovery removes public files that were
-absent in the prior generation, preserves existing file permissions, and does
-not include transaction values in diagnostics. Retained state also prevents a
+continuing. Recovery removes public files that were absent in the prior
+generation. New financial files use owner-only read and write access. Existing
+files keep their owner access while losing all group and other access.
+Diagnostics do not include transaction values. Retained state also prevents a
 new operation from silently proceeding when recovery cannot be completed.
 
 Replacement removes obsolete source occurrences, then recomputes canonical
@@ -319,10 +320,11 @@ keeps final active canonical IDs and drops retired source aliases.
 
 `categorized.csv` is the authoritative canonical ledger. `review_needed.csv` is a
 deterministic view of its rows whose `needs_review` value is `true`.
-`import_report.json` is a snapshot derived from the most recent successful
-import; review and correction commands do not rewrite that historical import
-snapshot. `corrections.csv` remains durable input for applying reviewed choices
-to future imports, but it is not a second ledger.
+`import_report.json` describes the latest attempted import, including an attempt
+that failed while the prior ledger stayed in place. Review and correction
+commands do not rewrite that import record. `corrections.csv` remains durable
+input for applying reviewed choices to future imports, but it is not a second
+ledger.
 
 The hidden `<categorized.csv parent>/.honeymoney-identity-manifest.json` is the
 authoritative source and record ownership store. It records IDs, hashes,

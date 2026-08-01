@@ -1,6 +1,7 @@
 import csv
 import json
 import os
+import stat
 import subprocess
 import sys
 import tempfile
@@ -9,6 +10,7 @@ from pathlib import Path
 
 from honeymoney.corrections import CORRECTION_COLUMNS
 from honeymoney.identity_state import load_identity_state
+from honeymoney.normalization import _normalized_row
 from honeymoney.schema import CATEGORIZED_COLUMNS
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -98,6 +100,22 @@ class CliBootstrapTest(unittest.TestCase):
                 (root / "corrections.csv").read_text(encoding="utf-8").splitlines()[0],
                 ",".join(CORRECTION_COLUMNS),
             )
+            for directory in (root, root / "input", root / "output", root / "profiles"):
+                self.assertEqual(stat.S_IMODE(directory.stat().st_mode), 0o700)
+            for private_file in (
+                root / "config.json",
+                root / "rules.json",
+                root / "corrections.csv",
+                root / "rates.json",
+                root / "profile_mappings.json",
+                root / ".honeymoney-managed-files.json",
+                *sorted((root / "profiles").glob("*.json")),
+            ):
+                self.assertEqual(
+                    stat.S_IMODE(private_file.stat().st_mode),
+                    0o600,
+                    private_file,
+                )
             self.assertTrue((root / "profile_mappings.json").exists())
 
             config = json.loads((root / "config.json").read_text(encoding="utf-8"))
@@ -1169,7 +1187,7 @@ class CliBootstrapTest(unittest.TestCase):
             self.assertEqual(row["needs_review"], "true")
 
     def test_csv_file_input_flags_invalid_amount_for_review(self) -> None:
-        for invalid_amount in ["not-a-number", "NaN", "Infinity", "BADCR"]:
+        for invalid_amount in ["", "not-a-number", "NaN", "Infinity", "BADCR"]:
             with self.subTest(invalid_amount=invalid_amount):
                 with tempfile.TemporaryDirectory() as tmp:
                     root = Path(tmp)
@@ -1263,6 +1281,76 @@ class CliBootstrapTest(unittest.TestCase):
                         ],
                         "Invalid amount in Amount",
                     )
+
+    def test_split_and_posted_amounts_distinguish_missing_conflicts_and_zero(
+        self,
+    ) -> None:
+        profile = {
+            "account_id": "synthetic_bank",
+            "account": "Synthetic Bank",
+            "account_type": "bank",
+            "account_currency": "HKD",
+            "owner": "Household",
+            "payment_method": "Bank Account",
+        }
+        split_columns = {
+            "transaction_date": "Date",
+            "description": "Description",
+            "debit": "Debit",
+            "credit": "Credit",
+        }
+        cases = {
+            "both blank": ({"Debit": "", "Credit": ""}, True),
+            "both nonzero": ({"Debit": "10.00", "Credit": "2.00"}, True),
+            "explicit debit zero": ({"Debit": "0", "Credit": ""}, False),
+            "explicit credit zero": ({"Debit": "", "Credit": "0.00"}, False),
+        }
+        for label, (amounts, invalid) in cases.items():
+            with self.subTest(label=label):
+                row = _normalized_row(
+                    {
+                        "Date": "2026-05-04",
+                        "Description": label,
+                        **amounts,
+                    },
+                    2,
+                    profile,
+                    {"base_currency": "HKD"},
+                    split_columns,
+                    "synthetic.csv",
+                )
+                self.assertEqual(
+                    "invalid_amount" in row["flags"].split(";"),
+                    invalid,
+                )
+                self.assertEqual(
+                    "source_data_issue" in row["review_reasons"].split(";"),
+                    invalid,
+                )
+
+        posted_row = _normalized_row(
+            {
+                "Date": "2026-05-04",
+                "Description": "blank posted amount",
+                "Amount": "10.00",
+                "Posted": "",
+            },
+            2,
+            profile,
+            {"base_currency": "HKD"},
+            {
+                "transaction_date": "Date",
+                "description": "Description",
+                "amount": "Amount",
+                "posted_amount": "Posted",
+            },
+            "synthetic.csv",
+        )
+        self.assertIn("invalid_amount", posted_row["flags"].split(";"))
+        self.assertIn(
+            "source_data_issue",
+            posted_row["review_reasons"].split(";"),
+        )
 
     def test_csv_profile_can_use_merchant_and_credit_debit_indicator(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -5080,12 +5168,17 @@ class Page:
 
 
 class Pdf:
-    def __init__(self, path):
-        self.path = path
+    def __init__(self, source):
+        self.source = source
         self.pages = []
 
     def __enter__(self):
-        data = json.loads(builtins.open(self.path, encoding="utf-8").read())
+        content = (
+            self.source.decode("utf-8")
+            if isinstance(self.source, bytes)
+            else builtins.open(self.source, encoding="utf-8").read()
+        )
+        data = json.loads(content)
         self.pages = [Page(page.get("text", "")) for page in data["pages"]]
         return self
 
@@ -5096,8 +5189,8 @@ class Pdf:
         return self.pages[index]
 
 
-def open(path):
-    return Pdf(path)
+def open(path=None, *, filename=None, stream=None, filetype=None):
+    return Pdf(stream if stream is not None else filename or path)
 """,
                 encoding="utf-8",
             )

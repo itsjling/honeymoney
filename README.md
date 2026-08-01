@@ -540,7 +540,8 @@ Each run writes three public files next to the configured categorized CSV:
   plain reason labels, and editable correction columns.
 - `import_report.json`: processed files, selected profiles, warnings, source and
   canonical counts, overlap provenance, compatibility duplicate counts, review
-  counts, ledger totals, and Ollama status.
+  counts, ledger totals, and Ollama status for the latest attempted import. A
+  failed attempt can replace this report while the prior ledger stays in place.
 
 Three hidden files join each recoverable ledger generation:
 
@@ -673,6 +674,11 @@ PDF support is for text-based statement PDFs. Install the PDF extra:
 python3 -m pip install -e ".[pdf]"
 ```
 
+Each PDF may contain at most 64 MiB, 500 pages, 20 million extracted text
+characters, and 100,000 transaction rows. Honeymoney stops the import when a
+file crosses a limit. Balance and transaction parsing share each page's word
+and table extraction.
+
 Current example profiles cover HSBC One, HSBC credit-card, and Mox bank/card statement shapes. `hsbc_one_pdf` is the sole HSBC bank-statement profile: it separates HKD Savings, HKD Current, and Foreign Currency Savings transactions into stable account identities, preserves each transaction currency, and retains the original PDF as source provenance. Select that profile when prompted and optionally save the filename mapping for future statements. Real private samples should stay in `samples/` or `private_samples/`.
 
 The bundled HSBC and Mox PDF profiles also read statement opening and closing
@@ -717,11 +723,11 @@ remain.
 
 Development and CI installs use the reviewed resolution in
 `constraints/dev.txt` while published PDF requirements remain compatible
-ranges. Bootstrap from any directory with Python 3.10 or 3.13:
+ranges. Bootstrap from any directory with Python 3.11 or 3.13:
 
 ```bash
-PYTHON=python3.10 ./scripts/bootstrap.sh
-PYTHON=python3.10 ./scripts/check.sh
+PYTHON=python3.11 ./scripts/bootstrap.sh
+PYTHON=python3.11 ./scripts/check.sh
 ```
 
 The offline verification command runs formatting, linting, static types,
@@ -744,18 +750,18 @@ python3 -m mypy
 The coverage command runs the default synthetic unittest suite once, combines
 data from child CLI processes, and enforces the threshold in `pyproject.toml`.
 See [`docs/quality-gates.md`](docs/quality-gates.md) for the checked type scope,
-the expansion rule, and the reviewed coverage baseline.
+the expansion rule, and the coverage policy.
 
-Refresh the reviewed resolution intentionally on Python 3.10:
+Refresh the reviewed resolution intentionally on Python 3.11:
 
 ```bash
-PYTHON=python3.10 ./scripts/refresh-constraints.sh
+PYTHON=python3.11 ./scripts/refresh-constraints.sh
 git diff -- pyproject.toml constraints/dev.txt
 ```
 
 The refresh uses a clean temporary environment and rewrites the complete direct
 and transitive resolution. Never hand-edit individual transitive pins. Before
-accepting the diff, bootstrap clean environments on both Python 3.10 and 3.13,
+accepting the diff, bootstrap clean environments on both Python 3.11 and 3.13,
 run the import-profile goldens, and run the full verification command:
 
 ```bash

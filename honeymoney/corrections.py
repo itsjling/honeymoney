@@ -67,6 +67,9 @@ from honeymoney.rules import validate_rules
 from honeymoney.schema import (
     ALLOWED_FLOW_TYPES,
     CATEGORIZED_COLUMNS,
+    PRE_RATE_METADATA_REVIEW_NEEDED_COLUMNS,
+    PRE_STATEMENT_SECTION_REVIEW_NEEDED_COLUMNS,
+    PREVIOUS_REVIEW_NEEDED_COLUMNS,
     REVIEW_NEEDED_COLUMNS,
     SOURCE_OCCURRENCE_COLUMNS,
     allowed_categories,
@@ -109,11 +112,22 @@ def load_corrections(config: Config) -> dict[str, dict[str, str]]:
         return {}
 
     artifact = read_csv_artifact(Path(str(corrections_path)), CORRECTION_COLUMNS)
+    _validate_correction_csv_header(artifact.fieldnames)
     corrections: dict[str, dict[str, str]] = {}
+    seen_transaction_ids: set[str] = set()
     for row_index, row in enumerate(artifact.rows):
         transaction_id = row.get("transaction_id", "").strip()
         if not transaction_id:
+            if any((row.get(field) or "").strip() for field in CORRECTION_FIELDS):
+                raise ValueError(
+                    f"Correction CSV row {row_index + 2} requires a non-empty transaction_id"
+                )
             continue
+        if transaction_id in seen_transaction_ids:
+            raise ValueError(
+                f"Duplicate transaction_id in correction CSV: {transaction_id}"
+            )
+        seen_transaction_ids.add(transaction_id)
         meaningful = {}
         for field in CORRECTION_FIELDS:
             if field == "notes":
@@ -140,6 +154,30 @@ def load_corrections(config: Config) -> dict[str, dict[str, str]]:
             validate_correction(transaction_id, meaningful, config)
             corrections[transaction_id] = meaningful
     return corrections
+
+
+def _validate_correction_csv_header(fieldnames: tuple[str, ...]) -> None:
+    if not fieldnames:
+        raise ValueError("Correction CSV requires a header with transaction_id")
+    if len(set(fieldnames)) != len(fieldnames):
+        raise ValueError("Correction CSV header contains duplicate columns")
+    if "transaction_id" not in fieldnames:
+        raise ValueError("Correction CSV header requires transaction_id")
+
+    review_headers = {
+        tuple(PREVIOUS_REVIEW_NEEDED_COLUMNS),
+        tuple(PRE_STATEMENT_SECTION_REVIEW_NEEDED_COLUMNS),
+        tuple(PRE_RATE_METADATA_REVIEW_NEEDED_COLUMNS),
+        tuple(REVIEW_NEEDED_COLUMNS),
+    }
+    if fieldnames in review_headers:
+        return
+
+    unknown = set(fieldnames) - set(CORRECTION_COLUMNS)
+    if unknown:
+        raise ValueError(
+            f"Unsupported correction CSV header: {', '.join(sorted(unknown))}"
+        )
 
 
 def validate_correction(

@@ -340,6 +340,16 @@ def logical_locator(path: Path, workspace_root: Path) -> tuple[str, str]:
     Callers must not store the second value in reports, diagnostics, or manifests.
     """
     resolved_path = Path(path).resolve(strict=True)
+    return logical_locator_from_resolved(resolved_path, workspace_root)
+
+
+def logical_locator_from_resolved(
+    resolved_path: Path, workspace_root: Path
+) -> tuple[str, str]:
+    """Build a locator without resolving a source path a second time."""
+    resolved_path = Path(resolved_path)
+    if not resolved_path.is_absolute():
+        raise IdentityError("identity_manifest_invalid")
     resolved_root = Path(workspace_root).resolve(strict=True)
     try:
         relative = resolved_path.relative_to(resolved_root)
@@ -2336,6 +2346,7 @@ __all__ = [
     "extractor_contract_id",
     "has_stable_v2_identity",
     "logical_locator",
+    "logical_locator_from_resolved",
     "manifest_document",
     "manifest_path",
     "ownership_exact_state_key",
