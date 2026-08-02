@@ -113,6 +113,11 @@ def load_corrections(config: Config) -> dict[str, dict[str, str]]:
 
     artifact = read_csv_artifact(Path(str(corrections_path)), CORRECTION_COLUMNS)
     _validate_correction_csv_header(artifact.fieldnames)
+    if artifact.rows_with_extra_cells:
+        row_number = min(artifact.rows_with_extra_cells) + 2
+        raise ValueError(
+            f"Correction CSV row {row_number} has more cells than its header"
+        )
     corrections: dict[str, dict[str, str]] = {}
     seen_transaction_ids: set[str] = set()
     for row_index, row in enumerate(artifact.rows):

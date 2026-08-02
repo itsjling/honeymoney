@@ -341,9 +341,23 @@ def _parse_decimal(
     cleaned = value.replace(",", "").strip()
     upper_cleaned = cleaned.upper()
     if upper_cleaned.endswith("CR"):
-        return abs(_parse_decimal(cleaned[:-2], invalid_columns, column))
+        return abs(
+            _parse_decimal(
+                cleaned[:-2],
+                invalid_columns,
+                column,
+                blank_is_invalid=blank_is_invalid,
+            )
+        )
     if upper_cleaned.endswith("DR"):
-        return -abs(_parse_decimal(cleaned[:-2], invalid_columns, column))
+        return -abs(
+            _parse_decimal(
+                cleaned[:-2],
+                invalid_columns,
+                column,
+                blank_is_invalid=blank_is_invalid,
+            )
+        )
     try:
         parsed = Decimal(cleaned)
     except InvalidOperation:

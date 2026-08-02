@@ -1407,6 +1407,19 @@ class PdfBalanceReconciliationTest(unittest.TestCase):
 
 
 class PdfResourceLimitTest(unittest.TestCase):
+    def test_source_capture_rejects_oversized_csv_before_retaining_its_bytes(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            statement = Path(tmp) / "statement.csv"
+            statement.write_bytes(b"12345")
+
+            with (
+                patch.object(importers, "MAX_CSV_INPUT_BYTES", 4),
+                self.assertRaisesRegex(ValueError, "CSV input exceeds"),
+            ):
+                importers._capture_input_source(statement, {})
+
     def test_source_capture_rejects_oversized_pdf_before_retaining_its_bytes(
         self,
     ) -> None:

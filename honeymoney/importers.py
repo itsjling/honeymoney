@@ -46,6 +46,7 @@ from honeymoney.schema import (
 )
 from honeymoney.valuation import value_transaction
 
+MAX_CSV_INPUT_BYTES = 64 * 1024 * 1024
 MAX_PDF_INPUT_BYTES = 64 * 1024 * 1024
 MAX_PDF_PAGES = 500
 MAX_PDF_EXTRACTED_TEXT_CHARS = 20_000_000
@@ -176,13 +177,15 @@ def _capture_input_source(
 ) -> _InputSourceSnapshot:
     """Read one stable source snapshot for parsing and identity."""
     is_pdf = input_file.suffix.casefold() == ".pdf"
+    input_kind = "PDF" if is_pdf else "CSV"
+    max_input_bytes = MAX_PDF_INPUT_BYTES if is_pdf else MAX_CSV_INPUT_BYTES
     with input_file.open("rb") as handle:
         before = os.fstat(handle.fileno())
-        if is_pdf and before.st_size > MAX_PDF_INPUT_BYTES:
-            raise ValueError(f"PDF input exceeds {MAX_PDF_INPUT_BYTES} bytes")
-        source_bytes = handle.read(MAX_PDF_INPUT_BYTES + 1 if is_pdf else -1)
-        if is_pdf and len(source_bytes) > MAX_PDF_INPUT_BYTES:
-            raise ValueError(f"PDF input exceeds {MAX_PDF_INPUT_BYTES} bytes")
+        if before.st_size > max_input_bytes:
+            raise ValueError(f"{input_kind} input exceeds {max_input_bytes} bytes")
+        source_bytes = handle.read(max_input_bytes + 1)
+        if len(source_bytes) > max_input_bytes:
+            raise ValueError(f"{input_kind} input exceeds {max_input_bytes} bytes")
         after = os.fstat(handle.fileno())
     resolved_path = input_file.resolve(strict=True)
     current = resolved_path.stat()

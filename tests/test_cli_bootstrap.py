@@ -1187,7 +1187,15 @@ class CliBootstrapTest(unittest.TestCase):
             self.assertEqual(row["needs_review"], "true")
 
     def test_csv_file_input_flags_invalid_amount_for_review(self) -> None:
-        for invalid_amount in ["", "not-a-number", "NaN", "Infinity", "BADCR"]:
+        for invalid_amount in [
+            "",
+            "not-a-number",
+            "NaN",
+            "Infinity",
+            "BADCR",
+            "CR",
+            "DR",
+        ]:
             with self.subTest(invalid_amount=invalid_amount):
                 with tempfile.TemporaryDirectory() as tmp:
                     root = Path(tmp)
@@ -1328,29 +1336,31 @@ class CliBootstrapTest(unittest.TestCase):
                     invalid,
                 )
 
-        posted_row = _normalized_row(
-            {
-                "Date": "2026-05-04",
-                "Description": "blank posted amount",
-                "Amount": "10.00",
-                "Posted": "",
-            },
-            2,
-            profile,
-            {"base_currency": "HKD"},
-            {
-                "transaction_date": "Date",
-                "description": "Description",
-                "amount": "Amount",
-                "posted_amount": "Posted",
-            },
-            "synthetic.csv",
-        )
-        self.assertIn("invalid_amount", posted_row["flags"].split(";"))
-        self.assertIn(
-            "source_data_issue",
-            posted_row["review_reasons"].split(";"),
-        )
+        for posted_amount in ["", "CR", "DR"]:
+            with self.subTest(posted_amount=posted_amount):
+                posted_row = _normalized_row(
+                    {
+                        "Date": "2026-05-04",
+                        "Description": "invalid posted amount",
+                        "Amount": "10.00",
+                        "Posted": posted_amount,
+                    },
+                    2,
+                    profile,
+                    {"base_currency": "HKD"},
+                    {
+                        "transaction_date": "Date",
+                        "description": "Description",
+                        "amount": "Amount",
+                        "posted_amount": "Posted",
+                    },
+                    "synthetic.csv",
+                )
+                self.assertIn("invalid_amount", posted_row["flags"].split(";"))
+                self.assertIn(
+                    "source_data_issue",
+                    posted_row["review_reasons"].split(";"),
+                )
 
     def test_csv_profile_can_use_merchant_and_credit_debit_indicator(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

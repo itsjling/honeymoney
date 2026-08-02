@@ -675,10 +675,10 @@ PDF support is for text-based statement PDFs. Install the PDF extra:
 python3 -m pip install -e ".[pdf]"
 ```
 
-Each PDF may contain at most 64 MiB, 500 pages, 20 million extracted text
-characters, and 100,000 transaction rows. Honeymoney stops the import when a
-file crosses a limit. Balance and transaction parsing share each page's word
-and table extraction.
+Each CSV statement file may contain at most 64 MiB. Each PDF may contain at
+most 64 MiB, 500 pages, 20 million extracted text characters, and 100,000
+transaction rows. Honeymoney stops the import when a file crosses a limit.
+Balance and transaction parsing share each page's word and table extraction.
 
 Current example profiles cover HSBC One, HSBC credit-card, and Mox bank/card statement shapes. `hsbc_one_pdf` is the sole HSBC bank-statement profile: it separates HKD Savings, HKD Current, and Foreign Currency Savings transactions into stable account identities, preserves each transaction currency, and retains the original PDF as source provenance. Select that profile when prompted and optionally save the filename mapping for future statements. Real private samples should stay in `samples/` or `private_samples/`.
 
