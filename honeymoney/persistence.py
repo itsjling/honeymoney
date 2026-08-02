@@ -288,11 +288,21 @@ def _copy_file(source: Path, destination: Path, mode: int) -> None:
         raise
 
 
+def _set_file_mode(path: Path, mode: int) -> None:
+    descriptor = os.open(path, os.O_RDONLY)
+    try:
+        os.fchmod(descriptor, mode)
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
 def _complete_new_generation(state_path: Path, state: GenerationState) -> None:
     entries = state["entries"]
     for entry in entries:
         target = Path(entry["target"])
         if _path_hash(target) == entry["new_sha256"]:
+            _set_file_mode(target, entry["mode"])
             continue
         staged = Path(entry["staged"])
         if not staged.exists() or _path_hash(staged) != entry["new_sha256"]:
@@ -308,6 +318,7 @@ def _restore_old_generation(state_path: Path, state: GenerationState) -> None:
         target = Path(entry["target"])
         if entry["existed"]:
             if _path_hash(target) == entry["old_sha256"]:
+                _set_file_mode(target, entry["mode"])
                 continue
             backup = Path(entry["backup"])
             if not backup.exists() or _path_hash(backup) != entry["old_sha256"]:
@@ -433,7 +444,7 @@ def _validate_state(
                 "backup": backup,
                 "install": install,
                 "existed": existed,
-                "mode": mode,
+                "mode": _private_file_mode(mode),
                 "old_sha256": old_sha256,
                 "new_sha256": new_sha256,
             }

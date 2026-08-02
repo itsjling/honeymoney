@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import tempfile
 import unittest
@@ -268,6 +269,60 @@ class IdentityStateTest(unittest.TestCase):
             unsafe_target.rmdir()
             persist_generation(path, {path: "retry succeeded\n"})
             self.assertEqual(path.read_text(encoding="utf-8"), "retry succeeded\n")
+
+    def test_recovery_masks_modes_from_pre_hardening_retained_state(self) -> None:
+        old_content = "old generation\n"
+        new_content = "new generation\n"
+        old_hash = hashlib.sha256(old_content.encode()).hexdigest()
+        new_hash = hashlib.sha256(new_content.encode()).hexdigest()
+        cases = (
+            ("prepared matching target", "prepared", new_content, None),
+            ("staging backup copy", "staging", "partial generation\n", old_content),
+        )
+        for label, phase, target_content, backup_content in cases:
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as temporary:
+                path = (Path(temporary) / "categorized.csv").resolve()
+                path.write_text(target_content, encoding="utf-8")
+                path.chmod(0o644)
+                generation = "0" * 32
+                stem = f".{path.name}.honeymoney-{generation}"
+                staged = path.parent / f"{stem}.new"
+                backup = path.parent / f"{stem}.old"
+                install = path.parent / f"{stem}.install"
+                if backup_content is not None:
+                    backup.write_text(backup_content, encoding="utf-8")
+                    backup.chmod(0o644)
+                state_path = path.parent / f".{path.name}.honeymoney-state.json"
+                state_path.write_text(
+                    json.dumps(
+                        {
+                            "schema_version": 1,
+                            "generation": generation,
+                            "phase": phase,
+                            "authoritative_path": str(path),
+                            "entries": [
+                                {
+                                    "target": str(path),
+                                    "staged": str(staged),
+                                    "backup": str(backup),
+                                    "install": str(install),
+                                    "existed": True,
+                                    "mode": 0o644,
+                                    "old_sha256": old_hash,
+                                    "new_sha256": new_hash,
+                                }
+                            ],
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+
+                recover_generation(path)
+
+                expected_content = new_content if phase == "prepared" else old_content
+                self.assertEqual(path.read_text(encoding="utf-8"), expected_content)
+                self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+                self.assertFalse(state_path.exists())
 
     def test_configured_external_files_are_trusted_only_when_config_is_present(
         self,

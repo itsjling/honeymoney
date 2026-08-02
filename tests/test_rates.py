@@ -339,6 +339,50 @@ class RateImportCliTest(unittest.TestCase):
                 "concurrent ledger\n",
             )
 
+    def test_standalone_unchanged_rate_import_rejects_a_concurrent_ledger(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            categorized_path = root / "output" / "categorized.csv"
+            cache_path = root / "rates.json"
+            observations = parse_hkma_daily_document(
+                _hkma_document([{"end_of_day": "2026-07-03", "eur": 9.25}]),
+                base_currency="HKD",
+            )
+            cache = merge_rate_cache(empty_rate_cache(), observations, [])
+            cache_path.write_text(rate_cache_document(cache), encoding="utf-8")
+            config = {
+                "base_currency": "HKD",
+                "paths": {"output": str(categorized_path)},
+                "rate_cache": str(cache_path),
+                "_rate_cache": cache,
+            }
+            real_document_matches = cli._document_matches
+
+            def create_ledger_after_comparison(path: Path, content: str) -> bool:
+                matches = real_document_matches(path, content)
+                categorized_path.parent.mkdir(parents=True)
+                categorized_path.write_text("concurrent ledger\n", encoding="utf-8")
+                return matches
+
+            with patch.object(
+                cli,
+                "_document_matches",
+                side_effect=create_ledger_after_comparison,
+            ):
+                with self.assertRaises(GenerationConflictError):
+                    cli._apply_rate_observations(config, observations)
+
+            self.assertEqual(
+                cache_path.read_text(encoding="utf-8"),
+                rate_cache_document(cache),
+            )
+            self.assertEqual(
+                categorized_path.read_text(encoding="utf-8"),
+                "concurrent ledger\n",
+            )
+
     def test_standalone_rate_import_uses_the_first_import_lock(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

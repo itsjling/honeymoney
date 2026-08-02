@@ -1527,6 +1527,8 @@ def _apply_rate_observations(
                 expected_generation_hashes=expected_generation,
                 coordination_path=categorized_path,
             )
+        else:
+            require_generation_snapshot(expected_generation)
         return _RateApplicationResult(
             rate_cache_path=rate_cache_path,
             rate_cache_defaulted=_rate_cache_was_defaulted(config),
