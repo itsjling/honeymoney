@@ -249,6 +249,26 @@ class IdentityStateTest(unittest.TestCase):
                 new_documents[overlap_manifest_path(path)],
             )
 
+    def test_target_validation_failure_releases_the_generation_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            path = root / "categorized.csv"
+            unsafe_target = root / "not-a-file"
+            unsafe_target.mkdir()
+
+            with self.assertRaisesRegex(OSError, "not a regular file"):
+                persist_generation(
+                    path,
+                    {
+                        path: "first attempt\n",
+                        unsafe_target: "must not be written\n",
+                    },
+                )
+
+            unsafe_target.rmdir()
+            persist_generation(path, {path: "retry succeeded\n"})
+            self.assertEqual(path.read_text(encoding="utf-8"), "retry succeeded\n")
+
     def test_configured_external_files_are_trusted_only_when_config_is_present(
         self,
     ) -> None:

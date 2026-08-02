@@ -339,6 +339,36 @@ class RateImportCliTest(unittest.TestCase):
                 "concurrent ledger\n",
             )
 
+    def test_standalone_rate_import_uses_the_first_import_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            categorized_path = root / "output" / "categorized.csv"
+            categorized_path.parent.mkdir(parents=True)
+            lock_path = categorized_path.parent / (
+                f".{categorized_path.name}.honeymoney-lock"
+            )
+            lock_path.write_text(f"{os.getpid()}\n", encoding="utf-8")
+            cache_path = root / "rates.json"
+            config = {
+                "base_currency": "HKD",
+                "paths": {"output": str(categorized_path)},
+                "rate_cache": str(cache_path),
+                "_rate_cache": empty_rate_cache(),
+            }
+            observations = parse_hkma_daily_document(
+                _hkma_document([{"end_of_day": "2026-07-03", "eur": 9.25}]),
+                base_currency="HKD",
+            )
+
+            with self.assertRaisesRegex(
+                OSError,
+                "Another output persistence operation is already in progress",
+            ):
+                cli._apply_rate_observations(config, observations)
+
+            self.assertFalse(cache_path.exists())
+            self.assertTrue(lock_path.exists())
+
     def test_legacy_config_uses_stable_workspace_rate_cache_default(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "money"

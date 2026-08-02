@@ -74,48 +74,65 @@ def persist_generation(
     *,
     expected_authoritative_hash: str | None = None,
     expected_generation_hashes: Mapping[Path, str | None] | None = None,
+    coordination_path: Path | None = None,
 ) -> None:
     """Durably publish files using the ledger replacement as the commit point."""
     authoritative_path = _resolved_write_target(authoritative_path)
+    coordination_target = (
+        authoritative_path
+        if coordination_path is None
+        else _resolved_write_target(coordination_path)
+    )
     normalized = {
         _resolved_write_target(path): content for path, content in files.items()
     }
     if authoritative_path not in normalized:
         raise ValueError("A persisted generation must include the authoritative ledger")
 
+    recovery_paths = {
+        *normalized,
+        *(expected_generation_hashes or {}),
+    }
+    if coordination_target != authoritative_path:
+        recover_generation(
+            coordination_target,
+            allowed_generation_paths=recovery_paths,
+        )
     recover_generation(
         authoritative_path,
-        allowed_generation_paths=normalized,
+        allowed_generation_paths=recovery_paths,
+        coordination_path=coordination_target,
     )
-    lock_path = _lock_path(authoritative_path)
+    lock_path = _lock_path(coordination_target)
     _acquire_lock(lock_path)
-    expected_hashes = {
-        Path(path).resolve(): digest
-        for path, digest in (expected_generation_hashes or {}).items()
-    }
-    if expected_authoritative_hash is not None:
-        expected_hashes[authoritative_path] = expected_authoritative_hash
-    if any(generation_hash(path) != digest for path, digest in expected_hashes.items()):
-        _release_lock(lock_path)
-        raise GenerationConflictError(
-            "The ledger generation changed before this operation could be saved"
-        )
-    generation = uuid.uuid4().hex
-    state_path = _state_path(authoritative_path)
-    entries = [
-        _entry_for(target, content, generation)
-        for target, content in normalized.items()
-    ]
-    entries.sort(key=lambda entry: entry["target"] == str(authoritative_path))
-    state: GenerationState = {
-        "schema_version": STATE_SCHEMA_VERSION,
-        "generation": generation,
-        "phase": "staging",
-        "authoritative_path": str(authoritative_path),
-        "entries": entries,
-    }
-
     try:
+        expected_hashes = {
+            Path(path).resolve(): digest
+            for path, digest in (expected_generation_hashes or {}).items()
+        }
+        if expected_authoritative_hash is not None:
+            expected_hashes[authoritative_path] = expected_authoritative_hash
+        if any(
+            generation_hash(path) != digest for path, digest in expected_hashes.items()
+        ):
+            raise GenerationConflictError(
+                "The ledger generation changed before this operation could be saved"
+            )
+        generation = uuid.uuid4().hex
+        state_path = _state_path(authoritative_path)
+        entries = [
+            _entry_for(target, content, generation)
+            for target, content in normalized.items()
+        ]
+        entries.sort(key=lambda entry: entry["target"] == str(authoritative_path))
+        state: GenerationState = {
+            "schema_version": STATE_SCHEMA_VERSION,
+            "generation": generation,
+            "phase": "staging",
+            "authoritative_path": str(authoritative_path),
+            "entries": entries,
+        }
+
         try:
             _write_state(state_path, state)
             for entry in entries:
@@ -144,15 +161,21 @@ def recover_generation(
     authoritative_path: Path,
     *,
     allowed_generation_paths: Iterable[Path] = (),
+    coordination_path: Path | None = None,
 ) -> None:
     """Recover retained state according to the authoritative ledger generation."""
     authoritative_path = _resolved_write_target(authoritative_path)
+    coordination_target = (
+        authoritative_path
+        if coordination_path is None
+        else _resolved_write_target(coordination_path)
+    )
     allowed_paths = _allowed_generation_paths(
         authoritative_path,
         allowed_generation_paths,
     )
     state_path = _state_path(authoritative_path)
-    lock_path = _lock_path(authoritative_path)
+    lock_path = _lock_path(coordination_target)
     if lock_path.exists() and _lock_owner_is_active(lock_path):
         raise OSError("Another output persistence operation is already in progress")
     state_temporary = _state_temporary_path(state_path)
@@ -521,11 +544,25 @@ def generation_hashes(paths: Iterable[Path]) -> dict[Path, str | None]:
 def snapshot_generation(
     authoritative_path: Path,
     additional_paths: Iterable[Path] = (),
+    *,
+    coordination_path: Path | None = None,
 ) -> dict[Path, str | None]:
     """Recover and capture every file that can affect one generation write."""
+    authoritative_path = _resolved_write_target(authoritative_path)
+    coordination_target = (
+        authoritative_path
+        if coordination_path is None
+        else _resolved_write_target(coordination_path)
+    )
+    if coordination_target != authoritative_path:
+        recover_generation(
+            coordination_target,
+            allowed_generation_paths=additional_paths,
+        )
     recover_generation(
         authoritative_path,
         allowed_generation_paths=additional_paths,
+        coordination_path=coordination_target,
     )
     return generation_hashes(
         generation_member_paths(authoritative_path, additional_paths)

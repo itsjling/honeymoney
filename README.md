@@ -557,7 +557,8 @@ Three hidden files join each recoverable ledger generation:
 `rates.json` is a versioned local input cache named by `config.rate_cache`.
 Legacy configs without that field use `rates.json` beside `config.json`; this
 in-memory default never edits the config. Rate imports publish the cache with
-the ledger generation when a ledger exists.
+the ledger generation when a ledger exists. Before the first ledger exists,
+rate imports use the future ledger path as their coordination lock.
 
 An exact issue #31 ledger keeps its old source IDs during read-only commands.
 Its first write publishes the canonical CSV and both new hidden files together.

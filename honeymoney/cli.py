@@ -1509,6 +1509,7 @@ def _apply_rate_observations(
         expected_generation = snapshot_generation(
             rate_cache_path,
             {*configured_generation_paths(config), categorized_path},
+            coordination_path=categorized_path,
         )
         config["_rate_cache"] = load_rate_cache(rate_cache_path)
         require_generation_snapshot(expected_generation)
@@ -1524,6 +1525,7 @@ def _apply_rate_observations(
                 rate_cache_path,
                 {rate_cache_path: cache_content},
                 expected_generation_hashes=expected_generation,
+                coordination_path=categorized_path,
             )
         return _RateApplicationResult(
             rate_cache_path=rate_cache_path,
@@ -5387,11 +5389,18 @@ def _snapshot_configured_generation(
     config: dict[str, Any],
 ) -> dict[Path, str | None]:
     """Capture a coherent ledger generation and refresh its cached rate input."""
+    generation_paths = configured_generation_paths(config)
+    rate_cache = config.get("rate_cache")
+    if isinstance(rate_cache, str) and rate_cache.strip():
+        recover_generation(
+            Path(rate_cache),
+            allowed_generation_paths=generation_paths,
+            coordination_path=categorized_path,
+        )
     expected_generation = snapshot_generation(
         categorized_path,
-        configured_generation_paths(config),
+        generation_paths,
     )
-    rate_cache = config.get("rate_cache")
     if isinstance(rate_cache, str) and rate_cache.strip():
         config["_rate_cache"] = load_rate_cache(Path(rate_cache))
     require_generation_snapshot(expected_generation)

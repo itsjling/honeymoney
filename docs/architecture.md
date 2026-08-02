@@ -88,6 +88,8 @@ identity workspace root. An explicit cache path wins. This default exists only
 in loaded config state and never rewrites the user's config. A local HKMA
 document import checks and normalizes every observation before it publishes
 the cache and revalued ledger through that boundary.
+Before the first ledger exists, a rate-only import uses the future ledger path
+as its coordination lock. Rate-cache and ledger recovery share that lock.
 
 Each operation writes and flushes complete staged files and prior-file backups
 before replacing any public path. Non-ledger artifacts are replaced first and
