@@ -2110,6 +2110,66 @@ def open(source_path):
             )
             self.assertEqual(self._reset_state_bytes(root), before_repeat)
 
+    def test_idempotent_duplicate_resolution_rechecks_its_generation(self) -> None:
+        repeated_row = "2026-05-04,SYNTHETIC IDEMPOTENT RACE,-12.00,HKD"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._setup_workspace(tmp)
+            statements = root / "statements"
+            statements.mkdir()
+            for name, count in (("a.csv", 3), ("b.csv", 2), ("c.csv", 1)):
+                self._write_statement(statements / name, [repeated_row] * count)
+            imported = self._run_cli(
+                ["import", str(statements), "--no-interactive"], cwd=root
+            )
+            self.assertEqual(imported.returncode, 0, imported.stderr)
+            listed = self._run_cli(["duplicates", "--json"], cwd=root)
+            [group] = json.loads(listed.stdout)["data"]["groups"]
+            resolved = self._run_cli(
+                [
+                    "duplicates",
+                    "resolve",
+                    group["group_id"],
+                    "--as",
+                    "same-event",
+                    "--json",
+                ],
+                cwd=root,
+            )
+            self.assertEqual(resolved.returncode, 0, resolved.stderr)
+
+            ledger_path = root / "output" / "categorized.csv"
+            real_resolve_duplicate_group = cli.resolve_duplicate_group
+
+            def resolve_after_concurrent_change(*args: object, **kwargs: object):
+                resolution = real_resolve_duplicate_group(*args, **kwargs)
+                ledger_path.write_bytes(ledger_path.read_bytes() + b"\n")
+                return resolution
+
+            previous_cwd = Path.cwd()
+            try:
+                os.chdir(root)
+                with (
+                    patch.object(
+                        cli,
+                        "resolve_duplicate_group",
+                        side_effect=resolve_after_concurrent_change,
+                    ),
+                    redirect_stdout(io.StringIO()),
+                    self.assertRaises(GenerationConflictError),
+                ):
+                    cli._duplicates_resolve_command(
+                        [
+                            group["group_id"],
+                            "--as",
+                            "same-event",
+                            "--config",
+                            str(root / "config.json"),
+                            "--json",
+                        ]
+                    )
+            finally:
+                os.chdir(previous_cwd)
+
     def test_rule_categorized_count_mismatch_resolutions_leave_review_clear(
         self,
     ) -> None:

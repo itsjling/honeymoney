@@ -1975,6 +1975,7 @@ def _duplicates_resolve_command(argv: list[str]) -> int:
         corrections,
     )
     if resolution.idempotent:
+        require_generation_snapshot(expected_generation)
         if args.json:
             _emit_json(
                 "duplicates.resolve",
