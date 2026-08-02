@@ -179,6 +179,33 @@ def _capture_input_source(
     is_pdf = input_file.suffix.casefold() == ".pdf"
     input_kind = "PDF" if is_pdf else "CSV"
     max_input_bytes = MAX_PDF_INPUT_BYTES if is_pdf else MAX_CSV_INPUT_BYTES
+    source_bytes, resolved_path = _read_stable_source_bytes(
+        input_file,
+        max_input_bytes=max_input_bytes,
+        input_kind=input_kind,
+    )
+    workspace_root = config.get("_identity_workspace_root")
+    if not isinstance(workspace_root, Path):
+        workspace_root = Path("config.json").resolve().parent
+    locator_kind, locator = logical_locator_from_resolved(
+        resolved_path,
+        workspace_root,
+    )
+    return _InputSourceSnapshot(
+        source_bytes,
+        resolved_path,
+        locator_kind,
+        locator,
+    )
+
+
+def _read_stable_source_bytes(
+    input_file: Path,
+    *,
+    max_input_bytes: int,
+    input_kind: str,
+) -> tuple[bytes, Path]:
+    """Read one bounded file and reject changes made during the read."""
     with input_file.open("rb") as handle:
         before = os.fstat(handle.fileno())
         if before.st_size > max_input_bytes:
@@ -197,19 +224,7 @@ def _capture_input_source(
         raise ValueError(
             f"Input source changed while it was being read: {input_file.name}"
         )
-    workspace_root = config.get("_identity_workspace_root")
-    if not isinstance(workspace_root, Path):
-        workspace_root = Path("config.json").resolve().parent
-    locator_kind, locator = logical_locator_from_resolved(
-        resolved_path,
-        workspace_root,
-    )
-    return _InputSourceSnapshot(
-        source_bytes,
-        resolved_path,
-        locator_kind,
-        locator,
-    )
+    return source_bytes, resolved_path
 
 
 def _load_profiles(config: dict[str, Any]) -> list[Profile]:
@@ -1243,8 +1258,12 @@ def _maybe_save_profile_mapping(
 def _source_text(path: Path, source_bytes: bytes | None) -> str:
     if source_bytes is not None:
         return source_bytes.decode("utf-8")
-    with path.open(newline="", encoding="utf-8") as handle:
-        return handle.read()
+    captured, _ = _read_stable_source_bytes(
+        path,
+        max_input_bytes=MAX_CSV_INPUT_BYTES,
+        input_kind="CSV",
+    )
+    return captured.decode("utf-8")
 
 
 def _csv_headers(csv_path: Path, *, source_bytes: bytes | None = None) -> set[str]:

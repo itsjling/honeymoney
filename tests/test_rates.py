@@ -413,6 +413,42 @@ class RateImportCliTest(unittest.TestCase):
             self.assertFalse(cache_path.exists())
             self.assertTrue(lock_path.exists())
 
+    def test_unchanged_ledger_rate_import_rechecks_its_generation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "money"
+            setup = self._run_cli(
+                ["setup", "--root", str(root), "--json"],
+                cwd=REPO_ROOT,
+            )
+            self.assertEqual(setup.returncode, 0, setup.stderr)
+            (root / "input" / "statement.csv").write_text(
+                "Date,Description,Amount,Currency\n"
+                "2026-07-05,SYNTHETIC RATE NOOP,-10.00,HKD\n",
+                encoding="utf-8",
+            )
+            imported = self._run_cli(
+                ["run", "--no-interactive", "--json"],
+                cwd=root,
+            )
+            self.assertEqual(imported.returncode, 0, imported.stderr)
+            config = cli._load_config(str(root / "config.json"))
+            ledger_path = root / "output" / "categorized.csv"
+            real_documents_changed = cli._documents_changed
+
+            def publish_after_comparison(documents) -> bool:
+                changed = real_documents_changed(documents)
+                self.assertFalse(changed)
+                ledger_path.write_bytes(ledger_path.read_bytes() + b"\n")
+                return changed
+
+            with patch.object(
+                cli,
+                "_documents_changed",
+                side_effect=publish_after_comparison,
+            ):
+                with self.assertRaises(GenerationConflictError):
+                    cli._apply_rate_observations(config, [])
+
     def test_legacy_config_uses_stable_workspace_rate_cache_default(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "money"

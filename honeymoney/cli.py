@@ -1362,6 +1362,10 @@ def _source_data_resolve_command(
             documents,
             expected_generation_hashes=expected_generation,
         )
+    elif generation_hashes(generation_paths) != expected_generation:
+        raise GenerationConflictError(
+            "The ledger generation changed while this operation was reading it"
+        )
     data = {
         "transaction_id": transaction_id,
         "result": "resolved" if changed else "already_clear",
@@ -1640,6 +1644,8 @@ def _apply_rate_observations(
             documents,
             expected_generation_hashes=expected_generation,
         )
+    else:
+        require_generation_snapshot(expected_generation)
     requested_keys = set(requested_pairs)
     resolved_count = sum(
         (
