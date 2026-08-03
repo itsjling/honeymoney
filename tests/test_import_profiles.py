@@ -1419,6 +1419,29 @@ class PdfResourceLimitTest(unittest.TestCase):
             ):
                 _preview_profile_input(profile, "synthetic_csv", statement, {})
 
+    def test_profile_preview_parses_a_stable_pdf_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            statement = Path(tmp) / "statement.pdf"
+            source_bytes = b"%PDF-1.4 synthetic"
+            statement.write_bytes(source_bytes)
+            profile = {"id": "synthetic_pdf", "pdf": {}}
+
+            def parse_snapshot(*args, source_bytes=None, **kwargs):
+                statement.write_bytes(b"replacement")
+                self.assertEqual(source_bytes, b"%PDF-1.4 synthetic")
+                return [], []
+
+            with patch.object(importers, "_import_pdf", side_effect=parse_snapshot):
+                rows, warnings = _preview_profile_input(
+                    profile,
+                    "synthetic_pdf",
+                    statement,
+                    {},
+                )
+
+            self.assertEqual(rows, [])
+            self.assertEqual(warnings, [])
+
     def test_source_capture_rejects_oversized_csv_before_retaining_its_bytes(
         self,
     ) -> None:

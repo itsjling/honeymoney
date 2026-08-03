@@ -413,6 +413,41 @@ class RateImportCliTest(unittest.TestCase):
             self.assertFalse(cache_path.exists())
             self.assertTrue(lock_path.exists())
 
+    def test_config_load_coordinates_initial_rate_recovery_with_ledger_lock(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "money"
+            setup = self._run_cli(
+                ["setup", "--root", str(root), "--json"],
+                cwd=REPO_ROOT,
+            )
+            self.assertEqual(setup.returncode, 0, setup.stderr)
+            categorized_path = root / "output" / "categorized.csv"
+            lock_path = categorized_path.parent / (
+                f".{categorized_path.name}.honeymoney-lock"
+            )
+            real_recover = cli._recover_config_generation
+
+            def lock_after_ledger_recovery(config) -> None:
+                real_recover(config)
+                lock_path.write_text(f"{os.getpid()}\n", encoding="utf-8")
+
+            with (
+                patch.object(
+                    cli,
+                    "_recover_config_generation",
+                    side_effect=lock_after_ledger_recovery,
+                ),
+                self.assertRaisesRegex(
+                    OSError,
+                    "Another output persistence operation is already in progress",
+                ),
+            ):
+                cli._load_config(str(root / "config.json"))
+
+            self.assertTrue(lock_path.exists())
+
     def test_unchanged_ledger_rate_import_rechecks_its_generation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "money"

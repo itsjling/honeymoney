@@ -252,8 +252,18 @@ def _signed_amount(
     credit_column = columns.get("credit")
     raw_debit = _value(row, debit_column)
     raw_credit = _value(row, credit_column)
-    debit = _parse_decimal(raw_debit, invalid_columns, debit_column)
-    credit = _parse_decimal(raw_credit, invalid_columns, credit_column)
+    debit = _parse_decimal(
+        raw_debit,
+        invalid_columns,
+        debit_column,
+        blank_is_invalid=bool(raw_debit.strip()),
+    )
+    credit = _parse_decimal(
+        raw_credit,
+        invalid_columns,
+        credit_column,
+        blank_is_invalid=bool(raw_credit.strip()),
+    )
     if not raw_debit.strip() and not raw_credit.strip():
         invalid_columns.extend(
             str(column) for column in (debit_column, credit_column) if column

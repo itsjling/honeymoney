@@ -1073,15 +1073,18 @@ def _learn_command(argv: list[str]) -> int:
     next_content = json.dumps(next_document, indent=2, sort_keys=True) + "\n"
     require_generation_snapshot(expected_generation)
 
-    if args.yes and next_content != rules_path.read_text(encoding="utf-8"):
-        persist_generation(
-            categorized_path,
-            {
-                rules_path: next_content,
-                categorized_path: categorized_path.read_text(encoding="utf-8"),
-            },
-            expected_generation_hashes=expected_generation,
-        )
+    if args.yes:
+        if not _document_matches(rules_path, next_content):
+            persist_generation(
+                categorized_path,
+                {
+                    rules_path: next_content,
+                    categorized_path: categorized_path.read_text(encoding="utf-8"),
+                },
+                expected_generation_hashes=expected_generation,
+            )
+        else:
+            require_generation_snapshot(expected_generation)
 
     counts = plan.counts()
     if args.json:
@@ -2840,14 +2843,31 @@ def _preview_profile_input(
                 f"Profile {profile_id} does not define csv parser settings "
                 f"required for {input_path.name}"
             )
-        return importers._import_csv(input_path, profile, config, input_path.parent), []
+        source_snapshot = importers._capture_input_source(input_path, config)
+        return (
+            importers._import_csv(
+                input_path,
+                profile,
+                config,
+                input_path.parent,
+                source_bytes=source_snapshot.source_bytes,
+            ),
+            [],
+        )
     if suffix == ".pdf":
         if "pdf" not in profile:
             raise ValueError(
                 f"Profile {profile_id} does not define pdf parser settings "
                 f"required for {input_path.name}"
             )
-        return importers._import_pdf(input_path, profile, config, input_path.parent)
+        source_snapshot = importers._capture_input_source(input_path, config)
+        return importers._import_pdf(
+            input_path,
+            profile,
+            config,
+            input_path.parent,
+            source_bytes=source_snapshot.source_bytes,
+        )
     raise ValueError(
         f"Unsupported preview input type for {input_path.name}; expected .csv or .pdf"
     )
@@ -5357,7 +5377,7 @@ def _load_config_document(config_path: str | None, *, recover: bool) -> dict[str
         _recover_config_generation(config)
     rate_cache_path = _configured_rate_cache_path(config)
     if recover:
-        recover_generation(rate_cache_path)
+        _recover_rate_cache_generation(config)
     config["_rate_cache"] = load_rate_cache(rate_cache_path)
     return config
 
@@ -5437,6 +5457,19 @@ def _recover_config_generation(config: dict[str, Any]) -> None:
         )
 
 
+def _recover_rate_cache_generation(config: dict[str, Any]) -> None:
+    paths = config.get("paths", {})
+    output = paths.get("output") if isinstance(paths, dict) else None
+    coordination_path = (
+        Path(output) if isinstance(output, str) and output.strip() else None
+    )
+    recover_generation(
+        _configured_rate_cache_path(config),
+        allowed_generation_paths=configured_generation_paths(config),
+        coordination_path=coordination_path,
+    )
+
+
 def _recover_config_path_generation(
     config_path: Path,
     config: dict[str, Any] | None = None,
@@ -5446,7 +5479,7 @@ def _recover_config_path_generation(
     )
     _resolve_rate_cache_config(recovery_config, config_path.resolve())
     _recover_config_generation(recovery_config)
-    recover_generation(_configured_rate_cache_path(recovery_config))
+    _recover_rate_cache_generation(recovery_config)
 
 
 def _identity_diagnostic_warning(diagnostic: Any) -> str:

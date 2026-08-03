@@ -10,7 +10,9 @@ from contextlib import redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
+from honeymoney import cli
 from honeymoney.cli import _report_command
+from honeymoney.persistence import GenerationConflictError
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -423,6 +425,39 @@ class AgentCliTest(unittest.TestCase):
                 target_row["flags"].split(";"),
             )
             self.assertNotIn("ollama_categorized", target_row["flags"].split(";"))
+
+    def test_unchanged_learn_rechecks_its_generation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._setup_workspace(tmp)
+            statement = root / "learning-noop.csv"
+            self._write_statement(statement)
+            imported = self._run_cli(
+                ["import", str(statement), "--no-interactive", "--json"],
+                cwd=root,
+            )
+            self.assertEqual(imported.returncode, 0, imported.stderr)
+            categorized_path = root / "output" / "categorized.csv"
+            real_document_matches = cli._document_matches
+
+            def publish_after_comparison(path: Path, content: str) -> bool:
+                matches = real_document_matches(path, content)
+                categorized_path.write_bytes(categorized_path.read_bytes() + b"\n")
+                return matches
+
+            with patch.object(
+                cli,
+                "_document_matches",
+                side_effect=publish_after_comparison,
+            ):
+                with self.assertRaises(GenerationConflictError):
+                    cli._learn_command(
+                        [
+                            "--config",
+                            str(root / "config.json"),
+                            "--yes",
+                            "--json",
+                        ]
+                    )
 
     def test_profile_validate_text_and_pdf_json_are_read_only(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

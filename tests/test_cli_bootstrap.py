@@ -1310,6 +1310,8 @@ class CliBootstrapTest(unittest.TestCase):
         cases = {
             "both blank": ({"Debit": "", "Credit": ""}, True),
             "both nonzero": ({"Debit": "10.00", "Credit": "2.00"}, True),
+            "suffix-only debit": ({"Debit": "CR", "Credit": ""}, True),
+            "suffix-only credit": ({"Debit": "", "Credit": "DR"}, True),
             "explicit debit zero": ({"Debit": "0", "Credit": ""}, False),
             "explicit credit zero": ({"Debit": "", "Credit": "0.00"}, False),
         }

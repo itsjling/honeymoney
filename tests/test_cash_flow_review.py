@@ -1955,10 +1955,12 @@ class CashFlowReviewTest(unittest.TestCase):
                 path,
                 *,
                 allowed_generation_paths=(),
+                coordination_path=None,
             ) -> None:
                 recover_generation(
                     path,
                     allowed_generation_paths=allowed_generation_paths,
+                    coordination_path=coordination_path,
                 )
                 if (
                     Path(path).resolve() != custom_output.resolve()
