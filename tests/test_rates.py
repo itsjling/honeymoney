@@ -339,6 +339,58 @@ class RateImportCliTest(unittest.TestCase):
                 "concurrent ledger\n",
             )
 
+    def test_rate_import_uses_ledger_published_before_standalone_snapshot(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "money"
+            setup = self._run_cli(
+                ["setup", "--root", str(root), "--json"],
+                cwd=REPO_ROOT,
+            )
+            self.assertEqual(setup.returncode, 0, setup.stderr)
+            (root / "input" / "foreign.csv").write_text(
+                "Date,Description,Amount,Currency\n"
+                "2026-07-03,SYNTHETIC RATE TRANSITION,-10.00,EUR\n",
+                encoding="utf-8",
+            )
+            imported = self._run_cli(
+                ["run", "--no-interactive", "--json"],
+                cwd=root,
+            )
+            self.assertEqual(imported.returncode, 0, imported.stderr)
+            config = cli._load_config(str(root / "config.json"))
+            categorized_path = root / "output" / "categorized.csv"
+            categorized_bytes = categorized_path.read_bytes()
+            categorized_path.unlink()
+            observations = parse_hkma_daily_document(
+                _hkma_document([{"end_of_day": "2026-07-03", "eur": 9.25}]),
+                base_currency="HKD",
+            )
+            real_snapshot = cli.snapshot_generation
+            published = False
+
+            def publish_ledger_then_snapshot(*args, **kwargs):
+                nonlocal published
+                if not published:
+                    categorized_path.write_bytes(categorized_bytes)
+                    published = True
+                return real_snapshot(*args, **kwargs)
+
+            with patch.object(
+                cli,
+                "snapshot_generation",
+                side_effect=publish_ledger_then_snapshot,
+            ):
+                result = cli._apply_rate_observations(config, observations)
+
+            self.assertEqual(result.requested_count, 1)
+            self.assertEqual(result.valued_count, 1)
+            with categorized_path.open(newline="", encoding="utf-8") as handle:
+                [row] = list(csv.DictReader(handle))
+            self.assertEqual(row["amount_hkd"], "-92.50")
+            self.assertEqual(row["valuation_source"], "hkma_daily_reference_rate")
+
     def test_standalone_unchanged_rate_import_rejects_a_concurrent_ledger(
         self,
     ) -> None:

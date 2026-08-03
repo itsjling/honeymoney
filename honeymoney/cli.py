@@ -1518,34 +1518,35 @@ def _apply_rate_observations(
             {*configured_generation_paths(config), categorized_path},
             coordination_path=categorized_path,
         )
-        config["_rate_cache"] = load_rate_cache(rate_cache_path)
-        require_generation_snapshot(expected_generation)
-        cache = merge_rate_cache(
-            _loaded_rate_cache(config),
-            observations,
-            [],
-        )
-        cache_content = rate_cache_document(cache)
-        changed = not _document_matches(rate_cache_path, cache_content)
-        if changed:
-            persist_generation(
-                rate_cache_path,
-                {rate_cache_path: cache_content},
-                expected_generation_hashes=expected_generation,
-                coordination_path=categorized_path,
-            )
-        else:
+        if expected_generation.get(categorized_path.resolve()) is None:
+            config["_rate_cache"] = load_rate_cache(rate_cache_path)
             require_generation_snapshot(expected_generation)
-        return _RateApplicationResult(
-            rate_cache_path=rate_cache_path,
-            rate_cache_defaulted=_rate_cache_was_defaulted(config),
-            imported_count=len(observations),
-            cached_count=len(cache["observations"]),
-            requested_count=0,
-            resolved_count=0,
-            valued_count=0,
-            changed=changed,
-        )
+            cache = merge_rate_cache(
+                _loaded_rate_cache(config),
+                observations,
+                [],
+            )
+            cache_content = rate_cache_document(cache)
+            changed = not _document_matches(rate_cache_path, cache_content)
+            if changed:
+                persist_generation(
+                    rate_cache_path,
+                    {rate_cache_path: cache_content},
+                    expected_generation_hashes=expected_generation,
+                    coordination_path=categorized_path,
+                )
+            else:
+                require_generation_snapshot(expected_generation)
+            return _RateApplicationResult(
+                rate_cache_path=rate_cache_path,
+                rate_cache_defaulted=_rate_cache_was_defaulted(config),
+                imported_count=len(observations),
+                cached_count=len(cache["observations"]),
+                requested_count=0,
+                resolved_count=0,
+                valued_count=0,
+                changed=changed,
+            )
 
     expected_generation, state = _load_configured_identity_generation(
         categorized_path, config
