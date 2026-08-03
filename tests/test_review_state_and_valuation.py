@@ -11,6 +11,7 @@ from honeymoney.cli import (
     _prepare_replacement_review_migration,
 )
 from honeymoney.corrections import (
+    CORRECTION_COLUMNS,
     apply_corrections,
     load_corrections,
     review_state_correction_updates,
@@ -63,6 +64,26 @@ def _row(**overrides: str) -> dict[str, str]:
 
 
 class ReviewStateTest(unittest.TestCase):
+    def test_correction_csv_rejects_cells_past_the_header(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            correction_path = Path(tmp) / "corrections.csv"
+            with correction_path.open("w", newline="", encoding="utf-8") as handle:
+                writer = csv.writer(handle)
+                writer.writerow(CORRECTION_COLUMNS)
+                writer.writerow(
+                    [
+                        "txn_extra",
+                        *([""] * (len(CORRECTION_COLUMNS) - 1)),
+                        "unexpected",
+                    ]
+                )
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "Correction CSV row 2 has more cells than its header",
+            ):
+                load_corrections({"corrections": str(correction_path)})
+
     def test_replacement_preflight_types_legacy_model_review_before_rows_change(
         self,
     ) -> None:

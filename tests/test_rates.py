@@ -8,10 +8,13 @@ import unittest
 from copy import deepcopy
 from decimal import Decimal
 from pathlib import Path
+from unittest.mock import patch
 
+from honeymoney import cli
 from honeymoney.corrections import CORRECTION_COLUMNS
 from honeymoney.csv_artifacts import csv_document
 from honeymoney.identity_state import load_configured_identity_state
+from honeymoney.persistence import GenerationConflictError
 from honeymoney.rates import (
     HKMA_PROVIDER,
     RateImportError,
@@ -297,6 +300,241 @@ class RateImportCliTest(unittest.TestCase):
             stderr=subprocess.PIPE,
             check=False,
         )
+
+    def test_standalone_rate_import_rejects_a_concurrently_created_ledger(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            categorized_path = root / "output" / "categorized.csv"
+            cache_path = root / "rates.json"
+            config = {
+                "base_currency": "HKD",
+                "paths": {"output": str(categorized_path)},
+                "rate_cache": str(cache_path),
+                "_rate_cache": empty_rate_cache(),
+            }
+            observations = parse_hkma_daily_document(
+                _hkma_document([{"end_of_day": "2026-07-03", "eur": 9.25}]),
+                base_currency="HKD",
+            )
+            real_persist = cli.persist_generation
+
+            def create_ledger_then_persist(*args, **kwargs):
+                categorized_path.parent.mkdir(parents=True)
+                categorized_path.write_text("concurrent ledger\n", encoding="utf-8")
+                return real_persist(*args, **kwargs)
+
+            with patch.object(
+                cli,
+                "persist_generation",
+                side_effect=create_ledger_then_persist,
+            ):
+                with self.assertRaises(GenerationConflictError):
+                    cli._apply_rate_observations(config, observations)
+
+            self.assertFalse(cache_path.exists())
+            self.assertEqual(
+                categorized_path.read_text(encoding="utf-8"),
+                "concurrent ledger\n",
+            )
+
+    def test_rate_import_uses_ledger_published_before_standalone_snapshot(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "money"
+            setup = self._run_cli(
+                ["setup", "--root", str(root), "--json"],
+                cwd=REPO_ROOT,
+            )
+            self.assertEqual(setup.returncode, 0, setup.stderr)
+            (root / "input" / "foreign.csv").write_text(
+                "Date,Description,Amount,Currency\n"
+                "2026-07-03,SYNTHETIC RATE TRANSITION,-10.00,EUR\n",
+                encoding="utf-8",
+            )
+            imported = self._run_cli(
+                ["run", "--no-interactive", "--json"],
+                cwd=root,
+            )
+            self.assertEqual(imported.returncode, 0, imported.stderr)
+            config = cli._load_config(str(root / "config.json"))
+            categorized_path = root / "output" / "categorized.csv"
+            categorized_bytes = categorized_path.read_bytes()
+            categorized_path.unlink()
+            observations = parse_hkma_daily_document(
+                _hkma_document([{"end_of_day": "2026-07-03", "eur": 9.25}]),
+                base_currency="HKD",
+            )
+            real_snapshot = cli.snapshot_generation
+            published = False
+
+            def publish_ledger_then_snapshot(*args, **kwargs):
+                nonlocal published
+                if not published:
+                    categorized_path.write_bytes(categorized_bytes)
+                    published = True
+                return real_snapshot(*args, **kwargs)
+
+            with patch.object(
+                cli,
+                "snapshot_generation",
+                side_effect=publish_ledger_then_snapshot,
+            ):
+                result = cli._apply_rate_observations(config, observations)
+
+            self.assertEqual(result.requested_count, 1)
+            self.assertEqual(result.valued_count, 1)
+            with categorized_path.open(newline="", encoding="utf-8") as handle:
+                [row] = list(csv.DictReader(handle))
+            self.assertEqual(row["amount_hkd"], "-92.50")
+            self.assertEqual(row["valuation_source"], "hkma_daily_reference_rate")
+
+    def test_standalone_unchanged_rate_import_rejects_a_concurrent_ledger(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            categorized_path = root / "output" / "categorized.csv"
+            cache_path = root / "rates.json"
+            observations = parse_hkma_daily_document(
+                _hkma_document([{"end_of_day": "2026-07-03", "eur": 9.25}]),
+                base_currency="HKD",
+            )
+            cache = merge_rate_cache(empty_rate_cache(), observations, [])
+            cache_path.write_text(rate_cache_document(cache), encoding="utf-8")
+            config = {
+                "base_currency": "HKD",
+                "paths": {"output": str(categorized_path)},
+                "rate_cache": str(cache_path),
+                "_rate_cache": cache,
+            }
+            real_document_matches = cli._document_matches
+
+            def create_ledger_after_comparison(path: Path, content: str) -> bool:
+                matches = real_document_matches(path, content)
+                categorized_path.parent.mkdir(parents=True)
+                categorized_path.write_text("concurrent ledger\n", encoding="utf-8")
+                return matches
+
+            with patch.object(
+                cli,
+                "_document_matches",
+                side_effect=create_ledger_after_comparison,
+            ):
+                with self.assertRaises(GenerationConflictError):
+                    cli._apply_rate_observations(config, observations)
+
+            self.assertEqual(
+                cache_path.read_text(encoding="utf-8"),
+                rate_cache_document(cache),
+            )
+            self.assertEqual(
+                categorized_path.read_text(encoding="utf-8"),
+                "concurrent ledger\n",
+            )
+
+    def test_standalone_rate_import_uses_the_first_import_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            categorized_path = root / "output" / "categorized.csv"
+            categorized_path.parent.mkdir(parents=True)
+            lock_path = categorized_path.parent / (
+                f".{categorized_path.name}.honeymoney-lock"
+            )
+            lock_path.write_text(f"{os.getpid()}\n", encoding="utf-8")
+            cache_path = root / "rates.json"
+            config = {
+                "base_currency": "HKD",
+                "paths": {"output": str(categorized_path)},
+                "rate_cache": str(cache_path),
+                "_rate_cache": empty_rate_cache(),
+            }
+            observations = parse_hkma_daily_document(
+                _hkma_document([{"end_of_day": "2026-07-03", "eur": 9.25}]),
+                base_currency="HKD",
+            )
+
+            with self.assertRaisesRegex(
+                OSError,
+                "Another output persistence operation is already in progress",
+            ):
+                cli._apply_rate_observations(config, observations)
+
+            self.assertFalse(cache_path.exists())
+            self.assertTrue(lock_path.exists())
+
+    def test_config_load_coordinates_initial_rate_recovery_with_ledger_lock(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "money"
+            setup = self._run_cli(
+                ["setup", "--root", str(root), "--json"],
+                cwd=REPO_ROOT,
+            )
+            self.assertEqual(setup.returncode, 0, setup.stderr)
+            categorized_path = root / "output" / "categorized.csv"
+            lock_path = categorized_path.parent / (
+                f".{categorized_path.name}.honeymoney-lock"
+            )
+            real_recover = cli._recover_config_generation
+
+            def lock_after_ledger_recovery(config) -> None:
+                real_recover(config)
+                lock_path.write_text(f"{os.getpid()}\n", encoding="utf-8")
+
+            with (
+                patch.object(
+                    cli,
+                    "_recover_config_generation",
+                    side_effect=lock_after_ledger_recovery,
+                ),
+                self.assertRaisesRegex(
+                    OSError,
+                    "Another output persistence operation is already in progress",
+                ),
+            ):
+                cli._load_config(str(root / "config.json"))
+
+            self.assertTrue(lock_path.exists())
+
+    def test_unchanged_ledger_rate_import_rechecks_its_generation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "money"
+            setup = self._run_cli(
+                ["setup", "--root", str(root), "--json"],
+                cwd=REPO_ROOT,
+            )
+            self.assertEqual(setup.returncode, 0, setup.stderr)
+            (root / "input" / "statement.csv").write_text(
+                "Date,Description,Amount,Currency\n"
+                "2026-07-05,SYNTHETIC RATE NOOP,-10.00,HKD\n",
+                encoding="utf-8",
+            )
+            imported = self._run_cli(
+                ["run", "--no-interactive", "--json"],
+                cwd=root,
+            )
+            self.assertEqual(imported.returncode, 0, imported.stderr)
+            config = cli._load_config(str(root / "config.json"))
+            ledger_path = root / "output" / "categorized.csv"
+            real_documents_changed = cli._documents_changed
+
+            def publish_after_comparison(documents) -> bool:
+                changed = real_documents_changed(documents)
+                self.assertFalse(changed)
+                ledger_path.write_bytes(ledger_path.read_bytes() + b"\n")
+                return changed
+
+            with patch.object(
+                cli,
+                "_documents_changed",
+                side_effect=publish_after_comparison,
+            ):
+                with self.assertRaises(GenerationConflictError):
+                    cli._apply_rate_observations(config, [])
 
     def test_legacy_config_uses_stable_workspace_rate_cache_default(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

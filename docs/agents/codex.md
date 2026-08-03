@@ -12,7 +12,7 @@ environment when desired, then run:
 
 Set `PYTHON=/path/to/python` when Codex should use a specific interpreter.
 Bootstrap resolves the reviewed direct and transitive versions from
-`constraints/dev.txt`; CI proves that resolution on Python 3.10 and 3.13.
+`constraints/dev.txt`; CI proves that resolution on Python 3.11 and 3.13.
 Run either offline gate alone when a focused check is useful:
 
 ```bash
@@ -41,7 +41,7 @@ and seam map.
 Connect `itsjling/honeymoney` in Codex settings and configure an environment
 with:
 
-- Python 3.10 or newer;
+- Python 3.11 or newer;
 - setup script: `./scripts/bootstrap.sh`;
 - maintenance script: `./scripts/bootstrap.sh`;
 - no secrets;

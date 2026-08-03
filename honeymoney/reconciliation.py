@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import hashlib
 from collections import defaultdict
-from datetime import date
+from dataclasses import dataclass
+from datetime import date, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import Mapping
 
@@ -55,6 +56,13 @@ AMBIGUITY_PRIOR_REVIEW_FLAG = "reconciliation_ambiguous_prior_review"
 AMBIGUITY_REASON = "Ambiguous transfer candidates"
 CROSS_CURRENCY_FLAG = "cross_currency_exchange"
 StatementBalanceKey = tuple[str, str, str, str, str]
+
+
+@dataclass(frozen=True)
+class _TransferCandidate:
+    row: dict[str, str]
+    amount: Decimal
+    row_date: date
 
 
 def reconcile_ledger(
@@ -128,19 +136,44 @@ def reconcile_ledger(
         )
 
     candidates: list[tuple[int, str, str, str]] = []
-    eligible = [
-        row
-        for row in rows
-        if id(row) not in protected
-        and row.get("transaction_id") not in paired
-        and row.get("transaction_id") not in manual_reserved_ids
-        and _eligible(row)
-    ]
+    eligible: list[_TransferCandidate] = []
+    for row in rows:
+        if (
+            id(row) in protected
+            or row.get("transaction_id") in paired
+            or row.get("transaction_id") in manual_reserved_ids
+        ):
+            continue
+        amount = _amount(row)
+        row_date = _row_date(row)
+        if amount is None or row_date is None:
+            continue
+        transfer_candidate = _TransferCandidate(row, amount, row_date)
+        if _transfer_eligible(transfer_candidate):
+            eligible.append(transfer_candidate)
+
+    candidates_by_amount_date: dict[
+        tuple[Decimal, date], list[tuple[int, _TransferCandidate]]
+    ] = defaultdict(list)
+    for index, candidate in enumerate(eligible):
+        candidates_by_amount_date[(candidate.amount, candidate.row_date)].append(
+            (index, candidate)
+        )
+
     for index, left in enumerate(eligible):
-        for right in eligible[index + 1 :]:
-            candidate = _candidate(left, right, window)
-            if candidate is not None:
-                candidates.append(candidate)
+        for day_offset in range(-window, window + 1):
+            try:
+                candidate_date = left.row_date + timedelta(days=day_offset)
+            except OverflowError:
+                continue
+            for right_index, right in candidates_by_amount_date.get(
+                (-left.amount, candidate_date), []
+            ):
+                if right_index <= index:
+                    continue
+                pair_candidate = _transfer_pair_candidate(left, right, window)
+                if pair_candidate is not None:
+                    candidates.append(pair_candidate)
 
     choices: dict[str, list[tuple[int, str, str]]] = {}
     for distance, left_id, right_id, flow_type in candidates:
@@ -468,7 +501,8 @@ def _has_refund_evidence(row: Mapping[str, str]) -> bool:
     return any(marker in text for marker in ("refund", "rebate", "cashback"))
 
 
-def _eligible(row: dict[str, str]) -> bool:
+def _transfer_eligible(candidate: _TransferCandidate) -> bool:
+    row = candidate.row
     explicit_flow = row.get("flow_source") in {"rule", "correction"}
     if explicit_flow and row.get("flow_type") not in TRANSFER_FLOW_TYPES:
         return False
@@ -476,35 +510,34 @@ def _eligible(row: dict[str, str]) -> bool:
         row.get("transaction_id")
         and row.get("account_id")
         and row.get("account_type") in {"bank", "credit_card", "investment"}
-        and _amount(row) not in {None, Decimal("0")}
-        and _row_date(row) is not None
+        and candidate.amount != 0
     )
 
 
-def _candidate(
-    left: dict[str, str], right: dict[str, str], window: int
+def _transfer_pair_candidate(
+    left: _TransferCandidate,
+    right: _TransferCandidate,
+    window: int,
 ) -> tuple[int, str, str, str] | None:
-    if left["account_id"] == right["account_id"]:
+    left_row = left.row
+    right_row = right.row
+    if left_row["account_id"] == right_row["account_id"]:
         return None
     if all(
         row.get("flow_source") == "deterministic"
         and row.get("flow_type") in EXTERNAL_FLOW_TYPES
-        for row in (left, right)
+        for row in (left_row, right_row)
     ):
         return None
-    left_amount = _amount(left)
-    right_amount = _amount(right)
-    if left_amount is None or right_amount is None or left_amount != -right_amount:
+    if left.amount != -right.amount:
         return None
-    left_date = _row_date(left)
-    right_date = _row_date(right)
-    if left_date is None or right_date is None:
-        return None
-    distance = abs((left_date - right_date).days)
+    distance = abs((left.row_date - right.row_date).days)
     if distance > window:
         return None
 
-    outgoing, incoming = (left, right) if left_amount < 0 else (right, left)
+    outgoing, incoming = (
+        (left_row, right_row) if left.amount < 0 else (right_row, left_row)
+    )
     out_type = outgoing["account_type"]
     in_type = incoming["account_type"]
     if out_type == "bank" and in_type == "credit_card":
@@ -518,13 +551,13 @@ def _candidate(
     if any(
         row.get("flow_source") in {"rule", "correction"}
         and row.get("flow_type") != flow_type
-        for row in (left, right)
+        for row in (left_row, right_row)
     ):
         return None
     return (
         distance,
-        left["transaction_id"],
-        right["transaction_id"],
+        left_row["transaction_id"],
+        right_row["transaction_id"],
         flow_type,
     )
 

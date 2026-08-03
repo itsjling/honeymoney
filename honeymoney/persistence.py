@@ -14,6 +14,8 @@ from honeymoney.identity import IDENTITY_MANIFEST_NAME
 from honeymoney.overlap import OVERLAP_MANIFEST_NAME, SOURCE_OCCURRENCES_NAME
 
 STATE_SCHEMA_VERSION = 1
+PRIVATE_FILE_MODE = 0o600
+PRIVATE_DIRECTORY_MODE = 0o700
 
 
 class GenerationEntry(TypedDict):
@@ -72,46 +74,65 @@ def persist_generation(
     *,
     expected_authoritative_hash: str | None = None,
     expected_generation_hashes: Mapping[Path, str | None] | None = None,
+    coordination_path: Path | None = None,
 ) -> None:
     """Durably publish files using the ledger replacement as the commit point."""
-    authoritative_path = authoritative_path.resolve()
-    normalized = {path.resolve(): content for path, content in files.items()}
+    authoritative_path = _resolved_write_target(authoritative_path)
+    coordination_target = (
+        authoritative_path
+        if coordination_path is None
+        else _resolved_write_target(coordination_path)
+    )
+    normalized = {
+        _resolved_write_target(path): content for path, content in files.items()
+    }
     if authoritative_path not in normalized:
         raise ValueError("A persisted generation must include the authoritative ledger")
 
+    recovery_paths = {
+        *normalized,
+        *(expected_generation_hashes or {}),
+    }
+    if coordination_target != authoritative_path:
+        recover_generation(
+            coordination_target,
+            allowed_generation_paths=recovery_paths,
+        )
     recover_generation(
         authoritative_path,
-        allowed_generation_paths=normalized,
+        allowed_generation_paths=recovery_paths,
+        coordination_path=coordination_target,
     )
-    lock_path = _lock_path(authoritative_path)
+    lock_path = _lock_path(coordination_target)
     _acquire_lock(lock_path)
-    expected_hashes = {
-        Path(path).resolve(): digest
-        for path, digest in (expected_generation_hashes or {}).items()
-    }
-    if expected_authoritative_hash is not None:
-        expected_hashes[authoritative_path] = expected_authoritative_hash
-    if any(generation_hash(path) != digest for path, digest in expected_hashes.items()):
-        _release_lock(lock_path)
-        raise GenerationConflictError(
-            "The ledger generation changed before this operation could be saved"
-        )
-    generation = uuid.uuid4().hex
-    state_path = _state_path(authoritative_path)
-    entries = [
-        _entry_for(target, content, generation)
-        for target, content in normalized.items()
-    ]
-    entries.sort(key=lambda entry: entry["target"] == str(authoritative_path))
-    state: GenerationState = {
-        "schema_version": STATE_SCHEMA_VERSION,
-        "generation": generation,
-        "phase": "staging",
-        "authoritative_path": str(authoritative_path),
-        "entries": entries,
-    }
-
     try:
+        expected_hashes = {
+            Path(path).resolve(): digest
+            for path, digest in (expected_generation_hashes or {}).items()
+        }
+        if expected_authoritative_hash is not None:
+            expected_hashes[authoritative_path] = expected_authoritative_hash
+        if any(
+            generation_hash(path) != digest for path, digest in expected_hashes.items()
+        ):
+            raise GenerationConflictError(
+                "The ledger generation changed before this operation could be saved"
+            )
+        generation = uuid.uuid4().hex
+        state_path = _state_path(authoritative_path)
+        entries = [
+            _entry_for(target, content, generation)
+            for target, content in normalized.items()
+        ]
+        entries.sort(key=lambda entry: entry["target"] == str(authoritative_path))
+        state: GenerationState = {
+            "schema_version": STATE_SCHEMA_VERSION,
+            "generation": generation,
+            "phase": "staging",
+            "authoritative_path": str(authoritative_path),
+            "entries": entries,
+        }
+
         try:
             _write_state(state_path, state)
             for entry in entries:
@@ -140,15 +161,21 @@ def recover_generation(
     authoritative_path: Path,
     *,
     allowed_generation_paths: Iterable[Path] = (),
+    coordination_path: Path | None = None,
 ) -> None:
     """Recover retained state according to the authoritative ledger generation."""
-    authoritative_path = authoritative_path.resolve()
+    authoritative_path = _resolved_write_target(authoritative_path)
+    coordination_target = (
+        authoritative_path
+        if coordination_path is None
+        else _resolved_write_target(coordination_path)
+    )
     allowed_paths = _allowed_generation_paths(
         authoritative_path,
         allowed_generation_paths,
     )
     state_path = _state_path(authoritative_path)
-    lock_path = _lock_path(authoritative_path)
+    lock_path = _lock_path(coordination_target)
     if lock_path.exists() and _lock_owner_is_active(lock_path):
         raise OSError("Another output persistence operation is already in progress")
     state_temporary = _state_temporary_path(state_path)
@@ -199,8 +226,16 @@ def require_clean_generation(authoritative_path: Path) -> None:
 
 
 def _entry_for(target: Path, content: str, generation: str) -> GenerationEntry:
+    if target.is_symlink():
+        raise OSError(f"Refusing symbolic-link output target: {target}")
     existed = target.exists()
-    mode = stat.S_IMODE(target.stat().st_mode) if existed else _default_file_mode()
+    if existed and not target.is_file():
+        raise OSError(f"Output target is not a regular file: {target}")
+    mode = (
+        _private_file_mode(stat.S_IMODE(target.stat().st_mode))
+        if existed
+        else _default_file_mode()
+    )
     old_hash = _path_hash(target) if existed else None
     stem = f".{target.name}.honeymoney-{generation}"
     return {
@@ -217,7 +252,7 @@ def _entry_for(target: Path, content: str, generation: str) -> GenerationEntry:
 
 def _stage_entry(entry: GenerationEntry, content: str) -> None:
     target = Path(entry["target"])
-    target.parent.mkdir(parents=True, exist_ok=True)
+    ensure_private_directory(target.parent)
     _write_new_file(Path(entry["staged"]), content, entry["mode"])
     if entry["existed"]:
         _copy_file(Path(entry["target"]), Path(entry["backup"]), entry["mode"])
@@ -253,11 +288,21 @@ def _copy_file(source: Path, destination: Path, mode: int) -> None:
         raise
 
 
+def _set_file_mode(path: Path, mode: int) -> None:
+    descriptor = os.open(path, os.O_RDONLY)
+    try:
+        os.fchmod(descriptor, mode)
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
 def _complete_new_generation(state_path: Path, state: GenerationState) -> None:
     entries = state["entries"]
     for entry in entries:
         target = Path(entry["target"])
         if _path_hash(target) == entry["new_sha256"]:
+            _set_file_mode(target, entry["mode"])
             continue
         staged = Path(entry["staged"])
         if not staged.exists() or _path_hash(staged) != entry["new_sha256"]:
@@ -273,6 +318,7 @@ def _restore_old_generation(state_path: Path, state: GenerationState) -> None:
         target = Path(entry["target"])
         if entry["existed"]:
             if _path_hash(target) == entry["old_sha256"]:
+                _set_file_mode(target, entry["mode"])
                 continue
             backup = Path(entry["backup"])
             if not backup.exists() or _path_hash(backup) != entry["old_sha256"]:
@@ -297,7 +343,7 @@ def _finish_generation(state_path: Path, state: GenerationState) -> None:
 
 
 def _write_state(path: Path, state: GenerationState) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
+    ensure_private_directory(path.parent)
     temporary = _state_temporary_path(path)
     temporary.unlink(missing_ok=True)
     content = json.dumps(state, indent=2, sort_keys=True) + "\n"
@@ -398,7 +444,7 @@ def _validate_state(
                 "backup": backup,
                 "install": install,
                 "existed": existed,
-                "mode": mode,
+                "mode": _private_file_mode(mode),
                 "old_sha256": old_sha256,
                 "new_sha256": new_sha256,
             }
@@ -506,6 +552,44 @@ def generation_hashes(paths: Iterable[Path]) -> dict[Path, str | None]:
     return hashes
 
 
+def snapshot_generation(
+    authoritative_path: Path,
+    additional_paths: Iterable[Path] = (),
+    *,
+    coordination_path: Path | None = None,
+) -> dict[Path, str | None]:
+    """Recover and capture every file that can affect one generation write."""
+    authoritative_path = _resolved_write_target(authoritative_path)
+    coordination_target = (
+        authoritative_path
+        if coordination_path is None
+        else _resolved_write_target(coordination_path)
+    )
+    if coordination_target != authoritative_path:
+        recover_generation(
+            coordination_target,
+            allowed_generation_paths=additional_paths,
+        )
+    recover_generation(
+        authoritative_path,
+        allowed_generation_paths=additional_paths,
+        coordination_path=coordination_target,
+    )
+    return generation_hashes(
+        generation_member_paths(authoritative_path, additional_paths)
+    )
+
+
+def require_generation_snapshot(
+    expected_generation: Mapping[Path, str | None],
+) -> None:
+    """Reject a read assembled from files that changed during the operation."""
+    if generation_hashes(expected_generation) != dict(expected_generation):
+        raise GenerationConflictError(
+            "The ledger generation changed while this operation was reading it"
+        )
+
+
 def generation_member_paths(
     authoritative_path: Path,
     additional_paths: Iterable[Path] = (),
@@ -522,13 +606,76 @@ def _content_hash(content: str) -> str:
 
 
 def _default_file_mode() -> int:
-    current_umask = os.umask(0)
-    os.umask(current_umask)
-    return 0o666 & ~current_umask
+    return PRIVATE_FILE_MODE
+
+
+def _private_file_mode(mode: int) -> int:
+    """Keep stricter owner bits while removing group and other access."""
+    return mode & PRIVATE_FILE_MODE
+
+
+def _resolved_write_target(path: Path) -> Path:
+    target = Path(path)
+    if target.is_symlink():
+        raise OSError(f"Refusing symbolic-link output target: {target}")
+    return target.parent.resolve() / target.name
+
+
+def ensure_private_directory(path: Path) -> None:
+    """Create missing directory components with owner-only access."""
+    target = Path(path)
+    missing: list[Path] = []
+    current = target
+    while not current.exists():
+        missing.append(current)
+        current = current.parent
+    if not current.is_dir():
+        raise OSError(f"Directory path is not a directory: {current}")
+    for directory in reversed(missing):
+        try:
+            directory.mkdir(mode=PRIVATE_DIRECTORY_MODE)
+        except FileExistsError:
+            if directory.is_symlink() or not directory.is_dir():
+                raise OSError(f"Unsafe directory target: {directory}") from None
+        else:
+            os.chmod(directory, PRIVATE_DIRECTORY_MODE)
+
+
+def private_atomic_write_text(
+    path: Path,
+    content: str,
+    *,
+    overwrite: bool = True,
+) -> None:
+    """Write private text atomically without following a target symbolic link."""
+    target = _resolved_write_target(path)
+    ensure_private_directory(target.parent)
+    if target.exists() and not target.is_file():
+        raise OSError(f"Output target is not a regular file: {target}")
+    if target.exists() and not overwrite:
+        raise FileExistsError(target)
+    mode = (
+        _private_file_mode(stat.S_IMODE(target.stat().st_mode))
+        if target.exists()
+        else PRIVATE_FILE_MODE
+    )
+    temporary = target.parent / f".{target.name}.honeymoney-{uuid.uuid4().hex}.tmp"
+    try:
+        _write_new_file(temporary, content, mode)
+        if overwrite:
+            if target.is_symlink():
+                raise OSError(f"Refusing symbolic-link output target: {target}")
+            os.replace(temporary, target)
+        else:
+            os.link(temporary, target, follow_symlinks=False)
+            temporary.unlink()
+        _fsync_directory(target.parent)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def _acquire_lock(path: Path) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
+    ensure_private_directory(path.parent)
     try:
         descriptor = os.open(
             path,

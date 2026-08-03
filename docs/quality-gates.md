@@ -1,7 +1,7 @@
 # Quality gates
 
 `./scripts/check.sh` runs strict static types and branch-covered tests on
-Python 3.10 and 3.13 in CI. Both gates work after bootstrap with network access
+Python 3.11 and 3.13 in CI. Both gates work after bootstrap with network access
 disabled.
 
 ## Static types
@@ -35,6 +35,11 @@ remain outside the first scope. Their full internal conversions stay as
 bounded follow-up steps because the modules mix parsing, validation, command
 policy, and file lifecycle code across a large surface.
 
+The next bounded identity and import conversion will move resolved-path locator
+selection and stable source-byte capture into a checked `source_snapshot.py`
+module. It will add that module to the strict scope and leave bank-specific CSV
+and PDF parsing in `importers.py`.
+
 The first gate does not require complete typing of embedded HTML or every
 command-formatting helper. It also does not add runtime schema libraries or
 replace the transaction representation. Coverage work must test behavior, not
@@ -65,17 +70,9 @@ Run:
 
 The command runs the default synthetic unittest suite once. Coverage starts in
 child CLI processes, writes parallel data, combines it, and then applies the
-`fail_under` value in `pyproject.toml`. The initial threshold is the lower
-exact result from Python 3.10 and 3.13, rounded down to a whole percent.
-
-| Interpreter | Reviewed branch-coverage baseline |
-|---|---:|
-| Python 3.10 | 87.999115% |
-| Python 3.13 | 87.999115% |
-
-Both reviewed runs executed 413 tests. Coverage.py displays the result as
-88.00%, but its raw `percent_covered` value is 87.9991151421303. The
-conservative checked floor therefore remains 87%.
+`fail_under` value in `pyproject.toml`. The conservative checked floor remains
+87%. CI applies it to Python 3.11 and 3.13. Raise it only after reviewing the
+lower exact result from both interpreters and rounding down to a whole percent.
 
 The percentage gate supports, but does not replace, critical-path tests:
 

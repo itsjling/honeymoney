@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import csv
+import io
 import json
 import logging
+import os
 import re
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -20,6 +22,7 @@ from honeymoney.identity import (
     IncomingSourceIdentity,
     extractor_contract_id,
     logical_locator,
+    logical_locator_from_resolved,
     source_id,
     source_namespace_id,
     source_revision,
@@ -35,6 +38,7 @@ from honeymoney.normalization import (
     _parse_profile_date,
 )
 from honeymoney.parser_contracts import Profile
+from honeymoney.persistence import ensure_private_directory, private_atomic_write_text
 from honeymoney.schema import (
     ALLOWED_ACCOUNT_TYPES,
     allowed_owners,
@@ -42,11 +46,98 @@ from honeymoney.schema import (
 )
 from honeymoney.valuation import value_transaction
 
+MAX_CSV_INPUT_BYTES = 64 * 1024 * 1024
+MAX_PDF_INPUT_BYTES = 64 * 1024 * 1024
+MAX_PDF_PAGES = 500
+MAX_PDF_EXTRACTED_TEXT_CHARS = 20_000_000
+MAX_PDF_TRANSACTION_ROWS = 100_000
+
 
 @dataclass(frozen=True)
 class _PdfBalanceLine:
     text: str
     is_continuation: bool = False
+
+
+@dataclass(frozen=True)
+class _InputSourceSnapshot:
+    source_bytes: bytes
+    resolved_path: Path
+    locator_kind: str
+    locator: str
+
+
+class _PdfSnapshotStream(io.BytesIO):
+    """Expose captured bytes while retaining path-like test adapter support."""
+
+    def __init__(self, source_bytes: bytes, source_path: Path) -> None:
+        super().__init__(source_bytes)
+        self._source_path = source_path
+
+    def __fspath__(self) -> str:
+        return str(self._source_path)
+
+
+@dataclass
+class _PdfImportBudget:
+    extracted_text_chars: int = 0
+    transaction_rows: int = 0
+
+    def record_text_chars(self, count: int) -> None:
+        self.extracted_text_chars += count
+        if self.extracted_text_chars > MAX_PDF_EXTRACTED_TEXT_CHARS:
+            raise ValueError(
+                f"PDF extracted text exceeds {MAX_PDF_EXTRACTED_TEXT_CHARS} characters"
+            )
+
+    def record_extraction(self, value: Any) -> None:
+        pending = [value]
+        while pending:
+            item = pending.pop()
+            if isinstance(item, str):
+                self.record_text_chars(len(item))
+            elif isinstance(item, dict):
+                pending.extend(item.values())
+            elif isinstance(item, (list, tuple)):
+                pending.extend(item)
+
+    def record_transaction(self) -> None:
+        self.transaction_rows += 1
+        if self.transaction_rows > MAX_PDF_TRANSACTION_ROWS:
+            raise ValueError(f"PDF transaction rows exceed {MAX_PDF_TRANSACTION_ROWS}")
+
+
+class _CachedPdfPage:
+    """Cache extraction calls shared by balance and transaction parsing."""
+
+    def __init__(self, page: Any, budget: _PdfImportBudget) -> None:
+        self._page = page
+        self._budget = budget
+        self._cache: dict[str, Any] = {}
+
+    def __getattr__(self, name: str) -> Any:
+        attribute = getattr(self._page, name)
+        if name not in {
+            "extract_words",
+            "extract_tables",
+            "extract_table",
+        } or not callable(attribute):
+            return attribute
+
+        def cached_call(*args: Any, **kwargs: Any) -> Any:
+            key = f"{name}:{args!r}:{sorted(kwargs.items())!r}"
+            if key not in self._cache:
+                value = attribute(*args, **kwargs)
+                self._budget.record_extraction(value)
+                self._cache[key] = value
+            return self._cache[key]
+
+        return cached_call
+
+
+@dataclass(frozen=True)
+class _CachedPdfDocument:
+    pages: tuple[_CachedPdfPage, ...]
 
 
 @dataclass(frozen=True)
@@ -74,6 +165,66 @@ def _relative_source(path: Path, input_root: Path) -> str:
         return str(path.relative_to(root))
     except ValueError:
         return path.name
+
+
+def _source_stat_signature(value: os.stat_result) -> tuple[int, int, int, int]:
+    return (value.st_dev, value.st_ino, value.st_size, value.st_mtime_ns)
+
+
+def _capture_input_source(
+    input_file: Path,
+    config: dict[str, Any],
+) -> _InputSourceSnapshot:
+    """Read one stable source snapshot for parsing and identity."""
+    is_pdf = input_file.suffix.casefold() == ".pdf"
+    input_kind = "PDF" if is_pdf else "CSV"
+    max_input_bytes = MAX_PDF_INPUT_BYTES if is_pdf else MAX_CSV_INPUT_BYTES
+    source_bytes, resolved_path = _read_stable_source_bytes(
+        input_file,
+        max_input_bytes=max_input_bytes,
+        input_kind=input_kind,
+    )
+    workspace_root = config.get("_identity_workspace_root")
+    if not isinstance(workspace_root, Path):
+        workspace_root = Path("config.json").resolve().parent
+    locator_kind, locator = logical_locator_from_resolved(
+        resolved_path,
+        workspace_root,
+    )
+    return _InputSourceSnapshot(
+        source_bytes,
+        resolved_path,
+        locator_kind,
+        locator,
+    )
+
+
+def _read_stable_source_bytes(
+    input_file: Path,
+    *,
+    max_input_bytes: int,
+    input_kind: str,
+) -> tuple[bytes, Path]:
+    """Read one bounded file and reject changes made during the read."""
+    with input_file.open("rb") as handle:
+        before = os.fstat(handle.fileno())
+        if before.st_size > max_input_bytes:
+            raise ValueError(f"{input_kind} input exceeds {max_input_bytes} bytes")
+        source_bytes = handle.read(max_input_bytes + 1)
+        if len(source_bytes) > max_input_bytes:
+            raise ValueError(f"{input_kind} input exceeds {max_input_bytes} bytes")
+        after = os.fstat(handle.fileno())
+    resolved_path = input_file.resolve(strict=True)
+    current = resolved_path.stat()
+    if not (
+        _source_stat_signature(before)
+        == _source_stat_signature(after)
+        == _source_stat_signature(current)
+    ):
+        raise ValueError(
+            f"Input source changed while it was being read: {input_file.name}"
+        )
+    return source_bytes, resolved_path
 
 
 def _load_profiles(config: dict[str, Any]) -> list[Profile]:
@@ -771,13 +922,23 @@ def _import_transactions(
                     profile_mappings_path,
                     clear_status,
                 )
+                source_snapshot = (
+                    _capture_input_source(input_file, config)
+                    if include_identity_sources
+                    else None
+                )
                 if include_identity_sources:
+                    if source_snapshot is None:
+                        raise AssertionError(
+                            "Identity import requires a source snapshot"
+                        )
                     imported, pdf_warnings, records = _import_pdf(
                         input_file,
                         profile,
                         config,
                         input_root,
                         include_identity_records=True,
+                        source_bytes=source_snapshot.source_bytes,
                     )
                 else:
                     imported, pdf_warnings = _import_pdf(
@@ -820,6 +981,7 @@ def _import_transactions(
                         _pdf_adapter_tag(profile),
                         records,
                         input_root,
+                        source_snapshot,
                     )
                 )
             file_reports.append(
@@ -836,20 +998,31 @@ def _import_transactions(
             continue
         if suffix != ".csv":
             continue
+        source_snapshot = (
+            _capture_input_source(input_file, config)
+            if include_identity_sources
+            else None
+        )
         profile, prompted_for_profile = _select_csv_profile(
             input_file,
             profiles,
             interactive,
             profile_mappings,
             clear_status,
+            source_bytes=(
+                source_snapshot.source_bytes if source_snapshot is not None else None
+            ),
         )
         if include_identity_sources:
+            if source_snapshot is None:
+                raise AssertionError("Identity import requires a source snapshot")
             imported, records = _import_csv(
                 input_file,
                 profile,
                 config,
                 input_root,
                 include_identity_records=True,
+                source_bytes=source_snapshot.source_bytes,
             )
         else:
             imported = _import_csv(input_file, profile, config, input_root)
@@ -859,7 +1032,13 @@ def _import_transactions(
         if include_identity_sources:
             identity_sources.append(
                 _incoming_source_identity(
-                    input_file, profile, config, 1, records, input_root
+                    input_file,
+                    profile,
+                    config,
+                    1,
+                    records,
+                    input_root,
+                    source_snapshot,
                 )
             )
         file_reports.append(
@@ -884,17 +1063,17 @@ def _incoming_source_identity(
     adapter_tag: int,
     records: tuple[IncomingRecordIdentity, ...],
     input_root: Path,
+    source_snapshot: _InputSourceSnapshot,
 ) -> IncomingSourceIdentity:
     """Build private, immutable identity inputs for one processed source."""
-    workspace_root = config.get("_identity_workspace_root")
-    if not isinstance(workspace_root, Path):
-        workspace_root = Path("config.json").resolve().parent
-    locator_kind, locator = logical_locator(input_file, workspace_root)
     return IncomingSourceIdentity(
-        stable_handle=str(input_file.resolve(strict=True)),
+        stable_handle=str(source_snapshot.resolved_path),
         source_display=_relative_source(input_file, input_root),
-        namespace_id=source_namespace_id(locator_kind, locator),
-        revision=source_revision(input_file.read_bytes()),
+        namespace_id=source_namespace_id(
+            source_snapshot.locator_kind,
+            source_snapshot.locator,
+        ),
+        revision=source_revision(source_snapshot.source_bytes),
         contract_id=extractor_contract_id(adapter_tag, profile),
         record_data=records,
     )
@@ -967,6 +1146,8 @@ def _select_csv_profile(
     interactive: bool,
     profile_mappings: dict[str, Any],
     clear_status: Callable[[], None],
+    *,
+    source_bytes: bytes | None = None,
 ) -> tuple[dict[str, Any], bool]:
     if not profiles:
         return _default_profile(), False
@@ -975,7 +1156,7 @@ def _select_csv_profile(
     if mapped_profile is not None:
         return mapped_profile, False
 
-    headers = _csv_headers(csv_path)
+    headers = _csv_headers(csv_path, source_bytes=source_bytes)
     matching_profiles = []
     for profile in profiles:
         required_headers = profile.get("csv", {}).get("detect_headers", [])
@@ -1067,17 +1248,31 @@ def _maybe_save_profile_mapping(
             "profile": str(profile.get("id") or profile.get("account_id")),
         }
     )
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(mappings, indent=2, sort_keys=True), encoding="utf-8")
+    ensure_private_directory(path.parent)
+    private_atomic_write_text(
+        path,
+        json.dumps(mappings, indent=2, sort_keys=True),
+    )
 
 
-def _csv_headers(csv_path: Path) -> set[str]:
-    with csv_path.open(newline="", encoding="utf-8") as fh:
-        reader = csv.reader(fh)
-        try:
-            return {header.strip() for header in next(reader)}
-        except StopIteration:
-            return set()
+def _source_text(path: Path, source_bytes: bytes | None) -> str:
+    if source_bytes is not None:
+        return source_bytes.decode("utf-8")
+    captured, _ = _read_stable_source_bytes(
+        path,
+        max_input_bytes=MAX_CSV_INPUT_BYTES,
+        input_kind="CSV",
+    )
+    return captured.decode("utf-8")
+
+
+def _csv_headers(csv_path: Path, *, source_bytes: bytes | None = None) -> set[str]:
+    source_text = _source_text(csv_path, source_bytes)
+    reader = csv.reader(io.StringIO(source_text, newline=""))
+    try:
+        return {header.strip() for header in next(reader)}
+    except StopIteration:
+        return set()
 
 
 def _skip_descriptions(profile: dict[str, Any]) -> list[str]:
@@ -1125,12 +1320,19 @@ def _import_csv(
     input_root: Path,
     *,
     include_identity_records: bool = False,
+    source_bytes: bytes | None = None,
 ) -> (
     list[dict[str, str]]
     | tuple[list[dict[str, str]], tuple[IncomingRecordIdentity, ...]]
 ):
     csv_settings = profile.get("csv", {})
-    _validate_selected_csv_headers(csv_path, profile, csv_settings)
+    source_text = _source_text(csv_path, source_bytes)
+    _validate_selected_csv_headers(
+        csv_path,
+        profile,
+        csv_settings,
+        source_bytes=source_text.encode("utf-8"),
+    )
     columns = dict(csv_settings.get("columns", {}))
     columns["debit_values"] = csv_settings.get("debit_values", [])
     columns["credit_values"] = csv_settings.get("credit_values", [])
@@ -1139,7 +1341,7 @@ def _import_csv(
     rows: list[dict[str, str]] = []
     identity_records: list[IncomingRecordIdentity] = []
 
-    with csv_path.open(newline="", encoding="utf-8") as fh:
+    with io.StringIO(source_text, newline="") as fh:
         reader = csv.DictReader(fh)
         # DictReader consumes its header lazily. Read it before deriving each
         # record's start so the first data record correctly starts on line 2.
@@ -1179,9 +1381,13 @@ def _import_csv(
 
 
 def _validate_selected_csv_headers(
-    csv_path: Path, profile: dict[str, Any], settings: dict[str, Any]
+    csv_path: Path,
+    profile: dict[str, Any],
+    settings: dict[str, Any],
+    *,
+    source_bytes: bytes | None = None,
 ) -> None:
-    headers = _csv_headers(csv_path)
+    headers = _csv_headers(csv_path, source_bytes=source_bytes)
     profile_id = str(profile.get("id") or profile.get("account_id") or "unknown")
     for field, mapped_header in settings.get("columns", {}).items():
         if str(mapped_header) not in headers:
@@ -1198,10 +1404,17 @@ def _import_pdf(
     input_root: Path,
     *,
     include_identity_records: bool = False,
+    source_bytes: bytes | None = None,
 ) -> (
     tuple[list[dict[str, str]], list[str]]
     | tuple[list[dict[str, str]], list[str], tuple[IncomingRecordIdentity, ...]]
 ):
+    input_size = (
+        len(source_bytes) if source_bytes is not None else pdf_path.stat().st_size
+    )
+    if input_size > MAX_PDF_INPUT_BYTES:
+        raise ValueError(f"PDF input exceeds {MAX_PDF_INPUT_BYTES} bytes")
+
     import pdfplumber
 
     pdf_settings = profile.get("pdf", {})
@@ -1216,12 +1429,23 @@ def _import_pdf(
     rows: list[dict[str, str]] = []
     warnings: list[str] = []
     identity_records: list[IncomingRecordIdentity] = []
+    pdf_source: str | io.BytesIO = (
+        str(pdf_path)
+        if source_bytes is None
+        else _PdfSnapshotStream(source_bytes, pdf_path)
+    )
     with _quiet_pdfminer_font_warnings():
-        with pdfplumber.open(str(pdf_path)) as pdf:
-            balance_observations = _pdf_balance_observations(pdf, pdf_settings)
+        with pdfplumber.open(pdf_source) as pdf:
+            if len(pdf.pages) > MAX_PDF_PAGES:
+                raise ValueError(f"PDF page count exceeds {MAX_PDF_PAGES}")
+            budget = _PdfImportBudget()
+            cached_pdf = _CachedPdfDocument(
+                tuple(_CachedPdfPage(page, budget) for page in pdf.pages)
+            )
+            balance_observations = _pdf_balance_observations(cached_pdf, pdf_settings)
             if pdf_settings.get("word_rows") == "sectioned":
                 source_rows = _pdf_sectioned_word_source_rows(
-                    pdf, pdf_path, pdf_settings
+                    cached_pdf, pdf_path, pdf_settings
                 )
                 for source_row, page_number, row_number in source_rows:
                     normalized = _normalized_row(
@@ -1236,6 +1460,7 @@ def _import_pdf(
                     value_transaction(normalized, config)
                     if _row_is_skipped(normalized, skip_patterns):
                         continue
+                    budget.record_transaction()
                     rows.append(normalized)
                     if include_identity_records:
                         identity_records.append(
@@ -1249,7 +1474,7 @@ def _import_pdf(
                     return rows, warnings, tuple(identity_records)
                 return rows, warnings
 
-            for page_number, page in enumerate(pdf.pages, start=1):
+            for page_number, page in enumerate(cached_pdf.pages, start=1):
                 word_rows = _pdf_word_source_rows(
                     page,
                     pdf_settings,
@@ -1281,6 +1506,7 @@ def _import_pdf(
                         value_transaction(normalized, config)
                         if _row_is_skipped(normalized, skip_patterns):
                             continue
+                        budget.record_transaction()
                         rows.append(normalized)
                         if include_identity_records:
                             identity_records.append(
@@ -1301,8 +1527,13 @@ def _import_pdf(
                     warnings.append(
                         f"No table found on {pdf_path.name} page {page_number}"
                     )
-                    text_length = _pymupdf_page_text_length(pdf_path, page_number)
+                    text_length = _pymupdf_page_text_length(
+                        pdf_path,
+                        page_number,
+                        source_bytes=source_bytes,
+                    )
                     if text_length is not None:
+                        budget.record_text_chars(text_length)
                         warnings.append(
                             "PyMuPDF text fallback found "
                             f"{text_length} characters on {pdf_path.name} page {page_number}"
@@ -1354,6 +1585,7 @@ def _import_pdf(
                             value_transaction(normalized, config)
                             if _row_is_skipped(normalized, skip_patterns):
                                 continue
+                            budget.record_transaction()
                             rows.append(normalized)
                             if include_identity_records:
                                 identity_records.append(
@@ -2339,14 +2571,24 @@ def _quiet_pdfminer_font_warnings() -> Any:
         logger.setLevel(previous_level)
 
 
-def _pymupdf_page_text_length(pdf_path: Path, page_number: int) -> int | None:
+def _pymupdf_page_text_length(
+    pdf_path: Path,
+    page_number: int,
+    *,
+    source_bytes: bytes | None = None,
+) -> int | None:
     try:
         import fitz
     except ImportError:
         return None
 
     try:
-        with fitz.open(str(pdf_path)) as document:
+        document_source = (
+            {"filename": str(pdf_path)}
+            if source_bytes is None
+            else {"stream": source_bytes, "filetype": "pdf"}
+        )
+        with fitz.open(**document_source) as document:
             page = document[page_number - 1]
             return len(_clean_text(page.get_text()))
     except Exception:

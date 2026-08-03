@@ -40,6 +40,7 @@ from honeymoney.overlap import (
     canonicalize_overlaps,
     overlap_manifest_document,
     overlap_manifest_path,
+    project_replacement_corrections,
     source_occurrences_path,
 )
 from honeymoney.persistence import persist_generation
@@ -52,19 +53,24 @@ from honeymoney.schema import (
 
 
 def _source_row(
-    name: str, locator: str, row_number: int = 2
+    name: str,
+    locator: str,
+    row_number: int = 2,
+    *,
+    account_id: str = "synthetic-card",
+    currency: str = "HKD",
 ) -> tuple[dict[str, str], dict[str, object]]:
     row = {column: "" for column in SOURCE_OCCURRENCE_COLUMNS}
     row.update(
         {
             "date": "2026-05-04",
             "transaction_date": "2026-05-04",
-            "account_id": "synthetic-card",
+            "account_id": account_id,
             "account_type": "credit_card",
             "original_amount": "-12.00",
-            "original_currency": "HKD",
+            "original_currency": currency,
             "posted_amount": "-12.00",
-            "posted_currency": "HKD",
+            "posted_currency": currency,
             "amount_hkd": "-12.00",
             "merchant": "SYNTHETIC OVERLAP",
             "original_description": "SYNTHETIC OVERLAP",
@@ -112,6 +118,74 @@ def _source_row(
 
 
 class OverlapWorkspaceStateTest(unittest.TestCase):
+    def test_replacement_does_not_copy_one_correction_across_account_groups(
+        self,
+    ) -> None:
+        prior_first, _ = _source_row(
+            "statement.csv",
+            "statement.csv",
+            2,
+            account_id="old-primary",
+            currency="HKD",
+        )
+        prior_second, _ = _source_row(
+            "statement.csv",
+            "statement.csv",
+            3,
+            account_id="old-secondary",
+            currency="USD",
+        )
+        empty_manifest = {
+            "schema_version": 1,
+            "namespace_key": "ovns_" + "a" * 64,
+            "groups": [],
+        }
+        prior = canonicalize_overlaps(
+            [prior_first, prior_second],
+            [],
+            empty_manifest,
+        )
+        corrected_id = next(
+            row["transaction_id"]
+            for row in prior.rows
+            if row["account_id"] == "old-primary"
+        )
+
+        next_first, _ = _source_row(
+            "statement.csv",
+            "statement.csv",
+            4,
+            account_id="new-primary",
+            currency="HKD",
+        )
+        next_second, _ = _source_row(
+            "statement.csv",
+            "statement.csv",
+            5,
+            account_id="new-secondary",
+            currency="USD",
+        )
+        next_result = canonicalize_overlaps(
+            [next_first, next_second],
+            [],
+            prior.manifest,
+        )
+
+        projection = project_replacement_corrections(
+            prior,
+            next_result,
+            [prior_first, prior_second],
+            [next_first, next_second],
+            {corrected_id: {"category": "Dining"}},
+            {prior_first["source_id"]},
+        )
+
+        self.assertEqual(projection.corrections, {})
+        self.assertEqual(
+            set(projection.ambiguous_transaction_ids),
+            {row["transaction_id"] for row in next_result.rows},
+        )
+
     def _write_issue_31_state(self, path: Path) -> None:
         first, first_source = _source_row("a.csv", "a.csv")
         second, second_source = _source_row("b.csv", "b.csv")

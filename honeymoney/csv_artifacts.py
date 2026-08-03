@@ -41,6 +41,8 @@ HONEYMONEY_CSV_ESCAPE_V1 = (
 class CsvArtifact:
     rows: list[dict[str, str]]
     encoded_cells: frozenset[tuple[int, str]]
+    fieldnames: tuple[str, ...]
+    rows_with_extra_cells: frozenset[int]
 
 
 def csv_document(columns: list[str], rows: Iterable[Mapping[str, str]]) -> str:
@@ -68,9 +70,14 @@ def csv_document(columns: list[str], rows: Iterable[Mapping[str, str]]) -> str:
 def read_csv_artifact(path: Path, columns: list[str]) -> CsvArtifact:
     """Read a public CSV and decode self-identifying spreadsheet-safe cells."""
     with path.open(newline="", encoding="utf-8-sig") as handle:
+        reader = csv.DictReader(handle)
+        fieldnames = tuple(reader.fieldnames or ())
         rows = []
         encoded_cells: set[tuple[int, str]] = set()
-        for row_index, row in enumerate(csv.DictReader(handle)):
+        rows_with_extra_cells: set[int] = set()
+        for row_index, row in enumerate(reader):
+            if row.get(None) is not None:
+                rows_with_extra_cells.add(row_index)
             for column in columns:
                 if column not in CANONICAL_CSV_COLUMNS and (
                     row.get(column) or ""
@@ -82,7 +89,12 @@ def read_csv_artifact(path: Path, columns: list[str]) -> CsvArtifact:
                     for column in columns
                 }
             )
-    return CsvArtifact(rows, frozenset(encoded_cells))
+    return CsvArtifact(
+        rows,
+        frozenset(encoded_cells),
+        fieldnames,
+        frozenset(rows_with_extra_cells),
+    )
 
 
 def spreadsheet_safe_cell(column: str, value: str) -> str:

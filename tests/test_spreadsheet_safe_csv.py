@@ -34,6 +34,7 @@ from honeymoney.schema import (
     ALLOWED_OWNERS,
     ALLOWED_PAYMENT_METHODS,
     CATEGORIZED_COLUMNS,
+    REVIEW_NEEDED_COLUMNS,
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -494,6 +495,57 @@ class SpreadsheetSafeCsvTest(unittest.TestCase):
             corrections_path.write_text(content, encoding="utf-8", newline="")
             self.assertEqual(load_corrections(config), expected)
             self.assertEqual(prepare_corrections_document(config)[1], content)
+
+    def test_correction_csv_rejects_bad_headers_blank_ids_and_duplicate_ids(
+        self,
+    ) -> None:
+        cases = {
+            "missing transaction id header": (
+                "transaction_i,category\ntxn_one,Dining\n",
+                "transaction_id",
+            ),
+            "blank transaction id": (
+                "transaction_id,category\n,Dining\n",
+                "non-empty transaction_id",
+            ),
+            "duplicate transaction id": (
+                "transaction_id,category\ntxn_one,Dining\ntxn_one,Groceries\n",
+                "Duplicate transaction_id",
+            ),
+        }
+        for label, (content, message) in cases.items():
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as tmp:
+                corrections_path = Path(tmp) / "corrections.csv"
+                corrections_path.write_text(content, encoding="utf-8")
+                config = {
+                    "corrections": str(corrections_path),
+                    "categories": ["Dining", "Groceries"],
+                }
+
+                with self.assertRaisesRegex(ValueError, message):
+                    load_corrections(config)
+
+    def test_full_review_export_remains_valid_correction_input(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            corrections_path = Path(tmp) / "corrections.csv"
+            with corrections_path.open("w", newline="", encoding="utf-8") as handle:
+                writer = csv.DictWriter(handle, fieldnames=REVIEW_NEEDED_COLUMNS)
+                writer.writeheader()
+                writer.writerow(
+                    {
+                        "transaction_id": "txn_review_export",
+                        "category": "Dining",
+                    }
+                )
+            config = {
+                "corrections": str(corrections_path),
+                "categories": ["Dining"],
+            }
+
+            self.assertEqual(
+                load_corrections(config),
+                {"txn_review_export": {"category": "Dining"}},
+            )
 
     def test_normal_import_neutralizes_statement_text_but_not_negative_amounts(
         self,

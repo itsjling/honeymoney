@@ -641,6 +641,41 @@ class SourceDataReviewWorkflowTest(unittest.TestCase):
                 "Synthetic concurrent update",
             )
 
+    def test_already_clear_resolution_rechecks_its_generation(self) -> None:
+        import honeymoney.cli as cli
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._setup_workspace(tmp)
+            statement = root / "already-clear.csv"
+            self._write_statement(
+                statement,
+                ["2026-05-04,SYNTHETIC ALREADY CLEAR,-10.00,HKD"],
+            )
+            self._import(root, statement)
+            ledger_path = root / "output" / "categorized.csv"
+            _, rows = self._read_csv(ledger_path)
+            transaction_id = rows[0]["transaction_id"]
+            real_repair = cli.repair_source_data_review_state
+
+            def repair_then_publish(*args: object, **kwargs: object):
+                changed_ids = real_repair(*args, **kwargs)
+                ledger_path.write_bytes(ledger_path.read_bytes() + b"\n")
+                return changed_ids
+
+            with (
+                patch.object(
+                    cli,
+                    "repair_source_data_review_state",
+                    side_effect=repair_then_publish,
+                ),
+                self.assertRaises(GenerationConflictError),
+            ):
+                cli._source_data_resolve_command(
+                    transaction_id,
+                    str(root / "config.json"),
+                    json_output=True,
+                )
+
     def test_resolve_schema_migration_repairs_all_stale_rows(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = self._setup_workspace(tmp)
