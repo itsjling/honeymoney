@@ -1,13 +1,14 @@
 # PRD: Make Ollama categorization accounting-safe and semantically constrained
 
-Status: DONE — isolated implementation approved; maintainer merge pending  
-Priority: P1  
+Status: DONE — merged to `main` in `9648274`; reverified at `afdbbbb`
+Priority: P1
 Expected size: M
 
 ## Execution Result
 
 - **Implementation commit:** `8d9a857` on
   `codex/improve-plan-018-accounting-safe-ollama`
+- **Merge commit:** `9648274` on `main`.
 - **Isolated worktree:** `/tmp/honeymoney-plan-018`
 - **Offline verification:** focused policy/config/CLI/Ollama/cash-flow/workflow
   suites pass; `./scripts/check.sh`, `git diff --check`, and commit checks pass.
@@ -17,6 +18,9 @@ Expected size: M
   safety and 100% ordinary-category accuracy (required: 100% and at least 90%).
   All five ordinary purchases produced `expense` without review; the synthetic
   unidentified bank credit remained `unresolved` and reviewable.
+- **2026-08-06 reconcile:** current classification-policy, Ollama, cash-flow,
+  workflow, agent-CLI, and environment-smoke suites passed as part of a 533-test
+  focused run. The live benchmark was not rerun.
 
 ## Execution Contract
 
