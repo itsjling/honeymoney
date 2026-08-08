@@ -12,6 +12,7 @@ from honeymoney.parser_contracts import Profile
 from honeymoney.schema import allowed_owners
 
 _BOUND_OWNER_FIELD = "_honeymoney_bound_owner"
+_BOUND_BINDING_ID_FIELD = "account_binding_id"
 
 
 class BoundAccount(TypedDict):
@@ -550,6 +551,29 @@ def binding_for_source(
     )
 
 
+def binding_by_id(mappings: Mapping[str, object], binding_id: str) -> AccountBinding:
+    for raw_binding in _mapping_list(mappings, "account_bindings"):
+        if (
+            isinstance(raw_binding, dict)
+            and str(raw_binding.get("id", "")).strip() == binding_id
+        ):
+            binding = cast(AccountBinding, raw_binding)
+            return {
+                "id": binding["id"].strip(),
+                "profile": binding["profile"].strip(),
+                "owner": binding["owner"].strip(),
+                "accounts": [
+                    {
+                        "source_account_id": account["source_account_id"].strip(),
+                        "account_id": account["account_id"].strip(),
+                        "account": account["account"].strip(),
+                    }
+                    for account in binding["accounts"]
+                ],
+            }
+    raise AccountBindingError(f"Unknown account binding: {binding_id}")
+
+
 def apply_binding(
     rows: Sequence[dict[str, str]], binding: AccountBinding | None
 ) -> None:
@@ -571,6 +595,7 @@ def apply_binding(
         row["account"] = account["account"]
         row["owner"] = binding["owner"]
         row[_BOUND_OWNER_FIELD] = binding["owner"]
+        row[_BOUND_BINDING_ID_FIELD] = binding["id"]
 
 
 def canonical_bound_owners(
@@ -581,7 +606,11 @@ def canonical_bound_owners(
     """Project source-selected binding owners onto canonical transaction IDs."""
     occurrence_owners: dict[str, str] = {}
     for row in source_rows:
-        owner = row.pop(_BOUND_OWNER_FIELD, None) or _saved_binding_owner(row, mappings)
+        owner = row.pop(_BOUND_OWNER_FIELD, None)
+        if owner is None and row.get(_BOUND_BINDING_ID_FIELD):
+            owner = row.get("owner") or None
+        if owner is None:
+            owner = _saved_binding_owner(row, mappings)
         transaction_id = row.get("transaction_id", "")
         if owner is not None and transaction_id:
             occurrence_owners[transaction_id] = owner

@@ -179,6 +179,126 @@ class AccountBindingWorkflowTest(unittest.TestCase):
                 },
             )
 
+    def test_explicit_binding_overrides_filename_mapping_without_changing_it(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary_root:
+            root = self._setup_workspace(temporary_root)
+            statement = root / "justin-may.csv"
+            statement.write_text(
+                "Date,Description,Amount,Currency\n"
+                "2026-05-07,SYNTHETIC EXPLICIT,-30.00,HKD\n",
+                encoding="utf-8",
+            )
+            filename_binding = self._bind(
+                root,
+                "justin-local",
+                "justin-*.csv",
+                "Justin",
+                "justin_local",
+                "Justin Local Account",
+            )
+            explicit_binding = self._bind(
+                root,
+                "franchesca-local",
+                "franchesca-*.csv",
+                "Franchesca",
+                "franchesca_local",
+                "Franchesca Local Account",
+            )
+            self.assertEqual(filename_binding.returncode, 0, filename_binding.stderr)
+            self.assertEqual(explicit_binding.returncode, 0, explicit_binding.stderr)
+            mappings_path = root / "profile_mappings.json"
+            mappings = json.loads(mappings_path.read_text(encoding="utf-8"))
+            selected_binding = next(
+                item
+                for item in mappings["account_bindings"]
+                if item["id"] == "franchesca-local"
+            )
+            selected_binding["id"] = "  franchesca-local  "
+            mappings_path.write_text(json.dumps(mappings), encoding="utf-8")
+            mappings_before = mappings_path.read_bytes()
+            mappings_stat_before = mappings_path.stat()
+
+            imported = self._run_cli(
+                [
+                    "import",
+                    str(statement),
+                    "--binding",
+                    "franchesca-local",
+                    "--no-interactive",
+                    "--json",
+                ],
+                cwd=root,
+            )
+
+            self.assertEqual(imported.returncode, 0, imported.stderr)
+            payload = json.loads(imported.stdout)
+            self.assertEqual(
+                payload["data"]["files"][0]["binding_id"], "franchesca-local"
+            )
+            self.assertEqual(
+                payload["data"]["files"][0]["binding_selection"], "explicit"
+            )
+            with (root / "output" / "categorized.csv").open(
+                newline="", encoding="utf-8"
+            ) as handle:
+                row = next(csv.DictReader(handle))
+            self.assertEqual(row["owner"], "Franchesca")
+            self.assertEqual(row["account_id"], "franchesca_local")
+            self.assertEqual(row["account"], "Franchesca Local Account")
+            self.assertNotIn("account_binding_id", row)
+            with (root / "output" / ".honeymoney-source-occurrences.csv").open(
+                newline="", encoding="utf-8"
+            ) as handle:
+                source_row = next(csv.DictReader(handle))
+            self.assertEqual(source_row["account_binding_id"], "franchesca-local")
+            self.assertEqual(mappings_path.read_bytes(), mappings_before)
+            self.assertEqual(mappings_path.stat().st_ino, mappings_stat_before.st_ino)
+
+            owner_correction = self._run_cli(
+                ["correct", "--file", "-", "--json"],
+                cwd=root,
+                input_text=json.dumps(
+                    [
+                        {
+                            "transaction_id": row["transaction_id"],
+                            "owner": "Justin",
+                        }
+                    ]
+                ),
+            )
+            self.assertEqual(owner_correction.returncode, 0, owner_correction.stderr)
+            with (root / "output" / "categorized.csv").open(
+                newline="", encoding="utf-8"
+            ) as handle:
+                corrected_row = next(csv.DictReader(handle))
+            self.assertEqual(corrected_row["owner"], "Franchesca")
+            with (root / "corrections.csv").open(
+                newline="", encoding="utf-8"
+            ) as handle:
+                correction = next(csv.DictReader(handle))
+            self.assertEqual(correction["owner"], "Franchesca")
+
+            replaced = self._run_cli(
+                [
+                    "import",
+                    str(statement),
+                    "--binding",
+                    "franchesca-local",
+                    "--replace",
+                ],
+                cwd=root,
+                input_text="q\n",
+            )
+            self.assertEqual(replaced.returncode, 0, replaced.stderr)
+            self.assertIn("Explicit account binding: franchesca-local", replaced.stdout)
+            self.assertEqual(mappings_path.read_bytes(), mappings_before)
+
+            help_result = self._run_cli(["import", "--help"], cwd=root)
+            self.assertEqual(help_result.returncode, 0, help_result.stderr)
+            self.assertIn("--binding ID", help_result.stdout)
+
     def test_incomplete_and_colliding_bindings_fail_without_changing_mappings(
         self,
     ) -> None:
@@ -239,7 +359,7 @@ class AccountBindingWorkflowTest(unittest.TestCase):
     def test_sectioned_profile_binds_every_emitted_account_to_one_owner(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_root:
             root = self._setup_workspace(temporary_root)
-            statement = root / "justin-hsbc-one.pdf"
+            statement = root / "manual-selection.pdf"
             fixture = (
                 REPO_ROOT
                 / "tests"
@@ -257,7 +377,7 @@ class AccountBindingWorkflowTest(unittest.TestCase):
                     "bind",
                     "justin-hsbc-one",
                     "--pattern",
-                    "justin-hsbc-*.pdf",
+                    "saved-name-only-*.pdf",
                     "--profile",
                     "hsbc_one_pdf",
                     "--owner",
@@ -274,10 +394,22 @@ class AccountBindingWorkflowTest(unittest.TestCase):
             )
             self.assertEqual(bound.returncode, 0, bound.stderr)
             imported = self._run_cli(
-                ["import", str(statement), "--no-interactive", "--json"],
+                [
+                    "import",
+                    str(statement),
+                    "--binding",
+                    "justin-hsbc-one",
+                    "--no-interactive",
+                    "--json",
+                ],
                 cwd=root,
             )
             self.assertEqual(imported.returncode, 0, imported.stderr)
+            payload = json.loads(imported.stdout)
+            self.assertEqual(payload["data"]["files"][0]["profile_id"], "hsbc_one_pdf")
+            self.assertEqual(
+                payload["data"]["files"][0]["binding_selection"], "explicit"
+            )
             with (root / "output" / "categorized.csv").open(
                 newline="", encoding="utf-8"
             ) as handle:
@@ -300,6 +432,28 @@ class AccountBindingWorkflowTest(unittest.TestCase):
                     "Justin HSBC Foreign Currency",
                 },
             )
+
+            config_path = root / "config.json"
+            config = json.loads(config_path.read_text(encoding="utf-8"))
+            config["pdf"]["enabled"] = False
+            config_path.write_text(json.dumps(config), encoding="utf-8")
+            disabled = self._run_cli(
+                [
+                    "import",
+                    str(statement),
+                    "--binding",
+                    "justin-hsbc-one",
+                    "--replace",
+                    "--no-interactive",
+                    "--json",
+                ],
+                cwd=root,
+            )
+            self.assertEqual(disabled.returncode, 0, disabled.stderr)
+            disabled_file = json.loads(disabled.stdout)["data"]["files"][0]
+            self.assertEqual(disabled_file["status"], "skipped")
+            self.assertEqual(disabled_file["binding_id"], "justin-hsbc-one")
+            self.assertEqual(disabled_file["binding_selection"], "explicit")
 
     def test_cli_replaces_one_binding_pattern_and_replay_is_unchanged(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_root:
@@ -921,6 +1075,125 @@ class AccountBindingWorkflowTest(unittest.TestCase):
                 artifacts,
             )
 
+    def test_explicit_binding_errors_leave_the_ledger_unchanged(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_root:
+            root = self._setup_workspace(temporary_root)
+            statement = root / "manual.csv"
+            statement.write_text(
+                "Date,Description,Amount,Currency\n"
+                "2026-05-08,SYNTHETIC SAFE ERROR,-40.00,HKD\n",
+                encoding="utf-8",
+            )
+            bound = self._bind(
+                root,
+                "justin-local",
+                "saved-name-only-*.csv",
+                "Justin",
+                "justin_local",
+                "Justin Local Account",
+            )
+            self.assertEqual(bound.returncode, 0, bound.stderr)
+            ledger_path = root / "output" / "categorized.csv"
+
+            unknown = self._run_cli(
+                [
+                    "import",
+                    str(statement),
+                    "--binding",
+                    "unknown-binding",
+                    "--no-interactive",
+                    "--json",
+                ],
+                cwd=root,
+            )
+            self.assertEqual(unknown.returncode, 2, unknown.stderr)
+            self.assertEqual(
+                json.loads(unknown.stdout)["errors"][0]["message"],
+                "Unknown account binding: unknown-binding",
+            )
+            self.assertFalse(ledger_path.exists())
+
+            unsupported_statement = root / "manual.txt"
+            unsupported_statement.write_text("synthetic", encoding="utf-8")
+            unsupported = self._run_cli(
+                [
+                    "import",
+                    str(unsupported_statement),
+                    "--binding",
+                    "justin-local",
+                    "--no-interactive",
+                    "--json",
+                ],
+                cwd=root,
+            )
+            self.assertEqual(unsupported.returncode, 2, unsupported.stderr)
+            self.assertIn(
+                "which does not support .txt files",
+                json.loads(unsupported.stdout)["errors"][0]["message"],
+            )
+            self.assertFalse(ledger_path.exists())
+
+            directory = self._run_cli(
+                [
+                    "import",
+                    str(root),
+                    "--binding",
+                    "justin-local",
+                    "--no-interactive",
+                ],
+                cwd=root,
+            )
+            self.assertEqual(directory.returncode, 2, directory.stderr)
+            self.assertIn("--binding requires one CSV or PDF file", directory.stderr)
+            self.assertFalse(ledger_path.exists())
+
+            pdf_statement = root / "manual.pdf"
+            pdf_fixture = (
+                REPO_ROOT
+                / "tests"
+                / "fixtures"
+                / "import_profiles"
+                / "hsbc_one_pdf"
+                / "accepted_statement"
+                / "input.pdf"
+            )
+            pdf_statement.write_bytes(pdf_fixture.read_bytes())
+            incompatible = self._run_cli(
+                [
+                    "import",
+                    str(pdf_statement),
+                    "--binding",
+                    "justin-local",
+                    "--no-interactive",
+                    "--json",
+                ],
+                cwd=root,
+            )
+            self.assertEqual(incompatible.returncode, 2, incompatible.stderr)
+            self.assertIn(
+                "which does not support .pdf files",
+                json.loads(incompatible.stdout)["errors"][0]["message"],
+            )
+            self.assertFalse(ledger_path.exists())
+
+            mappings_path = root / "profile_mappings.json"
+            mappings = json.loads(mappings_path.read_text(encoding="utf-8"))
+            mappings["account_bindings"][0]["accounts"] = []
+            mappings_path.write_text(json.dumps(mappings), encoding="utf-8")
+            incomplete = self._run_cli(
+                [
+                    "import",
+                    str(statement),
+                    "--binding",
+                    "justin-local",
+                    "--no-interactive",
+                ],
+                cwd=root,
+            )
+            self.assertEqual(incomplete.returncode, 2, incomplete.stderr)
+            self.assertIn("accounts must be a non-empty JSON array", incomplete.stderr)
+            self.assertFalse(ledger_path.exists())
+
     def test_replace_under_new_binding_preserves_review_and_correction(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_root:
             root = self._setup_workspace(temporary_root)
@@ -991,7 +1264,7 @@ class AccountBindingWorkflowTest(unittest.TestCase):
             bound = self._bind(
                 root,
                 "justin-local",
-                "justin-existing.csv",
+                "saved-name-only.csv",
                 "Justin",
                 "justin_local",
                 "Justin Local Account",
@@ -1001,6 +1274,8 @@ class AccountBindingWorkflowTest(unittest.TestCase):
                 [
                     "import",
                     str(statement),
+                    "--binding",
+                    "justin-local",
                     "--replace",
                     "--no-interactive",
                     "--json",
@@ -1051,6 +1326,83 @@ class AccountBindingWorkflowTest(unittest.TestCase):
                 notes_row = next(csv.DictReader(handle))
             self.assertEqual(notes_row["owner"], "Justin")
             self.assertEqual(notes_row["notes"], "Synthetic note")
+
+    def test_reset_with_explicit_binding_clears_the_source_correction(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_root:
+            root = self._setup_workspace(temporary_root)
+            statement = root / "manual-reset.csv"
+            statement.write_text(
+                "Date,Description,Amount,Currency\n"
+                "2026-05-09,SYNTHETIC RESET REVIEW,-50.00,HKD\n",
+                encoding="utf-8",
+            )
+            bound = self._bind(
+                root,
+                "justin-local",
+                "saved-name-only.csv",
+                "Justin",
+                "justin_local",
+                "Justin Local Account",
+            )
+            self.assertEqual(bound.returncode, 0, bound.stderr)
+            imported = self._run_cli(
+                [
+                    "import",
+                    str(statement),
+                    "--binding",
+                    "justin-local",
+                    "--no-interactive",
+                    "--json",
+                ],
+                cwd=root,
+            )
+            self.assertEqual(imported.returncode, 0, imported.stderr)
+            ledger_path = root / "output" / "categorized.csv"
+            with ledger_path.open(newline="", encoding="utf-8") as handle:
+                imported_row = next(csv.DictReader(handle))
+            reviewed = self._run_cli(
+                ["correct", "--file", "-", "--json"],
+                cwd=root,
+                input_text=json.dumps(
+                    [
+                        {
+                            "transaction_id": imported_row["transaction_id"],
+                            "category": "Shopping",
+                        }
+                    ]
+                ),
+            )
+            self.assertEqual(reviewed.returncode, 0, reviewed.stderr)
+
+            reset = self._run_cli(
+                [
+                    "import",
+                    str(statement),
+                    "--binding",
+                    "justin-local",
+                    "--reset",
+                    "--no-interactive",
+                    "--json",
+                ],
+                cwd=root,
+            )
+
+            self.assertEqual(reset.returncode, 0, reset.stderr)
+            payload = json.loads(reset.stdout)
+            self.assertTrue(payload["data"]["reset"])
+            self.assertEqual(
+                payload["data"]["files"][0]["binding_selection"], "explicit"
+            )
+            with ledger_path.open(newline="", encoding="utf-8") as handle:
+                reset_row = next(csv.DictReader(handle))
+            self.assertEqual(reset_row["owner"], "Justin")
+            self.assertEqual(reset_row["account_id"], "justin_local")
+            self.assertNotEqual(reset_row["category"], "Shopping")
+            with (root / "corrections.csv").open(
+                newline="", encoding="utf-8"
+            ) as handle:
+                corrections = list(csv.DictReader(handle))
+            self.assertEqual(corrections, [])
 
     def test_binding_owner_does_not_change_an_unbound_matching_account_id(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_root:

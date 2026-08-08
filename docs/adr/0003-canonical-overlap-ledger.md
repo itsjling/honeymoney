@@ -5,8 +5,9 @@
 - Issue: GitHub #32
 - Narrows: ADR 0001 for the public canonical ledger and ADR 0002 for canonical
   local-memory evidence
-- Amended: ADR 0004 adds valuation and review-reason fields; GitHub #60 adds
-  statement-section evidence
+- Amended: ADR 0004 adds valuation and review-reason fields; ADR 0005 adds rate
+  metadata; GitHub #60 adds statement-section evidence; GitHub #88 adds hidden
+  account-binding provenance
 
 ## Context
 
@@ -80,11 +81,16 @@ canonicalization, balance checks, or public output.
 An active evidence row carries the source's current revision. A retired row
 carries its allocation-origin revision, which keeps its tombstone checkable
 after later source revisions.
+When an import applies a saved account binding, the row stores its trimmed,
+non-sensitive ID in `account_binding_id`. Unbound rows leave it empty. The
+public ledger omits this field. Later corrections use the hidden ID and bound
+source owner to retain binding owner priority without consulting filename
+rules.
 
 The exact hidden source header is:
 
 ```text
-transaction_id,source_id,source_namespace_id,source_revision,source_record_id,date,transaction_date,posting_date,account_id,account,account_type,institution,country,original_amount,original_currency,posted_amount,posted_currency,amount_hkd,valuation_source,valuation_status,statement_opening_balance,statement_closing_balance,statement_section,merchant,original_description,category,flow_type,flow_source,transfer_group_id,paired_transaction_id,reconciliation_status,reconciliation_confidence,owner,payment_method,confidence,needs_review,review_reasons,reason,flags,notes,source_file,source_page,source_row
+transaction_id,source_id,source_namespace_id,source_revision,source_record_id,date,transaction_date,posting_date,account_id,account,account_binding_id,account_type,institution,country,original_amount,original_currency,posted_amount,posted_currency,amount_hkd,valuation_source,valuation_status,valuation_rate_date,valuation_provider,statement_opening_balance,statement_closing_balance,statement_section,merchant,original_description,category,flow_type,flow_source,transfer_group_id,paired_transaction_id,reconciliation_status,reconciliation_confidence,owner,payment_method,confidence,needs_review,review_reasons,reason,flags,notes,source_file,source_page,source_row
 ```
 
 ### Hidden overlap manifest
@@ -142,13 +148,13 @@ file is reconstructed from canonical rows.
 The exact `categorized.csv` header is:
 
 ```text
-transaction_id,canonical_group_id,canonical_slot,provenance_status,source_occurrence_count,source_id,source_namespace_id,source_revision,source_record_id,date,transaction_date,posting_date,account_id,account,account_type,institution,country,original_amount,original_currency,posted_amount,posted_currency,amount_hkd,valuation_source,valuation_status,statement_opening_balance,statement_closing_balance,statement_section,merchant,original_description,category,flow_type,flow_source,transfer_group_id,paired_transaction_id,reconciliation_status,reconciliation_confidence,owner,payment_method,confidence,needs_review,review_reasons,reason,flags,notes,source_file,source_page,source_row
+transaction_id,canonical_group_id,canonical_slot,provenance_status,source_occurrence_count,source_id,source_namespace_id,source_revision,source_record_id,date,transaction_date,posting_date,account_id,account,account_type,institution,country,original_amount,original_currency,posted_amount,posted_currency,amount_hkd,valuation_source,valuation_status,valuation_rate_date,valuation_provider,statement_opening_balance,statement_closing_balance,statement_section,merchant,original_description,category,flow_type,flow_source,transfer_group_id,paired_transaction_id,reconciliation_status,reconciliation_confidence,owner,payment_method,confidence,needs_review,review_reasons,reason,flags,notes,source_file,source_page,source_row
 ```
 
 The exact `review_needed.csv` header is:
 
 ```text
-transaction_id,canonical_group_id,canonical_slot,provenance_status,source_occurrence_count,source_id,source_namespace_id,source_revision,source_record_id,date,transaction_date,posting_date,account_id,account,account_type,institution,country,original_amount,original_currency,posted_amount,posted_currency,amount_hkd,valuation_source,valuation_status,statement_opening_balance,statement_closing_balance,statement_section,merchant,original_description,suggested_category,suggested_flow_type,transfer_group_id,paired_transaction_id,reconciliation_status,suggested_owner,suggested_payment_method,category,flow_type,owner,payment_method,confidence,review_reasons,review_reason_labels,reason,flags,notes,source_file,source_page,source_row
+transaction_id,canonical_group_id,canonical_slot,provenance_status,source_occurrence_count,source_id,source_namespace_id,source_revision,source_record_id,date,transaction_date,posting_date,account_id,account,account_type,institution,country,original_amount,original_currency,posted_amount,posted_currency,amount_hkd,valuation_source,valuation_status,valuation_rate_date,valuation_provider,statement_opening_balance,statement_closing_balance,statement_section,merchant,original_description,suggested_category,suggested_flow_type,transfer_group_id,paired_transaction_id,reconciliation_status,suggested_owner,suggested_payment_method,category,flow_type,owner,payment_method,confidence,review_reasons,review_reason_labels,reason,flags,notes,source_file,source_page,source_row
 ```
 
 Canonical rows populate all four. Their four source identity fields and three
@@ -325,6 +331,12 @@ Replacement and reset retain normalized evidence for retired identity records
 in the hidden source-occurrence CSV. The identity manifest remains the source
 of active or retired state. A restore can therefore check old facts without
 putting retired rows back into balances or the canonical ledger.
+
+The prior exact hidden header without `account_binding_id` remains a valid
+migration input. Reads supply an empty value and do not change disk. The next
+ledger generation writes the current header through the same recoverable
+boundary. This migration does not change `categorized.csv`; old rows cannot
+claim a binding that they did not record.
 
 The only automatic migration input is the exact ADR 0001/#31 state: a valid v2
 public ledger and identity manifest with neither new hidden artifact. Migration
