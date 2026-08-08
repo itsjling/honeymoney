@@ -99,6 +99,10 @@ declared account; profiles with row-supplied account IDs check every emitted
 ID. Binding validation rejects incomplete maps, conflicting filename matches,
 and target account IDs shared by distinct bindings before a ledger write. The
 pipeline restores the bound owner after rules and corrections run.
+Pattern replacement and removal validate the full mapping and profile set
+before one atomic mapping-file write. Removing a binding's final pattern also
+removes that binding. Small value-free removal receipts make exact command
+retries idempotent without retaining owner or account maps.
 
 Each operation writes and flushes complete staged files and prior-file backups
 before replacing any public path. Non-ledger artifacts are replaced first and

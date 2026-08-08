@@ -25,6 +25,8 @@ from honeymoney.account_bindings import (
     binding_views,
     canonical_bound_owners,
     enforce_bound_owners,
+    remove_binding_pattern,
+    replace_binding_pattern,
     upsert_binding,
     validate_bindings_for_profiles,
     validate_profile_mappings,
@@ -1011,6 +1013,10 @@ Commands:
                                    Confirm one same-account cash-movement pair
   honeymoney profile validate ... Validate a profile and optionally preview input
   honeymoney profile bind ID ... Save a filename-to-account binding
+  honeymoney profile replace-pattern ID ...
+                                   Replace one saved binding pattern
+  honeymoney profile remove-pattern ID ...
+                                   Remove one saved binding pattern
   honeymoney profile bindings    List saved account bindings
   honeymoney evaluate LEDGER --reference CORRECTIONS
                                    Report category coverage and exact accuracy
@@ -2768,6 +2774,10 @@ def _import_command(argv: list[str]) -> int:
 def _profile_command(argv: list[str]) -> int:
     if argv and argv[0] == "bind":
         return _profile_bind_command(argv[1:])
+    if argv and argv[0] == "replace-pattern":
+        return _profile_replace_pattern_command(argv[1:])
+    if argv and argv[0] == "remove-pattern":
+        return _profile_remove_pattern_command(argv[1:])
     if argv and argv[0] == "bindings":
         return _profile_bindings_command(argv[1:])
     parser = _command_parser(
@@ -2954,6 +2964,151 @@ def _parse_bound_account(value: str) -> dict[str, str]:
         "account_id": parts[1].strip(),
         "account": parts[2].strip(),
     }
+
+
+def _profile_replace_pattern_command(argv: list[str]) -> int:
+    parser = _command_parser(
+        argv,
+        prog="honeymoney profile replace-pattern",
+        description="Replace one saved account-binding filename pattern.",
+    )
+    parser.add_argument("binding_id", metavar="ID")
+    parser.add_argument("--old-pattern", required=True)
+    parser.add_argument("--new-pattern", required=True)
+    parser.add_argument("--config", dest="config_path")
+    parser.add_argument("--json", action="store_true")
+    args = parser.parse_args(argv)
+    for field, value in (
+        ("binding id", args.binding_id),
+        ("old filename pattern", args.old_pattern),
+        ("new filename pattern", args.new_pattern),
+    ):
+        if not value.strip():
+            raise ValueError(f"Account {field} must be a non-empty string")
+
+    binding_id = args.binding_id.strip()
+    old_pattern = args.old_pattern.strip()
+    new_pattern = args.new_pattern.strip()
+    config = _load_config_read_only(args.config_path)
+    profiles = importers._load_profiles(config)
+    mappings = importers._load_profile_mappings(config)
+    validate_bindings_for_profiles(mappings, profiles)
+    next_mappings, changed = replace_binding_pattern(
+        mappings,
+        binding_id,
+        old_pattern,
+        new_pattern,
+    )
+    validate_profile_mappings(next_mappings, config)
+    validate_bindings_for_profiles(next_mappings, profiles)
+    binding = next(
+        item for item in binding_views(next_mappings) if item.get("id") == binding_id
+    )
+    mapping_value = config.get("profile_mappings")
+    if not isinstance(mapping_value, str) or not mapping_value.strip():
+        raise ValueError("Config must define a profile_mappings JSON path")
+    mapping_path = Path(mapping_value)
+    if changed:
+        ensure_private_directory(mapping_path.parent)
+        private_atomic_write_text(
+            mapping_path,
+            json.dumps(next_mappings, indent=2, sort_keys=True) + "\n",
+        )
+    data = {
+        "binding_id": binding_id,
+        "changed": changed,
+        "new_pattern": new_pattern,
+        "old_pattern": old_pattern,
+        "profile": binding["profile"],
+        "result": "replaced" if changed else "already_replaced",
+    }
+    if args.json:
+        _emit_json(
+            "profile.replace-pattern",
+            "success",
+            data=data,
+            artifacts={"profile_mappings_json": str(mapping_path)},
+        )
+    elif changed:
+        print(
+            f"Replaced account binding {binding_id} pattern "
+            f"{old_pattern} with {new_pattern}."
+        )
+    else:
+        print(
+            f"Account binding {binding_id} already uses {new_pattern}; "
+            "profile mappings unchanged."
+        )
+    return 0
+
+
+def _profile_remove_pattern_command(argv: list[str]) -> int:
+    parser = _command_parser(
+        argv,
+        prog="honeymoney profile remove-pattern",
+        description="Remove one saved account-binding filename pattern.",
+    )
+    parser.add_argument("binding_id", metavar="ID")
+    parser.add_argument("--pattern", required=True)
+    parser.add_argument("--yes", action="store_true")
+    parser.add_argument("--config", dest="config_path")
+    parser.add_argument("--json", action="store_true")
+    args = parser.parse_args(argv)
+    for field, value in (
+        ("binding id", args.binding_id),
+        ("filename pattern", args.pattern),
+    ):
+        if not value.strip():
+            raise ValueError(f"Account {field} must be a non-empty string")
+
+    binding_id = args.binding_id.strip()
+    pattern = args.pattern.strip()
+    config = _load_config_read_only(args.config_path)
+    profiles = importers._load_profiles(config)
+    mappings = importers._load_profile_mappings(config)
+    validate_bindings_for_profiles(mappings, profiles)
+    next_mappings, changed, binding_removed, selected_profile = remove_binding_pattern(
+        mappings,
+        binding_id,
+        pattern,
+        confirm_final=args.yes,
+    )
+    validate_profile_mappings(next_mappings, config)
+    validate_bindings_for_profiles(next_mappings, profiles)
+    mapping_value = config.get("profile_mappings")
+    if not isinstance(mapping_value, str) or not mapping_value.strip():
+        raise ValueError("Config must define a profile_mappings JSON path")
+    mapping_path = Path(mapping_value)
+    if changed:
+        ensure_private_directory(mapping_path.parent)
+        private_atomic_write_text(
+            mapping_path,
+            json.dumps(next_mappings, indent=2, sort_keys=True) + "\n",
+        )
+    data = {
+        "binding_id": binding_id,
+        "binding_removed": binding_removed,
+        "changed": changed,
+        "pattern": pattern,
+        "profile": selected_profile,
+        "result": "removed" if changed else "already_removed",
+    }
+    if args.json:
+        _emit_json(
+            "profile.remove-pattern",
+            "success",
+            data=data,
+            artifacts={"profile_mappings_json": str(mapping_path)},
+        )
+    elif changed:
+        suffix = " and removed the unused binding" if binding_removed else ""
+        print(f"Removed {pattern} from account binding {binding_id}{suffix}.")
+    else:
+        print(
+            f"Account binding {binding_id} pattern {pattern} is already removed; "
+            "profile mappings unchanged."
+        )
+    return 0
 
 
 def _profile_bindings_command(argv: list[str]) -> int:
@@ -5938,6 +6093,10 @@ def _identity_error_details(error: IdentityError) -> dict[str, Any]:
 
 
 def _json_error_command(argv: list[str]) -> str:
+    if len(argv) > 1 and argv[:2] == ["profile", "remove-pattern"]:
+        return "profile.remove-pattern"
+    if len(argv) > 1 and argv[:2] == ["profile", "replace-pattern"]:
+        return "profile.replace-pattern"
     if len(argv) > 1 and argv[:2] == ["profile", "bind"]:
         return "profile.bind"
     if len(argv) > 1 and argv[:2] == ["profile", "bindings"]:

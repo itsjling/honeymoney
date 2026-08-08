@@ -137,6 +137,28 @@ honeymoney profile bindings
 honeymoney profile bindings --json
 ```
 
+`profile bind` adds a pattern and creates or updates its binding. To change a
+saved pattern without re-entering the owner and account maps, replace it in one
+checked write:
+
+```bash
+honeymoney profile replace-pattern justin-local \
+  --old-pattern 'justin-*.csv' \
+  --new-pattern 'justin-card-*.csv'
+```
+
+To stop using one pattern, remove it from the binding:
+
+```bash
+honeymoney profile remove-pattern justin-local \
+  --pattern 'justin-card-*.csv'
+```
+
+Other patterns on that binding stay in place. Removing its final pattern also
+removes the unused binding, so that case requires `--yes`. Both commands accept
+`--json`. An exact retry reports that nothing changed and does not write the
+mappings file.
+
 Each `--account` value has the form
 `PROFILE_ACCOUNT_ID=BOUND_ACCOUNT_ID=READABLE_ACCOUNT_NAME`. Repeat it for a
 sectioned profile. For `hsbc_one_pdf`, bind `hsbc_one_hkd_savings`,
@@ -404,7 +426,8 @@ Prints or edits the active `config.json`; pass `--config PATH` to target another
 ## Structured agent commands
 
 `setup`, `run`, `import`, `status`, `report`, `config`, `profile validate`,
-`profile bind`, `profile bindings`,
+`profile bind`, `profile replace-pattern`, `profile remove-pattern`, `profile
+bindings`,
 `evaluate`, `learn`, `valuation missing`, `source-data inspect`, `source-data
 resolve`, `rates import`, `rates fetch`, and fully specified one-shot `review`
 accept `--json`. JSON mode prints exactly one versioned document to stdout,
