@@ -94,11 +94,15 @@ as its coordination lock. Rate-cache and ledger recovery share that lock.
 Bundled profiles define statement parsing. User-owned account bindings in
 `profile_mappings.json` map each filename pattern and emitted profile account
 ID to an owner, unique account ID, and display name. A filename match selects
-the profile and binding together. Sectioned profiles require a map for every
-declared account; profiles with row-supplied account IDs check every emitted
-ID. Binding validation rejects incomplete maps, conflicting filename matches,
-and target account IDs shared by distinct bindings before a ledger write. The
-pipeline restores the bound owner after rules and corrections run.
+the profile and binding together. A single-file `import --binding ID` selects
+the saved binding and its profile without using or changing filename rules.
+Sectioned profiles require a map for every declared account; profiles with
+row-supplied account IDs check every emitted ID. Binding validation rejects
+incomplete maps, conflicting filename matches, and target account IDs shared
+by distinct bindings before a ledger write. The pipeline restores the bound
+owner after rules and corrections run. Hidden source evidence keeps the safe
+binding ID so later corrections retain that owner priority; the public ledger
+does not add a binding column.
 Pattern replacement and removal validate the full mapping and profile set
 before one atomic mapping-file write. Removing a binding's final pattern also
 removes that binding. Small value-free edit receipts make exact command

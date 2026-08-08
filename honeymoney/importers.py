@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any, Callable, TypeAlias
 
 from honeymoney.account_bindings import (
+    AccountBinding,
     AccountBindingError,
     apply_binding,
     binding_for_source,
@@ -859,10 +860,45 @@ def _apply_source_account_binding(
     profile: dict[str, Any],
     profile_mappings: dict[str, Any],
     imported: list[dict[str, str]],
+    explicit_binding: AccountBinding | None = None,
 ) -> dict[str, str]:
-    binding = binding_for_source(input_file, profile, profile_mappings)
+    binding = explicit_binding or binding_for_source(
+        input_file, profile, profile_mappings
+    )
     apply_binding(imported, binding)
-    return {"binding_id": binding["id"]} if binding else {}
+    if binding is None:
+        return {}
+    result = {"binding_id": binding["id"]}
+    if explicit_binding is not None:
+        result["binding_selection"] = "explicit"
+    return result
+
+
+def _explicit_binding_profile(
+    input_file: Path,
+    profiles: list[dict[str, Any]],
+    binding: AccountBinding,
+) -> dict[str, Any]:
+    profile = next(
+        (
+            candidate
+            for candidate in profiles
+            if str(candidate.get("id") or candidate.get("account_id") or "")
+            == binding["profile"]
+        ),
+        None,
+    )
+    if profile is None:
+        raise AccountBindingError(
+            f"Account binding {binding['id']} uses unknown profile {binding['profile']}"
+        )
+    parser_kind = input_file.suffix.lower().lstrip(".")
+    if parser_kind not in {"csv", "pdf"} or parser_kind not in profile:
+        raise AccountBindingError(
+            f"Account binding {binding['id']} uses profile {binding['profile']}, "
+            f"which does not support {input_file.suffix.lower() or 'this file type'} files"
+        )
+    return profile
 
 
 def _import_transactions(
@@ -874,6 +910,7 @@ def _import_transactions(
     profile_mappings: dict[str, Any],
     profile_mappings_path: str | None,
     *,
+    explicit_binding: AccountBinding | None = None,
     include_identity_sources: bool = False,
     status: Callable[[str], None] | None = None,
     clear_status: Callable[[], None] | None = None,
@@ -898,6 +935,19 @@ def _import_transactions(
             f"Importing statements... ({file_number}/{len(input_files)}) {input_file.name}"
         )
         suffix = input_file.suffix.lower()
+        explicit_profile = (
+            _explicit_binding_profile(input_file, profiles, explicit_binding)
+            if explicit_binding is not None
+            else None
+        )
+        explicit_binding_fields = (
+            {
+                "binding_id": explicit_binding["id"],
+                "binding_selection": "explicit",
+            }
+            if explicit_binding is not None
+            else {}
+        )
         if suffix == ".pdf":
             if config.get("pdf", {}).get("enabled") is False:
                 warning = (
@@ -910,17 +960,22 @@ def _import_transactions(
                         "source_file": _relative_source(input_file, input_root),
                         "status": "skipped",
                         "reason": warning,
+                        **explicit_binding_fields,
                     }
                 )
                 continue
             try:
-                profile = _select_pdf_profile(
-                    input_file,
-                    profiles,
-                    interactive,
-                    profile_mappings,
-                    profile_mappings_path,
-                    clear_status,
+                profile = (
+                    explicit_profile
+                    if explicit_profile is not None
+                    else _select_pdf_profile(
+                        input_file,
+                        profiles,
+                        interactive,
+                        profile_mappings,
+                        profile_mappings_path,
+                        clear_status,
+                    )
                 )
                 source_snapshot = (
                     _capture_input_source(input_file, config)
@@ -945,7 +1000,11 @@ def _import_transactions(
                         input_file, profile, config, input_root
                     )
                 binding_fields = _apply_source_account_binding(
-                    input_file, profile, profile_mappings, imported
+                    input_file,
+                    profile,
+                    profile_mappings,
+                    imported,
+                    explicit_binding,
                 )
                 warnings.extend(pdf_warnings)
             except AccountBindingError:
@@ -961,6 +1020,7 @@ def _import_transactions(
                         "source_file": _relative_source(input_file, input_root),
                         "status": "failed",
                         "reason": warning,
+                        **explicit_binding_fields,
                     }
                 )
                 continue
@@ -972,6 +1032,7 @@ def _import_transactions(
                         "source_file": _relative_source(input_file, input_root),
                         "status": "failed",
                         "reason": warning,
+                        **explicit_binding_fields,
                     }
                 )
                 continue
@@ -1009,16 +1070,24 @@ def _import_transactions(
             if include_identity_sources
             else None
         )
-        profile, prompted_for_profile = _select_csv_profile(
-            input_file,
-            profiles,
-            interactive,
-            profile_mappings,
-            clear_status,
-            source_bytes=(
-                source_snapshot.source_bytes if source_snapshot is not None else None
-            ),
-        )
+        if explicit_binding is not None:
+            if explicit_profile is None:
+                raise AssertionError("Explicit binding profile was not selected")
+            profile = explicit_profile
+            prompted_for_profile = False
+        else:
+            profile, prompted_for_profile = _select_csv_profile(
+                input_file,
+                profiles,
+                interactive,
+                profile_mappings,
+                clear_status,
+                source_bytes=(
+                    source_snapshot.source_bytes
+                    if source_snapshot is not None
+                    else None
+                ),
+            )
         if include_identity_sources:
             if source_snapshot is None:
                 raise AssertionError("Identity import requires a source snapshot")
@@ -1033,7 +1102,11 @@ def _import_transactions(
         else:
             imported = _import_csv(input_file, profile, config, input_root)
         binding_fields = _apply_source_account_binding(
-            input_file, profile, profile_mappings, imported
+            input_file,
+            profile,
+            profile_mappings,
+            imported,
+            explicit_binding,
         )
         if prompted_for_profile:
             _maybe_save_profile_mapping(input_file, profile, profile_mappings_path)

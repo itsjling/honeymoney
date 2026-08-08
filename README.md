@@ -175,6 +175,20 @@ an owner stored in a rule or carried correction. Conflicting filename rules,
 missing account maps, and account IDs shared by two bindings fail before the
 ledger changes.
 
+Select a saved binding for one file when its name does not match the saved
+rule, or when another rule would match:
+
+```bash
+honeymoney import ./manual-statement.csv --binding franchesca-local
+honeymoney import ./manual-statement.csv --binding franchesca-local --json
+```
+
+The explicit binding selects its parser profile, owner, and account names and
+IDs for that import. It does not edit saved filename rules. The command rejects
+folders, unknown or incomplete bindings, and bindings whose profile does not
+support the file type before it changes the ledger. `--replace` and `--reset`
+work as they do for filename-selected bindings.
+
 ```bash
 honeymoney run
 ```
@@ -182,10 +196,12 @@ honeymoney run
 Processes the configured input files and writes output files. It reads `config.json` from the current directory unless you pass `--config`.
 
 ```bash
-honeymoney import [PATH]
+honeymoney import [PATH] [--binding ID]
 ```
 
 Processes one pasted file or folder path. If `PATH` is omitted, the command prompts you to paste it.
+`--binding` accepts one file only and reports the selected binding ID in both
+human and JSON results.
 
 After each import, any records that could not be auto-categorized are offered for interactive categorization: pick a category number, press Enter to skip one, or enter `q` to skip the rest. Your picks are saved to `corrections.csv` so they stick on future runs. Pass `--no-interactive` to skip the prompts.
 

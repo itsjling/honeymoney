@@ -7,6 +7,7 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Mapping, cast
 
+from honeymoney.account_bindings import canonical_bound_owners, enforce_bound_owners
 from honeymoney.contracts import Config
 from honeymoney.csv_artifacts import csv_document, read_csv_artifact
 from honeymoney.duplicates import (
@@ -670,11 +671,25 @@ def apply_correction_operation(
         operation_overlap_result = canonicalize_overlaps(
             source_rows, ledger_rows, operation_overlap_manifest
         )
+    bound_owner_updates = canonical_bound_owners(
+        source_rows,
+        (
+            operation_overlap_result.diagnostic["groups"]
+            if operation_overlap_result is not None
+            else []
+        ),
+        {},
+    )
 
     baseline_ledger = [dict(row) for row in ledger_rows]
     reconcile_ledger(baseline_ledger, config, statement_rows=source_rows)
     corrected_ledger = [dict(row) for row in ledger_rows]
     apply_corrections(corrected_ledger, effective_batch)
+    enforce_bound_owners(corrected_ledger, bound_owner_updates)
+    for transaction_id, owner in bound_owner_updates.items():
+        bound_correction = merged_corrections.get(transaction_id)
+        if bound_correction is not None and "owner" in bound_correction:
+            bound_correction["owner"] = owner
     reconcile_ledger(corrected_ledger, config, statement_rows=source_rows)
     refresh_duplicate_candidates(
         corrected_ledger,

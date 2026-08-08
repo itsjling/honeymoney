@@ -22,6 +22,8 @@ from typing import Any, Mapping, Sequence
 
 from honeymoney import importers, normalization
 from honeymoney.account_bindings import (
+    AccountBinding,
+    binding_by_id,
     binding_views,
     canonical_bound_owners,
     enforce_bound_owners,
@@ -389,6 +391,7 @@ def _run_pipeline(
     argv: list[str],
     print_import_summary: bool = False,
     json_command: str = "run",
+    explicit_binding_id: str | None = None,
 ) -> int:
     parser = _command_parser(
         argv,
@@ -416,6 +419,8 @@ def _run_pipeline(
     input_path = Path(args.input_path or config["paths"]["input"])
     if not input_path.exists():
         raise ValueError(f"Input path does not exist: {input_path}")
+    if explicit_binding_id is not None and not input_path.is_file():
+        raise ValueError("honeymoney import --binding requires one CSV or PDF file")
     categorized_path = Path(args.output_path or config["paths"]["output"])
     output_dir = categorized_path.parent
     review_needed_path = output_dir / "review_needed.csv"
@@ -427,6 +432,10 @@ def _run_pipeline(
     profiles = importers._load_profiles(config)
     profile_mappings = importers._load_profile_mappings(config)
     validate_bindings_for_profiles(profile_mappings, profiles)
+    explicit_binding: AccountBinding | None = None
+    if explicit_binding_id is not None:
+        explicit_binding = binding_by_id(profile_mappings, explicit_binding_id)
+        importers._explicit_binding_profile(input_path, profiles, explicit_binding)
     expected_generation, identity_state = _load_configured_identity_generation(
         categorized_path,
         config,
@@ -479,6 +488,7 @@ def _run_pipeline(
             interactive=interactive,
             profile_mappings=profile_mappings,
             profile_mappings_path=config.get("profile_mappings"),
+            explicit_binding=explicit_binding,
             include_identity_sources=True,
             status=_status.update,
             clear_status=_status.clear,
@@ -1002,7 +1012,8 @@ Commands:
   honeymoney setup --upgrade --root DIR
                                    Safely refresh proven bundled profiles
   honeymoney run                   Process configured CSV/PDF exports
-  honeymoney import [PATH]         Import a pasted CSV/PDF path
+  honeymoney import [PATH] [--binding ID]
+                                   Import a pasted path with an optional binding
   honeymoney review [--category CATEGORY]
                                    Review queued or category-matched transactions
   honeymoney review [FILTERS]      Review filtered accounting flow decisions
@@ -2737,6 +2748,7 @@ def _import_command(argv: list[str]) -> int:
     parser.add_argument("--no-interactive", action="store_true")
     parser.add_argument("--replace", action="store_true")
     parser.add_argument("--reset", action="store_true")
+    parser.add_argument("--binding", metavar="ID")
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args(argv)
 
@@ -2748,6 +2760,9 @@ def _import_command(argv: list[str]) -> int:
     input_path = _clean_pasted_path(input_path)
     if not input_path:
         raise ValueError("No import path provided")
+    binding_id = args.binding.strip() if args.binding is not None else None
+    if args.binding is not None and not binding_id:
+        raise ValueError("--binding requires a non-empty binding id")
 
     run_args = ["--input", input_path]
     if args.config_path:
@@ -2768,6 +2783,7 @@ def _import_command(argv: list[str]) -> int:
         run_args,
         print_import_summary=not args.json,
         json_command="import",
+        explicit_binding_id=binding_id,
     )
 
 
@@ -3217,6 +3233,14 @@ def _print_import_summary(report: dict[str, Any]) -> None:
         f"{report['successful_record_count']} successful records, "
         f"{report['unsuccessful_record_count']} unsuccessful records"
     )
+    explicit_binding_ids = {
+        str(file_report.get("binding_id"))
+        for file_report in report.get("files", [])
+        if file_report.get("binding_selection") == "explicit"
+        and file_report.get("binding_id")
+    }
+    for binding_id in sorted(explicit_binding_ids):
+        print(f"Explicit account binding: {binding_id}")
     if report.get("migration", {}).get("legacy_review_state_applied"):
         print(
             "Migration: legacy review decisions were made explicit before replacement"

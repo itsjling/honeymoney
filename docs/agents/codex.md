@@ -77,6 +77,8 @@ JSON mode never prompts or opens a browser:
 honeymoney setup --upgrade --root ./money --dry-run --json
 honeymoney setup --upgrade --root ./money --yes --json
 honeymoney import /path/to/statement.csv --config ./money/config.json --json
+honeymoney import /path/to/statement.csv --config ./money/config.json \
+  --binding SAVED_BINDING_ID --json
 honeymoney status 2026-05 --config ./money/config.json --json
 honeymoney pending 2026-05 --config ./money/config.json --json
 honeymoney report 2026-05 --config ./money/config.json --json
