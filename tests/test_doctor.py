@@ -157,6 +157,49 @@ class DoctorAuditTest(unittest.TestCase):
             self.assertGreater(json.loads(fixed.stdout)["data"]["repaired_count"], 0)
             self.assertEqual(stat.S_IMODE((root / "rules.json").stat().st_mode), 0o600)
 
+    def test_fix_rebuilds_mode_repair_under_lock_for_changed_custom_config(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "workspace"
+            _healthy_workspace(root)
+            config = root / "custom-name.json"
+            (root / "config.json").replace(config)
+            os.chmod(config, 0o644)
+
+            updated = json.loads(config.read_text(encoding="utf-8"))
+            updated["categorization_memory"] = {"enabled": False}
+            updated_config = (
+                json.dumps(updated, sort_keys=True, separators=(",", ":")) + "\n"
+            ).encode("utf-8")
+
+            initial_plan = build_repair_plan(root, config_path=config)
+
+            def update_before_lock(workspace_root: Path) -> WorkspaceLock:
+                lock = WorkspaceLock(workspace_root)
+                config.write_bytes(updated_config)
+                os.chmod(config, 0o644)
+                return lock
+
+            with patch(
+                "honeymoney.doctor.WorkspaceLock",
+                side_effect=update_before_lock,
+            ):
+                fixed = fix_workspace(root, config_path=config)
+
+            self.assertEqual(
+                [(action.kind, action.path) for action in initial_plan.actions],
+                [(RepairActionKind.SET_PRIVATE_MODE, "custom-name.json")],
+            )
+            self.assertEqual(config.read_bytes(), updated_config)
+            self.assertEqual(stat.S_IMODE(config.stat().st_mode), 0o600)
+            self.assertEqual(
+                [(action.kind, action.path) for action in fixed.applied_actions],
+                [(RepairActionKind.SET_PRIVATE_MODE, "custom-name.json")],
+            )
+            self.assertEqual(fixed.plan.config_path, config.resolve())
+            self.assertTrue(fixed.healthy)
+
     def test_audit_accepts_a_setup_and_committed_synthetic_import(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary) / "workspace"

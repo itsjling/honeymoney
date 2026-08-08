@@ -175,6 +175,15 @@ def audit_workspace(
     config_path: Path | str | None = None,
 ) -> AuditResult:
     """Audit a workspace without changing it or opening statement input paths."""
+    return _audit_workspace(root, config_path=config_path, allow_live_lock=False)
+
+
+def _audit_workspace(
+    root: Path | str,
+    *,
+    config_path: Path | str | None = None,
+    allow_live_lock: bool,
+) -> AuditResult:
     root_path = Path(os.path.abspath(Path(root).expanduser()))
     selected_config_path = _doctor_config_path(root_path, config_path)
     if root_path.is_symlink():
@@ -262,7 +271,7 @@ def audit_workspace(
     ready_record_authorities: dict[str, _ReadyRecordAuthority] = {}
 
     lock_state = inspect_lock(paths.root)
-    if lock_state == "live":
+    if lock_state == "live" and not allow_live_lock:
         return _audit_result(
             paths,
             [
@@ -586,27 +595,37 @@ def fix_workspace(
         )
 
     if plan.actions[0].kind == RepairActionKind.SETTLE_RETAINED_PUBLICATION:
-        try:
-            settle_retained_publication(plan.root)
-        except PublicationError:
-            return FixResult(
-                before,
-                plan,
-                (),
-                audit_workspace(plan.root, config_path=plan.config_path),
-            )
-        after_recovery = audit_workspace(plan.root, config_path=plan.config_path)
-        follow_up = build_repair_plan(plan.root, audit=after_recovery)
-        if follow_up.blocked or not follow_up.actions:
-            return FixResult(
-                before,
-                plan,
-                plan.actions,
-                after_recovery,
-            )
-        return _apply_repair_plan(before, follow_up, prior_actions=plan.actions)
+        return _settle_repair_plan(before, plan)
 
     return _apply_repair_plan(before, plan)
+
+
+def _settle_repair_plan(
+    before: AuditResult,
+    plan: RepairPlan,
+    *,
+    prior_actions: tuple[RepairAction, ...] = (),
+) -> FixResult:
+    try:
+        settle_retained_publication(plan.root)
+    except PublicationError:
+        return FixResult(
+            before,
+            plan,
+            prior_actions,
+            audit_workspace(plan.root, config_path=plan.config_path),
+        )
+    after_recovery = audit_workspace(plan.root, config_path=plan.config_path)
+    follow_up = build_repair_plan(plan.root, audit=after_recovery)
+    settled_actions = (*prior_actions, *plan.actions)
+    if follow_up.blocked or not follow_up.actions:
+        return FixResult(
+            before,
+            plan,
+            settled_actions,
+            after_recovery,
+        )
+    return _apply_repair_plan(before, follow_up, prior_actions=settled_actions)
 
 
 def _apply_repair_plan(
@@ -637,41 +656,73 @@ def _apply_repair_plan(
             tuple(applied_actions),
             audit_workspace(paths.root, config_path=paths.config),
         )
-    targets_by_path: dict[str, PublicationTarget] = {}
-    for action in remaining_actions:
-        if action.content is None:
-            continue
-        target = PublicationTarget(action.path, action.content)
-        if action.kind == RepairActionKind.SET_PRIVATE_MODE:
-            targets_by_path.setdefault(action.path, target)
-        else:
-            targets_by_path[action.path] = target
-    targets = list(targets_by_path.values())
-    directory_targets = _repair_directory_targets(paths, remaining_actions, targets)
+    refreshed_plan = plan
+    settlement_required = False
     with WorkspaceLock(paths.root):
-        index = load_compatible_workspace_index(paths.workspace_index)
-        next_index = cast(dict[str, object], json.loads(json.dumps(index)))
-        generation_id = f"gen_{secrets.token_hex(32)}"
-        next_index["generation_id"] = generation_id
-        if directory_targets:
-            publish_generation(
-                paths.root,
-                generation_id,
+        locked_audit = _audit_workspace(
+            paths.root,
+            config_path=paths.config,
+            allow_live_lock=True,
+        )
+        refreshed_plan = build_repair_plan(paths.root, audit=locked_audit)
+        if (
+            not refreshed_plan.blocked
+            and refreshed_plan.actions
+            and refreshed_plan.actions[0].kind
+            != RepairActionKind.SETTLE_RETAINED_PUBLICATION
+        ):
+            targets_by_path: dict[str, PublicationTarget] = {}
+            for action in refreshed_plan.actions:
+                if action.content is None:
+                    continue
+                target = PublicationTarget(action.path, action.content)
+                if action.kind == RepairActionKind.SET_PRIVATE_MODE:
+                    targets_by_path.setdefault(action.path, target)
+                else:
+                    targets_by_path[action.path] = target
+            targets = list(targets_by_path.values())
+            directory_targets = _repair_directory_targets(
+                paths,
+                list(refreshed_plan.actions),
                 targets,
-                workspace_index_document(next_index).encode("utf-8"),
-                directory_targets=directory_targets,
             )
-        else:
-            publish_generation(
-                paths.root,
-                generation_id,
-                targets,
-                workspace_index_document(next_index).encode("utf-8"),
-            )
+            index = load_compatible_workspace_index(paths.workspace_index)
+            next_index = cast(dict[str, object], json.loads(json.dumps(index)))
+            generation_id = f"gen_{secrets.token_hex(32)}"
+            next_index["generation_id"] = generation_id
+            if directory_targets:
+                publish_generation(
+                    paths.root,
+                    generation_id,
+                    targets,
+                    workspace_index_document(next_index).encode("utf-8"),
+                    directory_targets=directory_targets,
+                )
+            else:
+                publish_generation(
+                    paths.root,
+                    generation_id,
+                    targets,
+                    workspace_index_document(next_index).encode("utf-8"),
+                )
+            applied_actions.extend(refreshed_plan.actions)
+        elif (
+            not refreshed_plan.blocked
+            and refreshed_plan.actions
+            and refreshed_plan.actions[0].kind
+            == RepairActionKind.SETTLE_RETAINED_PUBLICATION
+        ):
+            settlement_required = True
+    if settlement_required:
+        return _settle_repair_plan(
+            before,
+            refreshed_plan,
+            prior_actions=tuple(applied_actions),
+        )
     return FixResult(
         before,
-        plan,
-        (*applied_actions, *remaining_actions),
+        refreshed_plan,
+        tuple(applied_actions),
         audit_workspace(paths.root, config_path=paths.config),
     )
 
