@@ -2,6 +2,8 @@ import csv
 import hashlib
 import json
 import os
+import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -39,6 +41,58 @@ def _row(
 
 
 class ValuationImpactTest(unittest.TestCase):
+    def test_html_keeps_exact_decimal_totals_after_client_render(self) -> None:
+        browser = shutil.which("google-chrome") or shutil.which("chromium")
+        if browser is None:
+            chrome_app = Path(
+                "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+            )
+            browser = str(chrome_app) if chrome_app.exists() else None
+        if browser is None:
+            self.skipTest("Chrome or Chromium is required for the HTML render check")
+
+        large_income = _row(
+            "large_income",
+            "income",
+            amount_hkd="100000000000000.00",
+            posted_amount="100000000000000.00",
+            valuation_source="statement_posted",
+            valuation_status="actual",
+        )
+        cent_income = _row(
+            "cent_income",
+            "income",
+            amount_hkd="0.01",
+            posted_amount="0.01",
+            valuation_source="statement_posted",
+            valuation_status="actual",
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            report_path = Path(tmp) / "report.html"
+            report_path.write_text(
+                build_report_html([large_income, cent_income], "Synthetic period"),
+                encoding="utf-8",
+            )
+            rendered = subprocess.run(
+                [
+                    browser,
+                    "--headless=new",
+                    "--disable-gpu",
+                    "--no-sandbox",
+                    "--dump-dom",
+                    report_path.as_uri(),
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            ).stdout
+
+        match = re.search(r'id="tile-income">([^<]+)</div>', rendered)
+        self.assertIsNotNone(match, rendered)
+        assert match is not None
+        self.assertEqual(match.group(1), "100,000,000,000,000.01")
+
     def test_owner_filters_keep_status_report_and_html_on_the_same_rows(
         self,
     ) -> None:

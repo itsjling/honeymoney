@@ -476,6 +476,65 @@ _PAGE_TEMPLATE = """<!doctype html>
     "#c9a24b", "#8a8f4f", "#b06a8a", "#5f8a6b", "#a1725a", "#6b7f8f"
   ];
 
+  function decimalPower(power) { return 10n ** BigInt(power); }
+  function normalizeDecimal(value) {
+    while (value.scale > 0 && value.units % 10n === 0n) {
+      value = { units: value.units / 10n, scale: value.scale - 1 };
+    }
+    return value;
+  }
+  function parseDecimal(value) {
+    if (value === null || value === undefined) { return null; }
+    var match = String(value).match(/^([+-]?)([0-9]+)(?:\\.([0-9]+))?$/);
+    if (!match) { return null; }
+    var fraction = match[3] || "";
+    var units = BigInt(match[2] + fraction);
+    if (match[1] === "-") { units = -units; }
+    return normalizeDecimal({ units: units, scale: fraction.length });
+  }
+  function zeroDecimal() { return { units: 0n, scale: 0 }; }
+  function decimalAdd(left, right) {
+    var scale = Math.max(left.scale, right.scale);
+    return normalizeDecimal({
+      units: left.units * decimalPower(scale - left.scale) +
+        right.units * decimalPower(scale - right.scale),
+      scale: scale
+    });
+  }
+  function decimalAbs(value) {
+    return { units: value.units < 0n ? -value.units : value.units, scale: value.scale };
+  }
+  function decimalCompare(left, right) {
+    var scale = Math.max(left.scale, right.scale);
+    var leftUnits = left.units * decimalPower(scale - left.scale);
+    var rightUnits = right.units * decimalPower(scale - right.scale);
+    return leftUnits < rightUnits ? -1 : leftUnits > rightUnits ? 1 : 0;
+  }
+  function decimalIsZero(value) { return value.units === 0n; }
+  function decimalRatio(numerator, denominator) {
+    var precision = 1000000000n;
+    var scaledNumerator = numerator.units * decimalPower(denominator.scale) * precision;
+    var scaledDenominator = denominator.units * decimalPower(numerator.scale);
+    return Number(scaledNumerator / scaledDenominator) / Number(precision);
+  }
+  function decimalCents(value) {
+    var negative = value.units < 0n;
+    var units = negative ? -value.units : value.units;
+    if (value.scale < 2) {
+      units *= decimalPower(2 - value.scale);
+    } else if (value.scale > 2) {
+      var divisor = decimalPower(value.scale - 2);
+      var quotient = units / divisor;
+      var remainder = units % divisor;
+      var halfway = divisor / 2n;
+      if (remainder > halfway || (remainder === halfway && quotient % 2n === 1n)) {
+        quotient += 1n;
+      }
+      units = quotient;
+    }
+    return negative ? -units : units;
+  }
+
   var root = document.documentElement;
   var toggleBtn = document.getElementById("theme-toggle");
   var MODES = ["auto", "light", "dark"];
@@ -497,19 +556,33 @@ _PAGE_TEMPLATE = """<!doctype html>
 
   function fmt(v) {
     if (v === null || v === undefined) { return "n/a"; }
-    return v.toLocaleString("en", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    var cents = decimalCents(v);
+    var negative = cents < 0n;
+    var magnitude = negative ? -cents : cents;
+    var whole = (magnitude / 100n).toLocaleString("en");
+    var fraction = String(magnitude % 100n).padStart(2, "0");
+    return (negative ? "-" : "") + whole + "." + fraction;
   }
-  function signClass(v) { return v !== null && v < 0 ? "neg" : "pos"; }
+  function signClass(v) { return v !== null && v.units < 0n ? "neg" : "pos"; }
+
+  allRows.forEach(function (row) {
+    row.amount = parseDecimal(row.amount);
+    row.posted_amount = parseDecimal(row.posted_amount);
+  });
+  var MIN_CHART_MAGNITUDE = parseDecimal("0.005");
 
   var catMagnitude = {};
   allRows.forEach(function (row) {
     if (row.amount === null) { return; }
     var category = row.category || "Unknown";
-    catMagnitude[category] = (catMagnitude[category] || 0) + Math.abs(row.amount);
+    catMagnitude[category] = decimalAdd(
+      catMagnitude[category] || zeroDecimal(),
+      decimalAbs(row.amount)
+    );
   });
   var COLOR = {};
   Object.keys(catMagnitude)
-    .sort(function (a, b) { return catMagnitude[b] - catMagnitude[a]; })
+    .sort(function (a, b) { return decimalCompare(catMagnitude[b], catMagnitude[a]); })
     .forEach(function (category, index) { COLOR[category] = PALETTE[index % PALETTE.length]; });
   function colorFor(category) { return COLOR[category] || "var(--ink-faint)"; }
 
@@ -562,37 +635,41 @@ _PAGE_TEMPLATE = """<!doctype html>
 
   function flowSummary() {
     var result = {
-      spending: 0, income: 0, net: 0,
-      unresolved_inflow: 0, unresolved_outflow: 0, uncategorized: 0
+      spending: zeroDecimal(), income: zeroDecimal(), net: zeroDecimal(),
+      unresolved_inflow: zeroDecimal(), unresolved_outflow: zeroDecimal(),
+      uncategorized: 0
     };
     rows.forEach(function (row) {
       if (!row.category || row.category === "Unknown") { result.uncategorized += 1; }
       if (row.amount === null) { return; }
       var field = CASH_FLOW_FIELD[row.flow_type];
       if (field === "income") {
-        result.income += row.amount;
+        result.income = decimalAdd(result.income, row.amount);
       } else if (field) {
-        result.spending += row.amount;
-      } else if (row.flow_type === "unresolved" && row.amount > 0) {
-        result.unresolved_inflow += row.amount;
-      } else if (row.flow_type === "unresolved" && row.amount < 0) {
-        result.unresolved_outflow += row.amount;
+        result.spending = decimalAdd(result.spending, row.amount);
+      } else if (row.flow_type === "unresolved" && row.amount.units > 0n) {
+        result.unresolved_inflow = decimalAdd(result.unresolved_inflow, row.amount);
+      } else if (row.flow_type === "unresolved" && row.amount.units < 0n) {
+        result.unresolved_outflow = decimalAdd(result.unresolved_outflow, row.amount);
       }
     });
-    result.net = result.spending + result.income;
+    result.net = decimalAdd(result.spending, result.income);
     return result;
   }
 
   function emptyCashFlow() {
-    return { income: 0, spending: 0, refunds: 0, net_cash_flow: 0 };
+    return {
+      income: zeroDecimal(), spending: zeroDecimal(), refunds: zeroDecimal(),
+      net_cash_flow: zeroDecimal()
+    };
   }
 
   function addCashFlow(target, row) {
     if (row.amount === null) { return; }
     var field = CASH_FLOW_FIELD[row.flow_type];
     if (!field) { return; }
-    target[field] += row.amount;
-    target.net_cash_flow += row.amount;
+    target[field] = decimalAdd(target[field], row.amount);
+    target.net_cash_flow = decimalAdd(target.net_cash_flow, row.amount);
   }
 
   function valuationSummary() {
@@ -612,14 +689,15 @@ _PAGE_TEMPLATE = """<!doctype html>
       } else if (row.flow_type === "unresolved") {
         result.unresolved += 1;
       } else if (CASH_FLOW_FIELD[row.flow_type]) {
-        if (row.posted_amount === 0) { result.zero += 1; }
-        else { result.blocking += 1; }
+        if (row.posted_amount !== null && decimalIsZero(row.posted_amount)) {
+          result.zero += 1;
+        } else { result.blocking += 1; }
       } else {
         result.other += 1;
       }
     });
     ["income", "spending", "refunds", "net_cash_flow"].forEach(function (field) {
-      result.combined[field] = actual[field] + estimated[field];
+      result.combined[field] = decimalAdd(actual[field], estimated[field]);
     });
     return result;
   }
@@ -662,8 +740,8 @@ _PAGE_TEMPLATE = """<!doctype html>
       fmt(summary.unresolved_outflow);
     document.getElementById("tile-uncategorized").textContent = summary.uncategorized;
     var netEl = document.getElementById("tile-net");
-    netEl.classList.toggle("pos", summary.net >= 0);
-    netEl.classList.toggle("neg", summary.net < 0);
+    netEl.classList.toggle("pos", summary.net.units >= 0n);
+    netEl.classList.toggle("neg", summary.net.units < 0n);
 
     setCompleteness("missing-total", valuation.missing);
     setCompleteness("missing-blocking", valuation.blocking);
@@ -710,7 +788,7 @@ _PAGE_TEMPLATE = """<!doctype html>
       if (row.amount === null) { return; }
       if (excludeTransfers && !CONFIRMED[row.flow_type]) { return; }
       var category = row.category || "Unknown";
-      totals[category] = (totals[category] || 0) + row.amount;
+      totals[category] = decimalAdd(totals[category] || zeroDecimal(), row.amount);
       counts[category] = (counts[category] || 0) + 1;
       chartedCount += 1;
     });
@@ -718,17 +796,23 @@ _PAGE_TEMPLATE = """<!doctype html>
       .map(function (category) {
         return { category: category, sum: totals[category], count: counts[category] };
       })
-      .filter(function (entry) { return Math.abs(entry.sum) > 0.005; })
-      .sort(function (a, b) { return Math.abs(b.sum) - Math.abs(a.sum); });
+      .filter(function (entry) {
+        return decimalCompare(decimalAbs(entry.sum), MIN_CHART_MAGNITUDE) > 0;
+      })
+      .sort(function (a, b) {
+        return decimalCompare(decimalAbs(b.sum), decimalAbs(a.sum));
+      });
     return { entries: entries, chartedCount: chartedCount };
   }
 
   function renderPie(entries) {
     var svg = document.getElementById("pie");
     while (svg.firstChild) { svg.removeChild(svg.firstChild); }
-    var total = entries.reduce(function (acc, e) { return acc + Math.abs(e.sum); }, 0);
+    var total = entries.reduce(function (acc, entry) {
+      return decimalAdd(acc, decimalAbs(entry.sum));
+    }, zeroDecimal());
     var ns = "http://www.w3.org/2000/svg";
-    if (total) {
+    if (!decimalIsZero(total)) {
       if (entries.length === 1) {
         var circle = document.createElementNS(ns, "circle");
         circle.setAttribute("r", "1");
@@ -740,7 +824,7 @@ _PAGE_TEMPLATE = """<!doctype html>
       } else {
         var angle = -Math.PI / 2;
         entries.forEach(function (entry) {
-          var share = Math.abs(entry.sum) / total;
+          var share = decimalRatio(decimalAbs(entry.sum), total);
           var next = angle + share * 2 * Math.PI;
           var large = share > 0.5 ? 1 : 0;
           var path = document.createElementNS(ns, "path");
@@ -773,7 +857,9 @@ _PAGE_TEMPLATE = """<!doctype html>
       legend.innerHTML = '<tr><td class="empty">No amounts to chart in this view.</td></tr>';
       return;
     }
-    var total = entries.reduce(function (acc, e) { return acc + Math.abs(e.sum); }, 0);
+    var total = entries.reduce(function (acc, entry) {
+      return decimalAdd(acc, decimalAbs(entry.sum));
+    }, zeroDecimal());
     var head = legend.insertRow();
     [["Category", ""], ["Sum (HKD)", "amt"], ["Share", "amt"]].forEach(function (col) {
       var th = document.createElement("th");
@@ -801,7 +887,9 @@ _PAGE_TEMPLATE = """<!doctype html>
       sumCell.textContent = fmt(entry.sum);
       var shareCell = tr.insertCell();
       shareCell.className = "amt share";
-      shareCell.textContent = Math.round((Math.abs(entry.sum) / total) * 100) + "%";
+      shareCell.textContent = Math.round(
+        decimalRatio(decimalAbs(entry.sum), total) * 100
+      ) + "%";
     });
   }
 
@@ -1069,7 +1157,7 @@ def _balance_coverage_html(
 
 
 def _report_row(row: dict[str, str]) -> dict[str, object]:
-    amount = _amount_value(row.get("amount_hkd", ""))
+    amount = _amount_text(row.get("amount_hkd", ""))
     valuation_source = row.get("valuation_source", "")
     return {
         "date": row.get("date", ""),
@@ -1077,7 +1165,7 @@ def _report_row(row: dict[str, str]) -> dict[str, object]:
         "category": row.get("category", ""),
         "flow_type": row.get("flow_type", "unresolved"),
         "amount": amount,
-        "posted_amount": _amount_value(row.get("posted_amount", "")),
+        "posted_amount": _amount_text(row.get("posted_amount", "")),
         "original_amount": row.get("original_amount", "")
         or row.get("posted_amount", ""),
         "original_currency": row.get("original_currency", "")
@@ -1110,7 +1198,7 @@ def _report_row(row: dict[str, str]) -> dict[str, object]:
 def _report_valuation_status(
     status: str,
     source: str,
-    amount: float | None,
+    amount: str | None,
 ) -> str:
     if status:
         return status
@@ -1157,6 +1245,14 @@ def _amount_value(value: str) -> float | None:
     except (InvalidOperation, ValueError):
         return None
     return float(amount) if amount.is_finite() else None
+
+
+def _amount_text(value: str) -> str | None:
+    try:
+        amount = Decimal(value)
+    except (InvalidOperation, ValueError):
+        return None
+    return format(amount, "f") if amount.is_finite() else None
 
 
 def missing_base_currency_count(rows: list[dict[str, str]]) -> int:
