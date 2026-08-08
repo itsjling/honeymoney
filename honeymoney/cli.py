@@ -141,6 +141,7 @@ from honeymoney.rules import (
 from honeymoney.schema import (
     ALLOWED_FLOW_TYPES,
     allowed_categories,
+    allowed_owners,
 )
 from honeymoney.source_data_review import (
     SourceDataReviewError,
@@ -1017,6 +1018,7 @@ Common run options:
 Common status/report options:
   --month june | --month 2026-06
   --start 2026-06-01 --end 2026-06-30
+  --owner OWNER                     Repeat to include more than one owner
   --no-open                        (report) Write the HTML without opening it
 
 Review filters and decisions:
@@ -4225,6 +4227,71 @@ def _clean_pasted_path(value: str) -> str:
     return cleaned
 
 
+def _add_owner_filter_argument(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--owner",
+        dest="owners",
+        action="append",
+        metavar="OWNER",
+        help="Filter by owner. Repeat to include more than one owner.",
+    )
+
+
+def _validated_owner_filters(
+    requested: Sequence[str] | None,
+    config: Mapping[str, object],
+) -> list[str]:
+    owners = list(dict.fromkeys(requested or []))
+    unsupported = [owner for owner in owners if owner not in allowed_owners(config)]
+    if unsupported:
+        noun = "filter" if len(unsupported) == 1 else "filters"
+        supported = ", ".join(sorted(allowed_owners(config)))
+        raise ValueError(
+            f"Unsupported owner {noun}: {', '.join(unsupported)}. "
+            f"Supported owners: {supported}"
+        )
+    return owners
+
+
+def _load_reporting_config(
+    config_path: str | None,
+    requested_owners: Sequence[str] | None,
+) -> tuple[dict[str, Any], list[str]]:
+    read_only_config = _load_config_read_only(config_path)
+    owner_filters = _validated_owner_filters(requested_owners, read_only_config)
+    return _load_config(config_path), owner_filters
+
+
+def _filter_rows_by_owners(
+    rows: Sequence[dict[str, str]],
+    owners: Sequence[str],
+) -> list[dict[str, str]]:
+    if not owners:
+        return list(rows)
+    selected = set(owners)
+    return [row for row in rows if row.get("owner", "") in selected]
+
+
+def _source_rows_for_canonical_rows(
+    overlap_result: CanonicalizationResult | None,
+    canonical_rows: Sequence[Mapping[str, str]],
+    source_rows: Sequence[dict[str, str]],
+) -> list[dict[str, str]]:
+    canonical_ids = {row.get("transaction_id", "") for row in canonical_rows}
+    source_ids: set[str] = set()
+    if overlap_result is not None:
+        for group in overlap_result.diagnostic["groups"]:
+            if not canonical_ids.intersection(group["canonical_transaction_ids"]):
+                continue
+            source_ids.update(
+                occurrence_id
+                for pool in group["source_occurrence_pools"]
+                for occurrence_id in pool
+            )
+    selected_ids = canonical_ids | source_ids
+    return [row for row in source_rows if row.get("transaction_id", "") in selected_ids]
+
+
 def _status_command(argv: list[str]) -> int:
     parser = _command_parser(
         argv,
@@ -4235,12 +4302,13 @@ def _status_command(argv: list[str]) -> int:
     parser.add_argument("--month")
     parser.add_argument("--start")
     parser.add_argument("--end")
+    _add_owner_filter_argument(parser)
     parser.add_argument("--config", dest="config_path")
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args(argv)
 
     start, end = _resolve_period(args.month or args.period, args.start, args.end)
-    config = _load_config(args.config_path)
+    config, owner_filters = _load_reporting_config(args.config_path, args.owners)
     categorized_path = Path(config["paths"]["output"])
     state = load_configured_identity_state(categorized_path, config)
     ledger_rows = _normalize_loaded_rows(state.rows, config)
@@ -4251,6 +4319,7 @@ def _status_command(argv: list[str]) -> int:
                 "success",
                 data={
                     "period": {"start": start.isoformat(), "end": end.isoformat()},
+                    "filters": {"owners": owner_filters},
                     "statements_processed": 0,
                     "records_processed": 0,
                     "categorized": 0,
@@ -4292,8 +4361,6 @@ def _status_command(argv: list[str]) -> int:
         print("Run `honeymoney import` or `honeymoney run` first.")
         return 0
 
-    rows = _rows_in_period(ledger_rows, start, end)
-    source_rows = _rows_in_period(state.source_rows, start, end)
     current_overlap = (
         None
         if state.canonical_migration_required
@@ -4305,7 +4372,13 @@ def _status_command(argv: list[str]) -> int:
     )
     reconcile_ledger(ledger_rows, config, statement_rows=state.source_rows)
     enforce_overlap_review(ledger_rows, current_overlap)
-    rows = _rows_in_period(ledger_rows, start, end)
+    owner_ledger_rows = _filter_rows_by_owners(ledger_rows, owner_filters)
+    rows = _rows_in_period(owner_ledger_rows, start, end)
+    source_rows = _source_rows_for_canonical_rows(
+        current_overlap,
+        rows,
+        _rows_in_period(state.source_rows, start, end),
+    )
     categorized = [row for row in rows if _is_categorized(row)]
     statements = {
         row.get("source_id") or f"legacy:{row.get('source_file', '')}"
@@ -4338,9 +4411,9 @@ def _status_command(argv: list[str]) -> int:
         and transaction_direction(row) == "outflow"
     )
     undated = sum(
-        1 for row in ledger_rows if _parse_iso_date(row.get("date", "")) is None
+        1 for row in owner_ledger_rows if _parse_iso_date(row.get("date", "")) is None
     )
-    outside = len(ledger_rows) - len(rows) - undated
+    outside = len(owner_ledger_rows) - len(rows) - undated
     period_valuation = valuation_summary(rows)
 
     if args.json:
@@ -4349,6 +4422,7 @@ def _status_command(argv: list[str]) -> int:
             "success",
             data={
                 "period": {"start": start.isoformat(), "end": end.isoformat()},
+                "filters": {"owners": owner_filters},
                 "statements_processed": len(statements),
                 "records_processed": len(rows),
                 "source_occurrence_count": len(source_rows),
@@ -4366,7 +4440,7 @@ def _status_command(argv: list[str]) -> int:
                 "unresolved_inflows": unresolved_inflows,
                 "unresolved_outflows": unresolved_outflows,
                 "ledger": {
-                    "total_records": len(ledger_rows),
+                    "total_records": len(owner_ledger_rows),
                     "outside_period": outside,
                     "unparseable_dates": undated,
                 },
@@ -4376,6 +4450,10 @@ def _status_command(argv: list[str]) -> int:
         return 0
 
     print(f"Status for {start.isoformat()} to {end.isoformat()}")
+    print(
+        "  Owners:               "
+        + (", ".join(owner_filters) if owner_filters else "Combined household")
+    )
     print(f"  Statements processed: {len(statements)}")
     print(f"  Source occurrences:   {len(source_rows)}")
     print(f"  Canonical records:    {len(rows)}")
@@ -4410,7 +4488,7 @@ def _status_command(argv: list[str]) -> int:
         "  Review inflows:       honeymoney review --flow unresolved --direction inflow"
     )
     print(
-        f"Ledger total: {len(ledger_rows)} records "
+        f"Ledger total: {len(owner_ledger_rows)} records "
         f"({outside} outside this period, {undated} with unparseable dates)"
     )
     return 0
@@ -4436,13 +4514,14 @@ def _report_command(argv: list[str]) -> int:
     parser.add_argument("--month")
     parser.add_argument("--start")
     parser.add_argument("--end")
+    _add_owner_filter_argument(parser)
     parser.add_argument("--config", dest="config_path")
     parser.add_argument("--output", dest="output_path", help="Report HTML path")
     parser.add_argument("--no-open", action="store_true")
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args(argv)
 
-    config = _load_config(args.config_path)
+    config, owner_filters = _load_reporting_config(args.config_path, args.owners)
     categorized_path = Path(config["paths"]["output"])
     state = load_configured_identity_state(categorized_path, config)
     ledger_rows = _normalize_loaded_rows(state.rows, config)
@@ -4457,8 +4536,13 @@ def _report_command(argv: list[str]) -> int:
     enforce_overlap_review(ledger_rows, current_overlap)
 
     start, end = _resolve_period(args.month or args.period, args.start, args.end)
-    rows = _rows_in_period(ledger_rows, start, end)
-    period_source_rows = _rows_in_period(state.source_rows, start, end)
+    all_period_rows = _rows_in_period(ledger_rows, start, end)
+    rows = _filter_rows_by_owners(all_period_rows, owner_filters)
+    period_source_rows = _source_rows_for_canonical_rows(
+        current_overlap,
+        rows,
+        _rows_in_period(state.source_rows, start, end),
+    )
     if state.canonical_migration_required:
         period_overlap = _unmigrated_overlap(rows)
     else:
@@ -4499,6 +4583,7 @@ def _report_command(argv: list[str]) -> int:
             "success",
             data={
                 "period": {"start": start.isoformat(), "end": end.isoformat()},
+                "filters": {"owners": owner_filters},
                 "transaction_count": len(rows),
                 "missing_base_currency_count": missing_base_currency_count(rows),
                 "valuation": valuation_summary(rows),
