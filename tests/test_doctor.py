@@ -136,6 +136,27 @@ class DoctorAuditTest(unittest.TestCase):
             self.assertTrue(result.healthy)
             self.assertEqual(result.findings, ())
 
+    def test_cli_doctor_honors_a_custom_config_name_for_audit_and_fix(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "workspace"
+            _healthy_workspace(root)
+            config = root / "custom-name.json"
+            (root / "config.json").replace(config)
+
+            healthy = self._run_cli("doctor", "--config", str(config), "--json")
+
+            self.assertEqual(healthy.returncode, 0, healthy.stderr)
+            self.assertEqual(json.loads(healthy.stdout)["data"]["finding_count"], 0)
+
+            os.chmod(root / "rules.json", 0o644)
+
+            fixed = self._run_cli("doctor", "--fix", "--config", str(config), "--json")
+
+            self.assertEqual(fixed.returncode, 0, fixed.stderr)
+            self.assertEqual(json.loads(fixed.stdout)["data"]["finding_count"], 0)
+            self.assertGreater(json.loads(fixed.stdout)["data"]["repaired_count"], 0)
+            self.assertEqual(stat.S_IMODE((root / "rules.json").stat().st_mode), 0o600)
+
     def test_audit_accepts_a_setup_and_committed_synthetic_import(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary) / "workspace"

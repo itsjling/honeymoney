@@ -404,14 +404,15 @@ def _doctor_command(argv: list[str]) -> int:
     parser.add_argument("--config")
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args(argv)
-    root = Path(args.config or "config.json").expanduser().absolute().parent
+    config_path = Path(args.config or "config.json").expanduser().absolute()
+    root = config_path.parent
     from honeymoney.doctor import audit_workspace, fix_workspace
 
     if args.fix:
-        fixed = fix_workspace(root)
+        fixed = fix_workspace(root, config_path=config_path)
         audit, repaired = fixed.after, len(fixed.applied_actions)
     else:
-        audit, repaired = audit_workspace(root), 0
+        audit, repaired = audit_workspace(root, config_path=config_path), 0
     findings = [
         {
             "code": item.code,

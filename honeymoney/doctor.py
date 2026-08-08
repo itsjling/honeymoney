@@ -114,6 +114,7 @@ class AuditResult:
     findings: tuple[DoctorFinding, ...]
     checked_item_count: int
     omitted_finding_count: int = 0
+    config_path: Path | None = None
 
     @property
     def healthy(self) -> bool:
@@ -144,6 +145,7 @@ class RepairPlan:
     actions: tuple[RepairAction, ...]
     blocked: bool
     blocker_codes: tuple[str, ...]
+    config_path: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -167,9 +169,14 @@ class _ReadyRecordAuthority:
     snapshot_rows: tuple[dict[str, str], ...]
 
 
-def audit_workspace(root: Path | str) -> AuditResult:
+def audit_workspace(
+    root: Path | str,
+    *,
+    config_path: Path | str | None = None,
+) -> AuditResult:
     """Audit a workspace without changing it or opening statement input paths."""
     root_path = Path(os.path.abspath(Path(root).expanduser()))
+    selected_config_path = _doctor_config_path(root_path, config_path)
     if root_path.is_symlink():
         return AuditResult(
             root=root_path,
@@ -183,6 +190,7 @@ def audit_workspace(root: Path | str) -> AuditResult:
                 ),
             ),
             checked_item_count=0,
+            config_path=selected_config_path,
         )
     if not _path_lexists(root_path):
         return AuditResult(
@@ -197,6 +205,7 @@ def audit_workspace(root: Path | str) -> AuditResult:
                 ),
             ),
             checked_item_count=0,
+            config_path=selected_config_path,
         )
     if not root_path.is_dir():
         return AuditResult(
@@ -211,8 +220,9 @@ def audit_workspace(root: Path | str) -> AuditResult:
                 ),
             ),
             checked_item_count=0,
+            config_path=selected_config_path,
         )
-    paths = WorkspacePaths.from_root(root_path)
+    paths = WorkspacePaths.from_root(root_path, config=selected_config_path)
     if _path_lexists(paths.internal) and (
         paths.internal.is_symlink() or not paths.internal.is_dir()
     ):
@@ -351,7 +361,7 @@ def audit_workspace(root: Path | str) -> AuditResult:
                 "managed_path_unsafe",
                 FindingSeverity.ERROR,
                 RepairClass.MANUAL,
-                "config.json",
+                _relative(paths, paths.config),
                 "Remove the unsafe path or restore a complete workspace backup.",
             )
         )
@@ -361,8 +371,8 @@ def audit_workspace(root: Path | str) -> AuditResult:
                 "workspace_input_invalid",
                 FindingSeverity.ERROR,
                 RepairClass.MANUAL,
-                "config.json",
-                "Restore or correct config.json.",
+                _relative(paths, paths.config),
+                "Restore or correct the workspace config.",
             )
         )
     else:
@@ -375,8 +385,8 @@ def audit_workspace(root: Path | str) -> AuditResult:
                     "workspace_input_invalid",
                     FindingSeverity.ERROR,
                     RepairClass.MANUAL,
-                    "config.json",
-                    "Restore or correct config.json.",
+                    _relative(paths, paths.config),
+                    "Restore or correct the workspace config.",
                 )
             )
         else:
@@ -477,9 +487,10 @@ def build_repair_plan(
     root: Path | str,
     *,
     audit: AuditResult | None = None,
+    config_path: Path | str | None = None,
 ) -> RepairPlan:
     """Build a complete, read-only repair plan from the current audit result."""
-    current = audit or audit_workspace(root)
+    current = audit or audit_workspace(root, config_path=config_path)
     hard_codes = {
         "workspace_busy",
         "lock_owner_unknown",
@@ -499,9 +510,16 @@ def build_repair_plan(
         )
     )
     if blockers:
-        return RepairPlan(current.root, current, (), True, blockers)
+        return RepairPlan(
+            current.root,
+            current,
+            (),
+            True,
+            blockers,
+            config_path=current.config_path,
+        )
 
-    paths = WorkspacePaths.from_root(current.root)
+    paths = WorkspacePaths.from_root(current.root, config=current.config_path)
 
     if any(
         finding.code == "publication_recovery_required" for finding in current.findings
@@ -518,6 +536,7 @@ def build_repair_plan(
             ),
             False,
             (),
+            config_path=paths.config,
         )
 
     actions: list[RepairAction] = []
@@ -546,22 +565,37 @@ def build_repair_plan(
         tuple(sorted(actions, key=lambda action: (action.kind, action.path))),
         False,
         (),
+        config_path=paths.config,
     )
 
 
-def fix_workspace(root: Path | str) -> FixResult:
+def fix_workspace(
+    root: Path | str,
+    *,
+    config_path: Path | str | None = None,
+) -> FixResult:
     """Apply only proved repairs and always return the post-fix audit."""
-    before = audit_workspace(root)
+    before = audit_workspace(root, config_path=config_path)
     plan = build_repair_plan(root, audit=before)
     if plan.blocked or not plan.actions:
-        return FixResult(before, plan, (), audit_workspace(root))
+        return FixResult(
+            before,
+            plan,
+            (),
+            audit_workspace(plan.root, config_path=plan.config_path),
+        )
 
     if plan.actions[0].kind == RepairActionKind.SETTLE_RETAINED_PUBLICATION:
         try:
             settle_retained_publication(plan.root)
         except PublicationError:
-            return FixResult(before, plan, (), audit_workspace(plan.root))
-        after_recovery = audit_workspace(plan.root)
+            return FixResult(
+                before,
+                plan,
+                (),
+                audit_workspace(plan.root, config_path=plan.config_path),
+            )
+        after_recovery = audit_workspace(plan.root, config_path=plan.config_path)
         follow_up = build_repair_plan(plan.root, audit=after_recovery)
         if follow_up.blocked or not follow_up.actions:
             return FixResult(
@@ -581,7 +615,7 @@ def _apply_repair_plan(
     *,
     prior_actions: tuple[RepairAction, ...] = (),
 ) -> FixResult:
-    paths = WorkspacePaths.from_root(plan.root)
+    paths = WorkspacePaths.from_root(plan.root, config=plan.config_path)
     applied_actions = list(prior_actions)
     remaining_actions: list[RepairAction] = []
     for action in plan.actions:
@@ -593,7 +627,7 @@ def _apply_repair_plan(
                 before,
                 plan,
                 tuple(applied_actions),
-                audit_workspace(paths.root),
+                audit_workspace(paths.root, config_path=paths.config),
             )
         applied_actions.append(action)
     if not remaining_actions:
@@ -601,7 +635,7 @@ def _apply_repair_plan(
             before,
             plan,
             tuple(applied_actions),
-            audit_workspace(paths.root),
+            audit_workspace(paths.root, config_path=paths.config),
         )
     targets_by_path: dict[str, PublicationTarget] = {}
     for action in remaining_actions:
@@ -638,7 +672,7 @@ def _apply_repair_plan(
         before,
         plan,
         (*applied_actions, *remaining_actions),
-        audit_workspace(paths.root),
+        audit_workspace(paths.root, config_path=paths.config),
     )
 
 
@@ -654,7 +688,22 @@ def _audit_result(
         findings=tuple(unique[:_MAX_FINDINGS]),
         checked_item_count=checked_item_count,
         omitted_finding_count=max(0, len(unique) - _MAX_FINDINGS),
+        config_path=paths.config,
     )
+
+
+def _doctor_config_path(
+    root: Path,
+    config_path: Path | str | None,
+) -> Path:
+    candidate = (
+        root / "config.json"
+        if config_path is None
+        else Path(os.path.abspath(Path(config_path).expanduser()))
+    )
+    if candidate.parent == root:
+        return root.resolve(strict=False) / candidate.name
+    return candidate
 
 
 def _path_lexists(path: Path) -> bool:
@@ -701,7 +750,7 @@ def _audit_configured_inputs(
                 "workspace_input_invalid",
                 FindingSeverity.ERROR,
                 RepairClass.MANUAL,
-                "config.json",
+                _relative(paths, paths.config),
                 "Restore a clean-start workspace configuration.",
             )
         )
@@ -721,7 +770,7 @@ def _audit_configured_inputs(
                     "workspace_input_invalid",
                     FindingSeverity.ERROR,
                     RepairClass.MANUAL,
-                    "config.json",
+                    _relative(paths, paths.config),
                     "Restore or correct the configured input path.",
                 )
             )
@@ -733,7 +782,7 @@ def _audit_configured_inputs(
                     "managed_path_unsafe",
                     FindingSeverity.ERROR,
                     RepairClass.MANUAL,
-                    "config.json",
+                    _relative(paths, paths.config),
                     "Remove the unsafe configured path or restore a backup.",
                 )
             )
@@ -772,7 +821,7 @@ def _audit_configured_inputs(
                 "workspace_input_invalid",
                 FindingSeverity.ERROR,
                 RepairClass.MANUAL,
-                "config.json",
+                _relative(paths, paths.config),
                 "Restore or correct the configured profiles.",
             )
         )
@@ -784,7 +833,7 @@ def _audit_configured_inputs(
                     "workspace_input_invalid",
                     FindingSeverity.ERROR,
                     RepairClass.MANUAL,
-                    "config.json",
+                    _relative(paths, paths.config),
                     "Restore or correct the configured profile path.",
                 )
             )
@@ -796,7 +845,7 @@ def _audit_configured_inputs(
                     "managed_path_unsafe",
                     FindingSeverity.ERROR,
                     RepairClass.MANUAL,
-                    "config.json",
+                    _relative(paths, paths.config),
                     "Remove the unsafe configured path or restore a backup.",
                 )
             )
@@ -1541,7 +1590,10 @@ def _configured_input_mode(paths: WorkspacePaths, relative: str) -> int | None:
             return 0o600
         parent = path.parent
         while parent != paths.root:
-            if _relative(paths, parent) == relative:
+            parent_relative = _relative(paths, parent)
+            if parent_relative is None:
+                break
+            if parent_relative == relative:
                 return 0o700
             parent = parent.parent
     return None
