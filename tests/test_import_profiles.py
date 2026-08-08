@@ -1,6 +1,5 @@
 import hashlib
 import json
-import os
 import runpy
 import subprocess
 import sys
@@ -15,7 +14,6 @@ from unittest.mock import patch
 import pdfplumber
 
 from honeymoney import importers
-from honeymoney.cli import _load_config_document, _preview_profile_input, main
 from honeymoney.identity import (
     IdentityError,
     empty_manifest,
@@ -30,6 +28,9 @@ from honeymoney.importers import (
     _pdf_balance_lines,
     _pdf_balance_observations,
     _validate_profile,
+)
+from honeymoney.importers import (
+    preview_profile_input as _preview_profile_input,
 )
 from honeymoney.reconciliation import reconcile_ledger
 from tests.golden_helpers import (
@@ -1755,7 +1756,10 @@ class IdentityParserInputsTest(unittest.TestCase):
             )
             config_path = config_dir / "config.json"
             config_path.write_text("{}", encoding="utf-8")
-            config = _load_config_document(str(config_path), recover=False)
+            config = {
+                "_identity_config_path": config_path.resolve(),
+                "_identity_workspace_root": config_dir.resolve(),
+            }
 
             single = _import_transactions(
                 [statement],
@@ -1784,20 +1788,6 @@ class IdentityParserInputsTest(unittest.TestCase):
             self.assertEqual(single[3][0].source_display, "statement.csv")
             self.assertNotIn(str(config_dir), json.dumps(single[2]))
 
-    def test_no_config_uses_default_config_parent(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            previous = Path.cwd()
-            try:
-                os.chdir(root)
-                config = _load_config_document(None, recover=False)
-            finally:
-                os.chdir(previous)
-            self.assertEqual(config["_identity_workspace_root"], root.resolve())
-            self.assertEqual(
-                config["_identity_config_path"], (root / "config.json").resolve()
-            )
-
     def test_external_source_identity_never_enters_rows_or_reports(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -1812,7 +1802,10 @@ class IdentityParserInputsTest(unittest.TestCase):
                 "Date,Description,Amount,Currency\n2026-01-01,Coffee,-1.00,HKD\n",
                 encoding="utf-8",
             )
-            config = _load_config_document(str(config_path), recover=False)
+            config = {
+                "_identity_config_path": config_path.resolve(),
+                "_identity_workspace_root": config_dir.resolve(),
+            }
             result = _import_transactions(
                 [statement],
                 [starter_profile()],
@@ -2310,58 +2303,6 @@ class IdentityParserInputsTest(unittest.TestCase):
         ):
             _import_fake_pdf(profile, words=words)
 
-    def test_malformed_pdf_word_date_surfaces_parser_code_before_identity_persistence(
-        self,
-    ) -> None:
-        profile = load_profile("hsbc_hk_credit_card_pdf.json")
-        profile["id"] = "synthetic_word_profile"
-        profile["pdf"] = dict(profile["pdf"])
-        profile["pdf"]["word_table_end_markers"] = []
-        fixture = (
-            FIXTURE_DIR
-            / "import_profiles"
-            / "hsbc_hk_credit_card_pdf"
-            / "footer_boundary"
-            / "input.pdf"
-        )
-
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            statement = root / "statement.pdf"
-            statement.write_bytes(fixture.read_bytes())
-            profile_path = root / "profile.json"
-            profile_path.write_text(json.dumps(profile), encoding="utf-8")
-            output = root / "output" / "categorized.csv"
-            config_path = root / "config.json"
-            config_path.write_text(
-                json.dumps(
-                    {
-                        "profiles": [str(profile_path)],
-                        "exchange_rates": {"HKD": 1.0},
-                        "paths": {"input": str(statement), "output": str(output)},
-                    }
-                ),
-                encoding="utf-8",
-            )
-
-            self.assertEqual(
-                main(["--config", str(config_path), "--no-interactive"]), 0
-            )
-            report = json.loads(
-                (root / "output" / "import_report.json").read_text(encoding="utf-8")
-            )
-            manifest = json.loads(
-                (root / "output" / ".honeymoney-identity-manifest.json").read_text(
-                    encoding="utf-8"
-                )
-            )
-
-        warning = report["warnings"][0]
-        self.assertIn("pdf_word_row_invalid_date", warning)
-        self.assertNotIn("identity_manifest_invalid", warning)
-        self.assertEqual(report["files"][0]["status"], "failed")
-        self.assertEqual(manifest["sources"], [])
-
     def test_pdf_sectioned_identity_uses_physical_line(self) -> None:
         profile = load_profile("hsbc_one_pdf.json")
         fixture = (
@@ -2383,7 +2324,10 @@ class IdentityParserInputsTest(unittest.TestCase):
 def _identity_config(root: Path) -> dict:
     config_path = root / "config.json"
     config_path.write_text("{}", encoding="utf-8")
-    return _load_config_document(str(config_path), recover=False)
+    return {
+        "_identity_config_path": config_path.resolve(),
+        "_identity_workspace_root": root.resolve(),
+    }
 
 
 def _hsbc_one_transaction_words(

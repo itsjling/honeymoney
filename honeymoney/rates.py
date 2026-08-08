@@ -464,7 +464,7 @@ def _observation_key(item: Mapping[str, object]) -> tuple[str, str]:
 def _positive_decimal(value: object) -> Decimal | None:
     try:
         parsed = Decimal(str(value))
-    except (InvalidOperation, ValueError):
+    except InvalidOperation, ValueError:
         return None
     return parsed if parsed.is_finite() and parsed > 0 else None
 

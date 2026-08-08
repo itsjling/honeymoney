@@ -1,274 +1,1259 @@
+"""Honeymoney 0.2 command-line interface."""
+
 from __future__ import annotations
 
 import argparse
-import calendar
-import csv
-import hashlib
+import copy
 import json
 import os
-import re
 import shlex
-import shutil
 import subprocess
 import sys
 import tempfile
 import webbrowser
-from dataclasses import dataclass
-from datetime import date
-from decimal import Decimal
-from importlib import resources
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import NoReturn, Sequence
 
-from honeymoney import importers, normalization
+from honeymoney import importers
 from honeymoney.account_bindings import (
-    AccountBinding,
-    binding_by_id,
+    BoundAccount,
     binding_views,
-    canonical_bound_owners,
-    enforce_bound_owners,
     remove_binding_pattern,
     replace_binding_pattern,
     upsert_binding,
-    validate_bindings_for_profiles,
-    validate_profile_mappings,
 )
-from honeymoney.account_bindings import (
-    profile_id as account_binding_profile_id,
+from honeymoney.corrections import load_corrections
+from honeymoney.ollama import list_ollama_models
+from honeymoney.parser_contracts import Profile
+from honeymoney.periods import PeriodSelection, resolve_period_selection
+from honeymoney.rate_fetch import fetch_hkma_daily_rates, prepare_hkma_fetch
+from honeymoney.rates import parse_hkma_daily_document
+from honeymoney.workspace_commands import (
+    CommandResult,
+    apply_workspace_config,
+    apply_workspace_corrections,
+    apply_workspace_profile_mappings,
+    apply_workspace_rate_observations,
+    import_workspace,
+    learn_workspace_rules,
+    list_imports,
+    load_workspace,
+    rebuild_views,
+    resolve_workspace_duplicate,
+    resolve_workspace_source_data,
+    review_workspace_transaction,
+    show_import,
+    workspace_config_document,
+    workspace_duplicates,
+    workspace_missing_valuations,
+    workspace_pending,
+    workspace_profile_bindings,
+    workspace_public_config,
+    workspace_reconciliation_summary,
+    workspace_report,
+    workspace_review_pair,
+    workspace_source_data_inspect,
+    workspace_status,
 )
-from honeymoney.categorization_memory import (
-    apply_local_categorization_memory,
-    build_local_categorization_memory,
-)
-from honeymoney.classification_policy import (
-    apply_structural_classification,
-    validate_category_policies,
-)
-from honeymoney.corrections import (
-    CORRECTION_COLUMNS,
-    EDITABLE_CORRECTION_FIELDS,
-    apply_correction_operation,
-    apply_corrections,
-    ledger_output_documents,
-    load_corrections,
-    prepare_corrections_document,
-    read_ledger,
-    review_state_correction_updates,
-    to_review_row,
-    validate_correction,
-)
-from honeymoney.csv_artifacts import canonical_csv_cell, read_csv_artifact
-from honeymoney.duplicates import (
-    DUPLICATE_MATCH_TYPE,
-    refresh_duplicate_candidates,
-    release_duplicate_review_ownership,
-)
-from honeymoney.identity import (
-    IdentityError,
-    ambiguous_legacy_transaction_ids,
-    record_fingerprint,
-    resolve_batch,
-)
-from honeymoney.identity_state import IdentityState, load_configured_identity_state
-from honeymoney.learning import plan_learned_rules
-from honeymoney.manual_pairs import (
-    MANUAL_PAIR_FIELD,
-    MANUAL_PAIR_FLAG_PREFIX,
-    ManualPairError,
-    manual_pair_id,
-    manual_pair_marker,
-    validate_manual_pair_facts,
-)
-from honeymoney.ollama import (
-    OllamaProgress,
-    apply_ollama_fallback,
-    list_ollama_models,
-    validate_ollama_endpoint,
-)
-from honeymoney.overlap import (
-    CanonicalizationResult,
-    DuplicateResolutionError,
-    apply_history_ambiguity,
-    canonicalize_overlaps,
-    enforce_overlap_review,
-    list_duplicate_groups,
-    project_corrections,
-    project_migration_corrections,
-    project_replacement_corrections,
-    release_overlap_review_ownership,
-    resolve_duplicate_group,
-)
-from honeymoney.persistence import (
-    GenerationConflictError,
-    configured_generation_paths,
-    ensure_private_directory,
-    generation_hashes,
-    generation_member_paths,
-    persist_generation,
-    private_atomic_write_text,
-    recover_generation,
-    require_generation_snapshot,
-    snapshot_generation,
-)
-from honeymoney.rate_fetch import (
-    HKMA_API_ENDPOINT,
-    RateFetchError,
-    RateFetchRequest,
-    fetch_hkma_daily_rates,
-    prepare_hkma_fetch,
-)
-from honeymoney.rates import (
-    HKMA_MAX_RATE_AGE_DAYS,
-    HKMA_PROVIDER,
-    RateCache,
-    RateImportError,
-    empty_rate_cache,
-    load_rate_cache,
-    merge_rate_cache,
-    parse_hkma_daily_document,
-    rate_cache_document,
-    validate_rate_cache,
-)
-from honeymoney.reconciliation import (
-    complete_statement_rows,
-    reconcile_ledger,
-    transaction_direction,
-    validate_reconciliation_config,
-)
-from honeymoney.report import build_report_html, missing_base_currency_count
-from honeymoney.review_state import (
-    REVIEW_REASON_ACCOUNTING_FLOW,
-    REVIEW_REASON_CATEGORY,
-    REVIEW_REASON_CATEGORY_SUGGESTION,
-    REVIEW_REASON_IDENTITY,
-    review_reason_labels,
-    review_reason_tokens,
-    review_summary,
-    set_review_reason,
-    synchronize_review_states,
-)
-from honeymoney.rules import (
-    MANAGED_RULE_MARKER,
-    apply_rules,
-    load_rules,
-    validate_rules,
-)
-from honeymoney.schema import (
-    ALLOWED_FLOW_TYPES,
-    allowed_categories,
-    allowed_owners,
-)
-from honeymoney.source_data_review import (
-    SourceDataReviewError,
-    inspect_source_data_review,
-    repair_source_data_review_state,
-    source_data_review_active,
-)
-from honeymoney.valuation import (
-    VALUATION_SOURCE_HKMA_RATE,
-    validate_dated_rates,
-    valuation_summary,
-    value_transactions,
-)
-from honeymoney.valuation_inspection import (
-    ValuationInspectionError,
-    inspect_missing_valuations,
-)
-from honeymoney.workspace_upgrade import (
-    MANAGED_FILES_NAME,
-    UpgradePlan,
-    UpgradeResult,
-    apply_upgrade_plan,
-    build_upgrade_plan,
-    managed_files_document,
-    recover_upgrade_generation,
-    require_clean_upgrade_generation,
-    result_counts,
-)
+from honeymoney.workspace_setup import setup_workspace
 
-JSON_SCHEMA_VERSION = 2
-IDENTITY_MIGRATION_AMBIGUITY_FLAG = "identity_migration_ambiguous"
-PROFILE_PREVIEW_LIMIT = 10
-PROFILE_PREVIEW_FIELDS = [
-    "amount_hkd",
-    "date",
-    "merchant",
-    "original_amount",
-    "original_currency",
-    "posted_amount",
-    "posted_currency",
-    "source_page",
-    "source_row",
-    "valuation_source",
-    "valuation_status",
-]
-_BATCH_REVIEW_REASON = "Accounting flow confirmed by batch review"
-_ACCOUNTING_DECISION_FIELDS = {
-    "income": {"category": "Income", "flow_type": "income"},
-    "refund": {"flow_type": "refund"},
-    "internal-transfer": {
-        "category": "Internal Transfer",
-        "flow_type": "internal_transfer",
-    },
-    "credit-card-payment": {
-        "category": "Credit Card Payment",
-        "flow_type": "credit_card_payment",
-    },
-    "investment-transfer": {
-        "category": "Investments",
-        "flow_type": "investment_transfer",
-    },
-    "expense": {"flow_type": "expense"},
-    "unresolved": {"flow_type": "unresolved"},
-}
+JSON_SCHEMA_VERSION = 3
 
 
-@dataclass(frozen=True)
-class _ReviewBatchPlan:
-    patches: dict[str, dict[str, str]]
-    applied_count: int
-    unchanged_count: int
+class CliUsageError(ValueError):
+    """A command-line usage error that can carry a stable code."""
+
+    code = "usage_error"
 
 
-@dataclass(frozen=True)
-class _RateApplicationResult:
-    rate_cache_path: Path
-    rate_cache_defaulted: bool
-    imported_count: int
-    cached_count: int
-    requested_count: int
-    resolved_count: int
-    valued_count: int
-    changed: bool
+class RetiredCliContractError(CliUsageError):
+    """A named error for a clean-start contract that cannot carry over."""
+
+    code = "legacy_csv_contract_removed"
 
 
-class _ReviewBatchError(ValueError):
-    def __init__(
-        self,
-        errors: list[dict[str, Any]],
-        *,
-        rejected_count: int,
-    ) -> None:
-        self.errors = errors
-        self.data = {
-            "applied_count": 0,
-            "unchanged_count": 0,
-            "rejected_count": rejected_count,
-        }
-        super().__init__(
-            "Batch review rejected: "
-            f"0 applied, 0 unchanged, {rejected_count} rejected; no files changed."
+class _Parser(argparse.ArgumentParser):
+    def error(self, message: str) -> NoReturn:
+        raise CliUsageError(f"{self.prog}: {message}")
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    """Run one command and return its public exit status."""
+    arguments = list(sys.argv[1:] if argv is None else argv)
+    if not arguments or arguments[0] in {"help", "--help", "-h"}:
+        print(_help_text())
+        return 0
+    command, tail = arguments[0], arguments[1:]
+    if command == "setup":
+        return _setup_command(tail)
+    if command == "import":
+        return _import_command(tail)
+    if command == "imports":
+        return _imports_command(tail)
+    if command == "views":
+        return _views_command(tail)
+    if command == "status":
+        return _status_command(tail)
+    if command == "pending":
+        return _pending_command(tail)
+    if command == "report":
+        return _report_command(tail)
+    if command == "valuation":
+        return _valuation_command(tail)
+    if command == "review":
+        return _review_command(tail)
+    if command == "correct":
+        return _correct_command(tail)
+    if command == "rates":
+        return _rates_command(tail)
+    if command == "duplicates":
+        return _duplicates_command(tail)
+    if command == "reconcile":
+        return _reconcile_command(tail)
+    if command == "profile":
+        return _profile_command(tail)
+    if command == "config":
+        return _config_command(tail)
+    if command == "learn":
+        return _learn_command(tail)
+    if command == "source-data":
+        return _source_data_command(tail)
+    if command == "evaluate":
+        raise RetiredCliContractError(
+            "The evaluate command was retired: it required old cumulative CSV "
+            "inputs, while generated views are not durable source records."
         )
+    if command == "doctor":
+        return _doctor_command(tail)
+    if command == "run":
+        raise CliUsageError(
+            "The run command was removed; use `honeymoney import PATH`."
+        )
+    raise CliUsageError(f"Unknown command: {command}")
+
+
+def run() -> int:
+    """Console-script wrapper that emits one bounded public error."""
+    try:
+        return main()
+    except (OSError, ValueError) as error:
+        arguments = sys.argv[1:]
+        if "--json" in arguments:
+            error_code = getattr(error, "code", None)
+            _emit_json(
+                _error_command(arguments),
+                "error",
+                errors=[
+                    {
+                        "type": type(error).__name__,
+                        **({"code": error_code} if isinstance(error_code, str) else {}),
+                        "message": str(error),
+                    }
+                ],
+            )
+        else:
+            print(str(error), file=sys.stderr)
+        return 2
+
+
+def _setup_command(argv: list[str]) -> int:
+    parser = _parser("honeymoney setup", "Create a clean Honeymoney workspace.")
+    parser.add_argument("--root")
+    parser.add_argument("--json", action="store_true")
+    args = parser.parse_args(argv)
+    if args.json and not args.root:
+        raise CliUsageError("honeymoney setup --json requires --root")
+    root = _setup_root(args.root)
+    paths = setup_workspace(root)
+    if args.json:
+        _emit_json(
+            "setup",
+            "success",
+            data={"root": str(paths.root)},
+            artifacts={
+                "config_json": str(paths.config),
+                "corrections_csv": str(paths.corrections),
+                "rate_cache_json": str(paths.rates),
+                "workspace_index_json": str(paths.workspace_index),
+                "import_records_directory": str(paths.import_records),
+            },
+        )
+    else:
+        print(f"Created Honeymoney workspace at {paths.root}")
+        print("Next: edit config.json if needed, then run honeymoney import PATH")
+    return 0
+
+
+def _import_command(argv: list[str]) -> int:
+    parser = _parser("honeymoney import", "Import one statement file or folder.")
+    parser.add_argument("path")
+    parser.add_argument("--config")
+    parser.add_argument("--binding")
+    parser.add_argument("--strict", action="store_true")
+    parser.add_argument("--no-interactive", action="store_true")
+    actions = parser.add_mutually_exclusive_group()
+    actions.add_argument("--replace", action="store_true")
+    actions.add_argument("--reset", action="store_true")
+    parser.add_argument("--json", action="store_true")
+    args = parser.parse_args(argv)
+    action = "reset" if args.reset else "replace" if args.replace else "import"
+    result = import_workspace(
+        _clean_pasted_path(args.path),
+        config_path=args.config,
+        action=action,
+        binding_id=args.binding,
+        interactive=not (args.no_interactive or args.json),
+        strict=args.strict,
+    )
+    if args.json:
+        _emit_result("import", result)
+    else:
+        print(
+            f"Imported {result.data['statement_transaction_count']} statement "
+            f"transactions into {result.data['view_transaction_count']} view rows."
+        )
+    return 1 if args.strict and result.warnings else 0
+
+
+def _imports_command(argv: list[str]) -> int:
+    if not argv or argv[0] not in {"list", "show"}:
+        raise CliUsageError("honeymoney imports requires `list` or `show`")
+    action, tail = argv[0], argv[1:]
+    parser = _parser(
+        f"honeymoney imports {action}", "Inspect privacy-safe import history."
+    )
+    if action == "show":
+        parser.add_argument("source_id")
+    parser.add_argument("--config")
+    parser.add_argument("--json", action="store_true")
+    args = parser.parse_args(tail)
+    result = (
+        list_imports(args.config)
+        if action == "list"
+        else show_import(args.source_id, args.config)
+    )
+    if args.json:
+        _emit_result(f"imports.{action}", result)
+    elif action == "list":
+        items = result.data["import_records"]
+        if not isinstance(items, list) or not all(
+            isinstance(item, dict) for item in items
+        ):
+            raise AssertionError("import list result has an invalid shape")
+        for item in items:
+            state = "ready" if item["ready"] else "not ready"
+            print(
+                f"{item['source_id']}  {item['source_label']}  {state}  "
+                f"{item['statement_transaction_count']} transactions"
+            )
+    else:
+        attempts = result.data["attempts"]
+        if not isinstance(attempts, list):
+            raise AssertionError("import history result has an invalid shape")
+        print(f"Source: {result.data['source_id']}")
+        print(f"Label: {result.data['source_label']}")
+        print(f"Ready: {'yes' if result.data['ready'] else 'no'}")
+        print(f"Attempts: {len(attempts)}")
+        for attempt in attempts:
+            if not isinstance(attempt, dict):
+                raise AssertionError("import attempt result has an invalid shape")
+            number = attempt.get("attempt_number")
+            requested_action = attempt.get("requested_action")
+            outcome = attempt.get("outcome")
+            counts = attempt.get("counts")
+            if (
+                not isinstance(number, int)
+                or not isinstance(requested_action, str)
+                or not isinstance(outcome, str)
+                or not isinstance(counts, dict)
+            ):
+                raise AssertionError("import attempt result has an invalid shape")
+            statement_count = counts.get("statement_transaction_count", 0)
+            print(
+                f"  {number:08d}  {requested_action}  {outcome}  "
+                f"statement transactions={statement_count}"
+            )
+            _print_attempt_codes(attempt, "warnings", "warning")
+            _print_attempt_codes(attempt, "error_codes", "error")
+    return 0
+
+
+def _print_attempt_codes(
+    attempt: dict[str, object],
+    field: str,
+    label: str,
+) -> None:
+    values = attempt.get(field, [])
+    omitted = attempt.get(f"omitted_{label}_count", 0)
+    if not isinstance(values, list) or not all(
+        isinstance(value, str) for value in values
+    ):
+        raise AssertionError("import attempt codes have an invalid shape")
+    if not isinstance(omitted, int):
+        raise AssertionError("import attempt omitted count has an invalid shape")
+    if values or omitted:
+        suffix = f" (+{omitted} omitted)" if omitted else ""
+        print(f"    {label}s: {', '.join(values)}{suffix}")
+
+
+def _views_command(argv: list[str]) -> int:
+    if not argv or argv[0] != "rebuild":
+        raise CliUsageError("honeymoney views requires `rebuild`")
+    parser = _period_parser(
+        "honeymoney views rebuild", "Rebuild complete managed view units."
+    )
+    args = parser.parse_args(argv[1:])
+    result = rebuild_views(_selection(args), config_path=args.config)
+    if args.json:
+        _emit_result("views.rebuild", result)
+    else:
+        print(
+            f"Views: {result.data['written_count']} written, "
+            f"{result.data['removed_count']} removed, "
+            f"{result.data['unchanged_count']} unchanged."
+        )
+    return 0
+
+
+def _status_command(argv: list[str]) -> int:
+    parser = _period_parser("honeymoney status", "Show selected workspace counts.")
+    args = parser.parse_args(argv)
+    result = workspace_status(_selection(args), config_path=args.config)
+    if args.json:
+        _emit_result("status", result)
+    else:
+        periods = result.data["periods"]
+        if not isinstance(periods, list) or not all(
+            isinstance(period, str) for period in periods
+        ):
+            raise AssertionError("status result has an invalid period shape")
+        print(f"Period: {', '.join(periods)}")
+        print(f"Imports: {result.data['import_count']}")
+        print(f"Statement transactions: {result.data['statement_transaction_count']}")
+        print(f"View transactions: {result.data['view_transaction_count']}")
+        print(f"Needs review: {result.data['needs_review_count']}")
+    return 0
+
+
+def _pending_command(argv: list[str]) -> int:
+    parser = _period_parser(
+        "honeymoney pending", "Show selected transactions that need review."
+    )
+    args = parser.parse_args(argv)
+    result = workspace_pending(_selection(args), config_path=args.config)
+    if args.json:
+        _emit_result("pending", result)
+    else:
+        print(f"Pending review: {result.data['pending_count']}")
+        transactions = result.data["transactions"]
+        if not isinstance(transactions, list):
+            raise AssertionError("pending result has an invalid shape")
+        for item in transactions:
+            if not isinstance(item, dict):
+                raise AssertionError("pending row has an invalid shape")
+            print(
+                f"  {item.get('transaction_id', '')}  "
+                f"{item.get('review_reason_labels', '')}"
+            )
+    return 0
+
+
+def _report_command(argv: list[str]) -> int:
+    parser = _period_parser(
+        "honeymoney report", "Use or export the selected self-contained report."
+    )
+    parser.add_argument("--export")
+    parser.add_argument("--no-open", action="store_true")
+    args = parser.parse_args(argv)
+    result = workspace_report(
+        _selection(args),
+        config_path=args.config,
+        export_path=args.export,
+    )
+    if args.json:
+        _emit_result("report", result)
+    else:
+        target = result.artifacts["report_html"]
+        print(f"Report: {target}")
+    target = result.artifacts["report_html"]
+    if not args.no_open and not args.json and isinstance(target, str):
+        webbrowser.open(Path(target).resolve().as_uri())
+    return 0
+
+
+def _valuation_command(argv: list[str]) -> int:
+    if not argv or argv[0] != "missing":
+        raise CliUsageError("honeymoney valuation requires `missing`")
+    parser = _period_parser(
+        "honeymoney valuation missing", "Show selected missing HKD valuations."
+    )
+    args = parser.parse_args(argv[1:])
+    result = workspace_missing_valuations(_selection(args), config_path=args.config)
+    if args.json:
+        _emit_result("valuation.missing", result)
+    else:
+        print(f"Missing HKD values: {result.data['missing_valuation_count']}")
+    return 0
+
+
+def _doctor_command(argv: list[str]) -> int:
+    parser = _parser(
+        "honeymoney doctor", "Audit managed state without reading statements."
+    )
+    parser.add_argument("--fix", action="store_true")
+    parser.add_argument("--config")
+    parser.add_argument("--json", action="store_true")
+    args = parser.parse_args(argv)
+    root = Path(args.config or "config.json").expanduser().absolute().parent
+    from honeymoney.doctor import audit_workspace, fix_workspace
+
+    if args.fix:
+        fixed = fix_workspace(root)
+        audit, repaired = fixed.after, len(fixed.applied_actions)
+    else:
+        audit, repaired = audit_workspace(root), 0
+    findings = [
+        {
+            "code": item.code,
+            "severity": item.severity.value,
+            "repair_class": item.repair_class.value,
+            **({"path": item.path} if item.path is not None else {}),
+            "next_action": item.next_action,
+            "detail_count": item.detail_count,
+            "omitted_detail_count": item.omitted_detail_count,
+        }
+        for item in audit.findings
+    ]
+    if args.json:
+        _emit_json(
+            "doctor",
+            "success" if audit.healthy else "action_required",
+            data={
+                "findings": findings,
+                "finding_count": len(findings),
+                "repaired_count": repaired,
+                "checked_item_count": audit.checked_item_count,
+            },
+        )
+    elif audit.healthy:
+        print("Workspace is healthy.")
+    else:
+        for item in findings:
+            path = f"  {item['path']}" if "path" in item else ""
+            print(f"{item['severity']}: {item['code']}{path}")
+            print(f"  {item['next_action']}")
+    return audit.exit_code
+
+
+def _review_command(argv: list[str]) -> int:
+    if argv and argv[0] == "pair":
+        return _review_pair_command(argv[1:])
+    parser = _period_parser(
+        "honeymoney review", "Inspect or resolve local review decisions."
+    )
+    parser.add_argument("--transaction")
+    parser.add_argument("--as", dest="decision")
+    parser.add_argument("--file", dest="decision_file")
+    args = parser.parse_args(argv)
+    one_shot = args.transaction is not None or args.decision is not None
+    has_selector = any(
+        (
+            args.period is not None,
+            args.month is not None,
+            args.start is not None,
+            args.end is not None,
+            args.undated,
+            args.all_periods,
+        )
+    )
+    if one_shot and (args.transaction is None or args.decision is None):
+        raise CliUsageError("Review requires both --transaction and --as")
+    if one_shot and args.decision_file is not None:
+        raise CliUsageError("Review accepts one decision source at a time")
+    if (one_shot or args.decision_file is not None) and has_selector:
+        raise CliUsageError("Saved review decisions cannot use period filters")
+    if one_shot:
+        result = review_workspace_transaction(
+            args.transaction,
+            args.decision,
+            config_path=args.config,
+        )
+    elif args.decision_file is not None:
+        result = _apply_correction_file(args.decision_file, args.config)
+    else:
+        result = workspace_pending(_selection(args), config_path=args.config)
+    if args.json:
+        _emit_result("review", result)
+    elif not one_shot and args.decision_file is None:
+        print(f"Pending review: {result.data['pending_count']}")
+    else:
+        print(f"Saved {result.data['corrected_count']} review decision(s).")
+    return 0
+
+
+def _review_pair_command(argv: list[str]) -> int:
+    parser = _parser(
+        "honeymoney review pair",
+        "Confirm two same-account cash movements as a manual transfer pair.",
+    )
+    parser.add_argument("transaction_ids", nargs=2, metavar="VIEW_TRANSACTION_ID")
+    parser.add_argument("--yes", action="store_true")
+    parser.add_argument("--config")
+    parser.add_argument("--json", action="store_true")
+    args = parser.parse_args(argv)
+    if not args.yes:
+        raise CliUsageError("Manual transfer pairing requires --yes confirmation.")
+    result = workspace_review_pair(args.transaction_ids, config_path=args.config)
+    if args.json:
+        _emit_result("review.pair", result)
+    elif result.data["changed"]:
+        print(f"Manual transfer pair confirmed: {result.data['pair_id']}.")
+    else:
+        print(f"Manual transfer pair already exists: {result.data['pair_id']}.")
+    return 0
+
+
+def _correct_command(argv: list[str]) -> int:
+    parser = _parser(
+        "honeymoney correct", "Apply saved corrections from a local CSV file."
+    )
+    parser.add_argument("--file", required=True)
+    parser.add_argument("--config")
+    parser.add_argument("--json", action="store_true")
+    args = parser.parse_args(argv)
+    result = _apply_correction_file(args.file, args.config)
+    if args.json:
+        _emit_result("correct", result)
+    else:
+        print(f"Saved {result.data['corrected_count']} correction(s).")
+    return 0
+
+
+def _apply_correction_file(value: str, config_path: str | Path | None) -> CommandResult:
+    raw_path = Path(_clean_pasted_path(value)).expanduser()
+    if raw_path.is_symlink():
+        raise CliUsageError("Correction file does not exist or is unsafe")
+    path = raw_path.resolve(strict=False)
+    if not path.is_file():
+        raise CliUsageError("Correction file does not exist or is unsafe")
+    context = load_workspace(config_path)
+    batch_config = {**context.config, "corrections": str(path)}
+    try:
+        patches = load_corrections(batch_config)
+    except (OSError, UnicodeError, ValueError) as error:
+        raise CliUsageError("Correction file is invalid") from error
+    if not patches:
+        raise CliUsageError("Correction file has no choices")
+    return apply_workspace_corrections(patches, config_path=config_path)
+
+
+def _rates_command(argv: list[str]) -> int:
+    if not argv or argv[0] not in {"import", "fetch"}:
+        raise CliUsageError("honeymoney rates requires `import` or `fetch`")
+    if argv[0] == "import":
+        return _rates_import_command(argv[1:])
+    return _rates_fetch_command(argv[1:])
+
+
+def _duplicates_command(argv: list[str]) -> int:
+    if argv and argv[0] == "resolve":
+        parser = _parser(
+            "honeymoney duplicates resolve", "Save one exact duplicate choice."
+        )
+        parser.add_argument("group_id")
+        parser.add_argument("--as", dest="choice", required=True)
+        parser.add_argument("--config")
+        parser.add_argument("--json", action="store_true")
+        args = parser.parse_args(argv[1:])
+        result = resolve_workspace_duplicate(
+            args.group_id,
+            args.choice,
+            config_path=args.config,
+        )
+        command = "duplicates.resolve"
+    else:
+        parser = _parser(
+            "honeymoney duplicates", "List unresolved exact duplicate groups."
+        )
+        parser.add_argument("--config")
+        parser.add_argument("--json", action="store_true")
+        args = parser.parse_args(argv)
+        result = workspace_duplicates(config_path=args.config)
+        command = "duplicates"
+    if args.json:
+        _emit_result(command, result)
+    elif command == "duplicates":
+        print(f"Unresolved duplicate groups: {result.data['duplicate_group_count']}")
+    else:
+        print(
+            "Duplicate choice saved; "
+            f"{result.data['remaining_duplicate_group_count']} group(s) remain."
+        )
+    return 0
+
+
+def _reconcile_command(argv: list[str]) -> int:
+    parser = _parser(
+        "honeymoney reconcile",
+        "Inspect current transfer and balance reconciliation.",
+    )
+    parser.add_argument("--config")
+    parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--json", action="store_true")
+    args = parser.parse_args(argv)
+    result = workspace_reconciliation_summary(config_path=args.config)
+    result = CommandResult(
+        data={**result.data, "dry_run": args.dry_run},
+        artifacts=result.artifacts,
+        warnings=result.warnings,
+    )
+    if args.json:
+        _emit_result("reconcile", result)
+    else:
+        print(
+            f"Reconciliation: {result.data['view_transaction_count']} view "
+            f"transactions, {result.data['paired_groups']} paired group(s), "
+            f"{result.data['ambiguous_transactions']} ambiguous."
+        )
+    return 0
+
+
+def _learn_command(argv: list[str]) -> int:
+    parser = _parser(
+        "honeymoney learn", "Build exact managed rules from saved local reviews."
+    )
+    parser.add_argument("--config")
+    parser.add_argument("--yes", action="store_true")
+    parser.add_argument("--json", action="store_true")
+    args = parser.parse_args(argv)
+    result = learn_workspace_rules(config_path=args.config, apply=args.yes)
+    if args.json:
+        _emit_json(
+            "learn",
+            "success" if args.yes else "dry_run",
+            data=result.data,
+            artifacts=result.artifacts,
+            warnings=list(result.warnings),
+        )
+    else:
+        mode = "Updated" if args.yes else "Dry run"
+        print(
+            f"{mode}: {result.data['candidates']} candidates, "
+            f"{result.data['broad_rules']} broad rules, "
+            f"{result.data['amount_specific_rules']} amount-specific rules."
+        )
+        if not args.yes:
+            print("Run again with --yes to update managed rules.")
+    return 0
+
+
+def _source_data_command(argv: list[str]) -> int:
+    if not argv or argv[0] not in {"inspect", "resolve"}:
+        raise CliUsageError("honeymoney source-data requires `inspect` or `resolve`")
+    action, tail = argv[0], argv[1:]
+    parser = _parser(
+        f"honeymoney source-data {action}",
+        "Inspect or clear one stored source-data review state.",
+    )
+    parser.add_argument("transaction_id", metavar="VIEW_TRANSACTION_ID")
+    parser.add_argument("--config")
+    parser.add_argument("--json", action="store_true")
+    args = parser.parse_args(tail)
+    result = (
+        workspace_source_data_inspect(args.transaction_id, config_path=args.config)
+        if action == "inspect"
+        else resolve_workspace_source_data(args.transaction_id, config_path=args.config)
+    )
+    if args.json:
+        _emit_result(f"source-data.{action}", result)
+    elif action == "inspect":
+        transaction = result.data["transaction"]
+        if not isinstance(transaction, dict):
+            raise AssertionError("source-data inspection has an invalid shape")
+        print(
+            f"Source-data evidence: {transaction['evidence_status']} "
+            f"({transaction['source_occurrence_count']} source occurrence(s))."
+        )
+    elif result.data["changed"]:
+        print("Cleared the stale source-data review state.")
+    else:
+        print("Source-data review state is already clear.")
+    return 0
+
+
+def _profile_command(argv: list[str]) -> int:
+    if argv and argv[0] == "bind":
+        return _profile_bind_command(argv[1:])
+    if argv and argv[0] == "bindings":
+        return _profile_bindings_command(argv[1:])
+    if argv and argv[0] == "replace-pattern":
+        return _profile_replace_pattern_command(argv[1:])
+    if argv and argv[0] == "remove-pattern":
+        return _profile_remove_pattern_command(argv[1:])
+    parser = _parser("honeymoney profile", "Validate a local import profile.")
+    parser.add_argument("operation", choices=["validate"])
+    parser.add_argument("profile_path")
+    parser.add_argument("--config")
+    parser.add_argument("--json", action="store_true")
+    args = parser.parse_args(argv)
+    raw_profile_path = Path(args.profile_path).expanduser()
+    if raw_profile_path.is_symlink():
+        raise CliUsageError("Profile path does not exist or is unsafe")
+    profile_path = raw_profile_path.resolve(strict=False)
+    if not profile_path.is_file():
+        raise CliUsageError("Profile path does not exist or is unsafe")
+    if args.config is not None or Path("config.json").is_file():
+        context = load_workspace(args.config)
+        config = context.config
+    else:
+        config = {
+            "base_currency": "HKD",
+            "exchange_rates": {"HKD": 1.0, "USD": 7.8},
+            "pdf": {"enabled": True, "parser": "pdfplumber"},
+        }
+    try:
+        value: object = json.loads(profile_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise CliUsageError("Profile is not valid JSON") from error
+    try:
+        profile = importers._validate_profile(value, profile_path, config)
+    except (TypeError, ValueError) as error:
+        raise CliUsageError("Profile is invalid") from error
+    profile_id = str(profile.get("id") or profile["account_id"])
+    parsers = [name for name in ("csv", "pdf") if name in profile]
+    data: dict[str, object] = {
+        "parsers": parsers,
+        "profile_id": profile_id,
+        "profile_path": str(profile_path),
+    }
+    if args.json:
+        _emit_json("profile.validate", "success", data=data)
+    else:
+        print(f"Profile {profile_id} is valid ({', '.join(parsers)}).")
+    return 0
+
+
+def _profile_bind_command(argv: list[str]) -> int:
+    parser = _parser(
+        "honeymoney profile bind",
+        "Save one filename-to-account binding.",
+    )
+    parser.add_argument("binding_id")
+    parser.add_argument("--pattern", required=True)
+    parser.add_argument("--profile", dest="profile_id", required=True)
+    parser.add_argument("--owner", required=True)
+    parser.add_argument(
+        "--account",
+        action="append",
+        required=True,
+        metavar="SOURCE_ID=ACCOUNT_ID=ACCOUNT_NAME",
+    )
+    parser.add_argument("--config")
+    parser.add_argument("--json", action="store_true")
+    args = parser.parse_args(argv)
+    binding_id = _required_profile_value("binding id", args.binding_id)
+    pattern = _required_profile_value("filename pattern", args.pattern)
+    profile_id = _required_profile_value("profile id", args.profile_id)
+    owner = _required_profile_value("owner", args.owner)
+    context = load_workspace(args.config)
+    profiles, mappings = _profile_cli_inputs(context.config)
+    try:
+        if profile_id not in {
+            str(profile.get("id") or profile.get("account_id") or "")
+            for profile in profiles
+        }:
+            raise ValueError(f"Unknown profile for account binding: {profile_id}")
+        next_mappings = upsert_binding(
+            mappings,
+            {
+                "id": binding_id,
+                "profile": profile_id,
+                "owner": owner,
+                "accounts": [_parse_bound_account(value) for value in args.account],
+            },
+            pattern,
+        )
+    except ValueError as error:
+        raise CliUsageError("Account binding values are invalid") from error
+    result = apply_workspace_profile_mappings(
+        next_mappings,
+        config_path=args.config,
+        expected_generation_id=context.index["generation_id"],
+    )
+    binding = next(
+        item for item in binding_views(next_mappings) if item.get("id") == binding_id
+    )
+    result = CommandResult(
+        data={**result.data, "binding": binding},
+        artifacts={
+            **result.artifacts,
+            "profile_mappings_json": str(context.config["profile_mappings"]),
+        },
+        warnings=result.warnings,
+    )
+    if args.json:
+        _emit_result("profile.bind", result)
+    else:
+        print(f"Saved account binding {binding_id} for {pattern}.")
+    return 0
+
+
+def _profile_bindings_command(argv: list[str]) -> int:
+    parser = _parser("honeymoney profile bindings", "List saved account bindings.")
+    parser.add_argument("--config")
+    parser.add_argument("--json", action="store_true")
+    args = parser.parse_args(argv)
+    result = workspace_profile_bindings(config_path=args.config)
+    if args.json:
+        _emit_result("profile.bindings", result)
+    else:
+        bindings = result.data["bindings"]
+        if not isinstance(bindings, list):
+            raise AssertionError("binding list result has an invalid shape")
+        if not bindings:
+            print("No account bindings are saved.")
+        for binding in bindings:
+            if not isinstance(binding, dict):
+                raise AssertionError("binding result has an invalid shape")
+            print(
+                f"{binding['id']}: profile={binding['profile']} "
+                f"owner={binding['owner']} patterns={', '.join(binding['patterns'])}"
+            )
+    return 0
+
+
+def _profile_replace_pattern_command(argv: list[str]) -> int:
+    parser = _parser(
+        "honeymoney profile replace-pattern",
+        "Replace one saved binding filename pattern.",
+    )
+    parser.add_argument("binding_id")
+    parser.add_argument("--old-pattern", required=True)
+    parser.add_argument("--new-pattern", required=True)
+    parser.add_argument("--config")
+    parser.add_argument("--json", action="store_true")
+    args = parser.parse_args(argv)
+    binding_id = _required_profile_value("binding id", args.binding_id)
+    old_pattern = _required_profile_value("old filename pattern", args.old_pattern)
+    new_pattern = _required_profile_value("new filename pattern", args.new_pattern)
+    context = load_workspace(args.config)
+    _profiles, mappings = _profile_cli_inputs(context.config)
+    try:
+        next_mappings, changed = replace_binding_pattern(
+            mappings,
+            binding_id,
+            old_pattern,
+            new_pattern,
+        )
+    except ValueError as error:
+        raise CliUsageError("Account binding pattern change is invalid") from error
+    result = apply_workspace_profile_mappings(
+        next_mappings,
+        config_path=args.config,
+        expected_generation_id=context.index["generation_id"],
+    )
+    binding = next(
+        item for item in binding_views(next_mappings) if item.get("id") == binding_id
+    )
+    data = {
+        **result.data,
+        "binding_id": binding_id,
+        "changed": changed,
+        "new_pattern": new_pattern,
+        "old_pattern": old_pattern,
+        "profile": binding["profile"],
+        "result": "replaced" if changed else "already_replaced",
+    }
+    result = CommandResult(
+        data=data,
+        artifacts={
+            **result.artifacts,
+            "profile_mappings_json": str(context.config["profile_mappings"]),
+        },
+        warnings=result.warnings,
+    )
+    if args.json:
+        _emit_result("profile.replace-pattern", result)
+    elif changed:
+        print(f"Replaced {old_pattern} with {new_pattern} for {binding_id}.")
+    else:
+        print(f"Account binding {binding_id} already uses {new_pattern}.")
+    return 0
+
+
+def _profile_remove_pattern_command(argv: list[str]) -> int:
+    parser = _parser(
+        "honeymoney profile remove-pattern",
+        "Remove one saved binding filename pattern.",
+    )
+    parser.add_argument("binding_id")
+    parser.add_argument("--pattern", required=True)
+    parser.add_argument("--yes", action="store_true")
+    parser.add_argument("--config")
+    parser.add_argument("--json", action="store_true")
+    args = parser.parse_args(argv)
+    binding_id = _required_profile_value("binding id", args.binding_id)
+    pattern = _required_profile_value("filename pattern", args.pattern)
+    context = load_workspace(args.config)
+    _profiles, mappings = _profile_cli_inputs(context.config)
+    try:
+        next_mappings, changed, binding_removed, profile = remove_binding_pattern(
+            mappings,
+            binding_id,
+            pattern,
+            confirm_final=args.yes,
+        )
+    except ValueError as error:
+        raise CliUsageError("Account binding pattern removal is invalid") from error
+    result = apply_workspace_profile_mappings(
+        next_mappings,
+        config_path=args.config,
+        expected_generation_id=context.index["generation_id"],
+    )
+    result = CommandResult(
+        data={
+            **result.data,
+            "binding_id": binding_id,
+            "binding_removed": binding_removed,
+            "changed": changed,
+            "pattern": pattern,
+            "profile": profile,
+            "result": "removed" if changed else "already_removed",
+        },
+        artifacts={
+            **result.artifacts,
+            "profile_mappings_json": str(context.config["profile_mappings"]),
+        },
+        warnings=result.warnings,
+    )
+    if args.json:
+        _emit_result("profile.remove-pattern", result)
+    elif changed:
+        suffix = " and removed the binding" if binding_removed else ""
+        print(f"Removed {pattern} from account binding {binding_id}{suffix}.")
+    else:
+        print(f"Account binding {binding_id} pattern {pattern} is already removed.")
+    return 0
+
+
+def _required_profile_value(label: str, value: str) -> str:
+    result = value.strip()
+    if not result:
+        raise CliUsageError(f"Account {label} must be a non-empty string")
+    return result
+
+
+def _profile_cli_inputs(
+    config: dict[str, object],
+) -> tuple[list[Profile], dict[str, object]]:
+    """Load profile inputs without echoing their values on failure."""
+    try:
+        return (
+            importers._load_profiles(config),
+            importers._load_profile_mappings(config),
+        )
+    except (OSError, UnicodeError, json.JSONDecodeError, ValueError) as error:
+        raise CliUsageError("Workspace profiles or mappings are invalid") from error
+
+
+def _parse_bound_account(value: str) -> BoundAccount:
+    parts = value.split("=", 2)
+    if len(parts) != 3 or any(not part.strip() for part in parts):
+        raise CliUsageError(
+            "--account must use SOURCE_ID=ACCOUNT_ID=ACCOUNT_NAME with no empty field"
+        )
+    return {
+        "source_account_id": parts[0].strip(),
+        "account_id": parts[1].strip(),
+        "account": parts[2].strip(),
+    }
+
+
+def _config_command(argv: list[str]) -> int:
+    parser = _parser("honeymoney config", "View or edit the workspace config.")
+    parser.add_argument("action", nargs="?", choices=["edit"])
+    parser.add_argument("section", nargs="?", choices=["ollama"])
+    parser.add_argument("--config")
+    parser.add_argument("--model")
+    enabled = parser.add_mutually_exclusive_group()
+    enabled.add_argument("--enable", action="store_true")
+    enabled.add_argument("--disable", action="store_true")
+    parser.add_argument("--json", action="store_true")
+    args = parser.parse_args(argv)
+    if args.action is None:
+        if args.section or args.model or args.enable or args.disable:
+            raise CliUsageError("Config changes require `honeymoney config edit`")
+        result = workspace_public_config(config_path=args.config)
+        if args.json:
+            _emit_result("config", result)
+        else:
+            print(json.dumps(result.data["config"], indent=2, sort_keys=True))
+        return 0
+    if args.section is None:
+        if args.json:
+            raise CliUsageError("honeymoney config edit does not support --json")
+        if args.model or args.enable or args.disable:
+            raise CliUsageError(
+                "Ollama options require `honeymoney config edit ollama`"
+            )
+        context, raw_config = workspace_config_document(config_path=args.config)
+        edited = _edit_config_in_editor(context.paths.config, raw_config)
+        result = apply_workspace_config(
+            edited,
+            config_path=args.config,
+            expected_generation_id=context.index["generation_id"],
+        )
+        print(f"Updated {context.paths.config}")
+        if result.data["written_count"]:
+            print(f"Refreshed {result.data['written_count']} view(s).")
+        return 0
+    if args.disable and args.model:
+        raise CliUsageError("Use either --disable or --model, not both")
+    if args.model is not None and not args.model.strip():
+        raise CliUsageError("--model must be a non-empty Ollama model name")
+    if not args.model and not args.enable and not args.disable:
+        raise CliUsageError(
+            "Use --model, --enable, or --disable with `honeymoney config edit ollama`"
+        )
+    context, raw_config = workspace_config_document(config_path=args.config)
+    ollama = raw_config.get("ollama", {})
+    if not isinstance(ollama, dict):
+        raise CliUsageError("Config field ollama must be a JSON object")
+    updated_ollama = copy.deepcopy(ollama)
+    if args.model:
+        updated_ollama["model"] = args.model.strip()
+        updated_ollama["enabled"] = True
+    elif args.enable:
+        _require_available_ollama_model(updated_ollama)
+        updated_ollama["enabled"] = True
+    else:
+        updated_ollama["enabled"] = False
+    candidate = {**raw_config, "ollama": updated_ollama}
+    result = apply_workspace_config(
+        candidate,
+        config_path=args.config,
+        expected_generation_id=context.index["generation_id"],
+    )
+    data = {
+        **result.data,
+        "ollama": {
+            "enabled": bool(updated_ollama.get("enabled", False)),
+            "model": str(updated_ollama.get("model", "")),
+        },
+    }
+    result = CommandResult(
+        data=data,
+        artifacts=result.artifacts,
+        warnings=result.warnings,
+    )
+    if args.json:
+        _emit_result("config", result)
+    elif updated_ollama.get("enabled"):
+        print(f"Ollama enabled with model {updated_ollama.get('model', '(not set)')}")
+    else:
+        print("Ollama disabled")
+    return 0
+
+
+def _require_available_ollama_model(ollama: dict[str, object]) -> None:
+    model = str(ollama.get("model", "")).strip()
+    if not model:
+        raise CliUsageError("Set an Ollama model with --model before enabling it")
+    models = list_ollama_models(ollama)
+    aliases = {
+        alias for item in models for alias in (item, item.removesuffix(":latest"))
+    }
+    if model not in aliases:
+        raise CliUsageError(
+            "Configured Ollama model is not installed; pass --model or install it first"
+        )
+
+
+def _edit_config_in_editor(
+    config_path: Path, raw_config: dict[str, object]
+) -> dict[str, object]:
+    editor = os.environ.get("VISUAL") or os.environ.get("EDITOR")
+    if not editor:
+        raise CliUsageError("Set $VISUAL or $EDITOR before running config edit")
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{config_path.stem}.",
+        suffix=".json",
+    )
+    temporary_path = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write(json.dumps(raw_config, indent=2, sort_keys=True) + "\n")
+        completed = subprocess.run(
+            [*shlex.split(editor), str(temporary_path)], check=False
+        )
+        if completed.returncode != 0:
+            raise CliUsageError(f"Editor exited with status {completed.returncode}")
+        try:
+            edited = json.loads(temporary_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError) as error:
+            raise CliUsageError("Edited config is not valid JSON") from error
+        if not isinstance(edited, dict):
+            raise CliUsageError("Edited config must be a JSON object")
+        return edited
+    finally:
+        temporary_path.unlink(missing_ok=True)
+
+
+def _rates_import_command(argv: list[str]) -> int:
+    parser = _parser(
+        "honeymoney rates import", "Import a downloaded HKMA daily-rate document."
+    )
+    parser.add_argument("file")
+    parser.add_argument("--config")
+    parser.add_argument("--json", action="store_true")
+    args = parser.parse_args(argv)
+    context = load_workspace(args.config)
+    raw_path = Path(_clean_pasted_path(args.file)).expanduser()
+    if raw_path.is_symlink():
+        raise CliUsageError("Rate document does not exist or is unsafe")
+    path = raw_path.resolve(strict=False)
+    if not path.is_file():
+        raise CliUsageError("Rate document does not exist")
+    observations = parse_hkma_daily_document(
+        path.read_bytes(),
+        base_currency=str(context.config.get("base_currency", "HKD")),
+    )
+    result = apply_workspace_rate_observations(
+        observations,
+        config_path=args.config,
+    )
+    if args.json:
+        _emit_result("rates.import", result)
+    else:
+        print(
+            f"Imported {result.data['imported_observation_count']} observations; "
+            f"{result.data['resolved_transaction_date_count']} transaction dates "
+            "resolved."
+        )
+    return 0
+
+
+def _rates_fetch_command(argv: list[str]) -> int:
+    parser = _parser(
+        "honeymoney rates fetch", "Fetch approved public HKMA daily-rate fields."
+    )
+    parser.add_argument("currencies", nargs="+")
+    parser.add_argument("--start", required=True)
+    parser.add_argument("--end", required=True)
+    parser.add_argument("--allow-network", action="store_true")
+    parser.add_argument("--config")
+    parser.add_argument("--json", action="store_true")
+    args = parser.parse_args(argv)
+    context = load_workspace(args.config)
+    request = prepare_hkma_fetch(
+        args.currencies,
+        start=args.start,
+        end=args.end,
+        base_currency=str(context.config.get("base_currency", "HKD")),
+    )
+    if not args.allow_network:
+        if args.json or not sys.stdin.isatty():
+            raise CliUsageError("Non-interactive rate fetch requires --allow-network.")
+        print(f"Requested range: {request.start} to {request.end}")
+        print(f"Currencies: {', '.join(request.currencies)}")
+        if input("Fetch these public rates now? [y/N] ").strip().casefold() not in {
+            "y",
+            "yes",
+        }:
+            print("Rate fetch cancelled.")
+            return 0
+    fetched = fetch_hkma_daily_rates(request)
+    base_result = apply_workspace_rate_observations(
+        fetched.observations,
+        config_path=args.config,
+    )
+    result = CommandResult(
+        data={
+            **base_result.data,
+            "network_access": True,
+            "requested_currencies": list(request.currencies),
+            "requested_range": {"start": request.start, "end": request.end},
+            "fetched_page_count": len(fetched.request_urls),
+        },
+        artifacts=base_result.artifacts,
+        warnings=base_result.warnings,
+    )
+    if args.json:
+        _emit_result("rates.fetch", result)
+    else:
+        print(
+            f"Fetched {result.data['imported_observation_count']} observations; "
+            f"{result.data['resolved_transaction_date_count']} transaction dates "
+            "resolved."
+        )
+    return 0
+
+
+def _period_parser(prog: str, description: str) -> _Parser:
+    parser = _parser(prog, description)
+    parser.add_argument("period", nargs="?")
+    parser.add_argument("--month")
+    parser.add_argument("--start")
+    parser.add_argument("--end")
+    parser.add_argument("--undated", action="store_true")
+    parser.add_argument("--all", dest="all_periods", action="store_true")
+    parser.add_argument("--config")
+    parser.add_argument("--json", action="store_true")
+    return parser
+
+
+def _selection(args: argparse.Namespace) -> PeriodSelection:
+    return resolve_period_selection(
+        args.period,
+        month=args.month,
+        start=args.start,
+        end=args.end,
+        undated=args.undated,
+        all_periods=args.all_periods,
+    )
+
+
+def _parser(prog: str, description: str) -> _Parser:
+    return _Parser(prog=prog, description=description, add_help=True)
+
+
+def _setup_root(value: str | None) -> Path:
+    if value:
+        return Path(value).expanduser().absolute()
+    try:
+        supplied = input("Root folder [./money]: ").strip()
+    except EOFError:
+        supplied = ""
+    return Path(supplied or "./money").expanduser().absolute()
+
+
+def _clean_pasted_path(value: str) -> str:
+    cleaned = value.strip()
+    if len(cleaned) >= 2 and cleaned[0] == cleaned[-1] and cleaned[0] in {"'", '"'}:
+        cleaned = cleaned[1:-1]
+    if not cleaned:
+        raise CliUsageError("Import path must not be empty")
+    return cleaned
+
+
+def _emit_result(command: str, result: CommandResult) -> None:
+    _emit_json(
+        command,
+        "success",
+        data=result.data,
+        artifacts=result.artifacts,
+        warnings=list(result.warnings),
+    )
 
 
 def _emit_json(
     command: str,
     status: str,
     *,
-    data: dict[str, Any] | None = None,
-    artifacts: dict[str, Any] | None = None,
-    warnings: list[Any] | None = None,
-    errors: list[Any] | None = None,
+    data: dict[str, object] | None = None,
+    artifacts: dict[str, object] | None = None,
+    warnings: Sequence[object] | None = None,
+    errors: Sequence[object] | None = None,
 ) -> None:
     print(
         json.dumps(
@@ -286,5925 +1271,61 @@ def _emit_json(
     )
 
 
-class _CommandArgumentParser(argparse.ArgumentParser):
-    def __init__(self, *args: Any, json_errors: bool = False, **kwargs: Any) -> None:
-        self._json_errors = json_errors
-        super().__init__(*args, **kwargs)
-
-    def error(self, message: str) -> None:
-        if self._json_errors:
-            raise ValueError(f"{self.prog}: {message}")
-        super().error(message)
-
-
-def _command_parser(argv: list[str], **kwargs: Any) -> _CommandArgumentParser:
-    return _CommandArgumentParser(json_errors="--json" in argv, **kwargs)
-
-
-class _StatusLine:
-    """A single terminal line that updates in place; silent when not a TTY."""
-
-    def __init__(self, stream: Any = None, enabled: bool | None = None) -> None:
-        self._stream = stream if stream is not None else sys.stderr
-        self._enabled = self._stream.isatty() if enabled is None else enabled
-        self._last_length = 0
-
-    def update(
-        self,
-        text: str,
-        *,
-        compact: str | None = None,
-        preserve_suffix: int = 0,
-    ) -> None:
-        if not self._enabled:
-            return
-        width = shutil.get_terminal_size().columns
-        if compact is not None and len(text) > width:
-            text = compact
-        if width > 1 and len(text) > width:
-            limit = width - 1
-            if 0 < preserve_suffix < limit - 1:
-                prefix_length = limit - preserve_suffix - 1
-                text = text[:prefix_length] + "…" + text[-preserve_suffix:]
-            else:
-                text = text[: limit - 1] + "…"
-        padding = " " * max(0, self._last_length - len(text))
-        self._stream.write(f"\r{text}{padding}")
-        self._stream.flush()
-        self._last_length = len(text)
-
-    def clear(self) -> None:
-        if not self._enabled or not self._last_length:
-            return
-        self._stream.write("\r" + " " * self._last_length + "\r")
-        self._stream.flush()
-        self._last_length = 0
-
-
-_status = _StatusLine()
-
-
-def _ollama_progress(progress: OllamaProgress) -> None:
-    range_label = (
-        str(progress.start_index)
-        if progress.start_index == progress.end_index
-        else f"{progress.start_index}-{progress.end_index}"
-    )
-    elapsed = f", {progress.elapsed_seconds:.0f}s" if progress.elapsed_seconds else ""
-    model = "".join(
-        character
-        if character.isprintable()
-        else character.encode("unicode_escape").decode("ascii")
-        for character in progress.model
-    )
-    details = (
-        f"batch {progress.batch_number}/{progress.batch_count} "
-        f"(transactions {range_label} of {progress.total}{elapsed})"
-    )
-    compact_details = (
-        f"batch {progress.batch_number}/{progress.batch_count} "
-        f"(tx {range_label}/{progress.total}{elapsed})"
-    )
-    compact = f"Ollama ({model}): {compact_details}"
-    _status.update(
-        f"Categorizing via Ollama ({model})... {details}",
-        compact=compact,
-        preserve_suffix=len(compact_details),
-    )
-
-
-def main(argv: list[str] | None = None) -> int:
-    argv = list(sys.argv[1:] if argv is None else argv)
-    if argv and argv[0] in {"help", "--help", "-h"}:
-        print(_help_text())
-        return 0
-    if argv and argv[0] == "setup":
-        return _setup_command(argv[1:])
-    if argv and argv[0] == "import":
-        return _import_command(argv[1:])
-    if argv and argv[0] == "profile":
-        return _profile_command(argv[1:])
-    if argv and argv[0] == "evaluate":
-        return _evaluate_command(argv[1:])
-    if argv and argv[0] == "learn":
-        return _learn_command(argv[1:])
-    if argv and argv[0] == "valuation":
-        return _valuation_command(argv[1:])
-    if argv and argv[0] == "source-data":
-        return _source_data_command(argv[1:])
-    if argv and argv[0] == "rates":
-        return _rates_command(argv[1:])
-    if argv and argv[0] == "status":
-        return _status_command(argv[1:])
-    if argv and argv[0] == "pending":
-        return _pending_command(argv[1:])
-    if argv and argv[0] == "duplicates":
-        return _duplicates_command(argv[1:])
-    if argv and argv[0] == "correct":
-        return _correct_command(argv[1:])
-    if argv and argv[0] == "report":
-        return _report_command(argv[1:])
-    if argv and argv[0] == "reconcile":
-        return _reconcile_command(argv[1:])
-    if argv and argv[0] == "review":
-        return _review_command(argv[1:])
-    if argv and argv[0] == "config":
-        return _config_command(argv[1:])
-    if argv and argv[0] == "run":
-        argv = argv[1:]
-    return _run_pipeline(argv)
-
-
-def _run_pipeline(
-    argv: list[str],
-    print_import_summary: bool = False,
-    json_command: str = "run",
-    explicit_binding_id: str | None = None,
-) -> int:
-    parser = _command_parser(
-        argv,
-        prog="honeymoney",
-        description="Categorize local household transaction exports.",
-    )
-    parser.add_argument("--input", dest="input_path")
-    parser.add_argument("--output", dest="output_path")
-    parser.add_argument("--config", dest="config_path")
-    parser.add_argument("--strict", action="store_true")
-    parser.add_argument("--no-interactive", action="store_true")
-    parser.add_argument("--replace", action="store_true")
-    parser.add_argument("--reset", action="store_true")
-    parser.add_argument("--json", action="store_true")
-    args = parser.parse_args(argv)
-    interactive = not (args.no_interactive or args.json)
-    if args.reset:
-        requested_action = "reset"
-    elif args.replace:
-        requested_action = "replace"
-    else:
-        requested_action = "import"
-
-    config = _load_config(args.config_path)
-    input_path = Path(args.input_path or config["paths"]["input"])
-    if not input_path.exists():
-        raise ValueError(f"Input path does not exist: {input_path}")
-    if explicit_binding_id is not None and not input_path.is_file():
-        raise ValueError("honeymoney import --binding requires one CSV or PDF file")
-    categorized_path = Path(args.output_path or config["paths"]["output"])
-    output_dir = categorized_path.parent
-    review_needed_path = output_dir / "review_needed.csv"
-    import_report_path = output_dir / "import_report.json"
-
-    ensure_private_directory(output_dir)
-
-    input_files = importers._discover_input_files(input_path)
-    profiles = importers._load_profiles(config)
-    profile_mappings = importers._load_profile_mappings(config)
-    validate_bindings_for_profiles(profile_mappings, profiles)
-    explicit_binding: AccountBinding | None = None
-    if explicit_binding_id is not None:
-        explicit_binding = binding_by_id(profile_mappings, explicit_binding_id)
-        importers._explicit_binding_profile(input_path, profiles, explicit_binding)
-    expected_generation, identity_state = _load_configured_identity_generation(
-        categorized_path,
-        config,
-    )
-    preserved_ledger_rows = [dict(row) for row in identity_state.rows]
-    preserved_source_rows = [dict(row) for row in (identity_state.source_rows or [])]
-    review_migration_detected = _prepare_replacement_review_migration(
-        identity_state,
-        requested_action,
-    )
-    corrections = load_corrections(config)
-    migration_source_corrections: dict[str, dict[str, str]] = {}
-    migration_correction_updates: dict[str, dict[str, str]] = {}
-    prior_canonical_rows = identity_state.rows
-    prior_overlap_manifest = identity_state.overlap_manifest
-    if (
-        identity_state.canonical_migration_required
-        and not identity_state.bootstrap_required
-    ):
-        migration_source_corrections = {
-            identifier: dict(patch) for identifier, patch in corrections.items()
-        }
-        migration_baseline = canonicalize_overlaps(
-            identity_state.source_rows,
-            [],
-            identity_state.overlap_manifest,
-        )
-        migration_projection = project_corrections(
-            migration_baseline,
-            corrections,
-        )
-        migration_correction_updates = migration_projection.corrections
-        corrections = {
-            **corrections,
-            **migration_correction_updates,
-        }
-        apply_corrections(migration_baseline.rows, migration_projection.corrections)
-        apply_history_ambiguity(
-            migration_baseline.rows,
-            migration_projection.ambiguous_transaction_ids,
-        )
-        prior_canonical_rows = migration_baseline.rows
-        prior_overlap_manifest = migration_baseline.manifest
-    transactions, import_warnings, file_reports, identity_sources = (
-        importers._import_transactions(
-            input_files,
-            profiles,
-            config,
-            input_path,
-            interactive=interactive,
-            profile_mappings=profile_mappings,
-            profile_mappings_path=config.get("profile_mappings"),
-            explicit_binding=explicit_binding,
-            include_identity_sources=True,
-            status=_status.update,
-            clear_status=_status.clear,
-        )
-    )
-    prior_replacement_overlap = (
-        canonicalize_overlaps(
-            identity_state.source_rows,
-            identity_state.rows,
-            identity_state.overlap_manifest,
-        )
-        if requested_action == "replace"
-        and not identity_state.canonical_migration_required
-        else None
-    )
-    candidate_source_ids = importers._candidate_source_ids(
-        input_files, input_path, config
-    )
-    for file_report in file_reports:
-        file_report["requested_action"] = requested_action
-        file_report["source_id"] = candidate_source_ids.get(
-            file_report["source_file"], ""
-        )
-        if file_report.get("status") != "processed":
-            file_report["ledger_action"] = "preserved"
-        elif args.reset:
-            file_report["ledger_action"] = "reset"
-        elif args.replace:
-            file_report["ledger_action"] = "replaced"
-        else:
-            file_report["ledger_action"] = "added"
-    has_processed_source = any(
-        file_report.get("status") == "processed" for file_report in file_reports
-    )
-    resolution = resolve_batch(
-        ledger_rows=identity_state.source_rows,
-        manifest=identity_state.manifest,
-        sources=identity_sources,
-        intent=requested_action,
-        allow_unmatched_reallocation=(
-            identity_state.canonical_migration_required
-            and requested_action in {"replace", "reset"}
-        ),
-        allow_parser_upgrade_reallocation=requested_action in {"replace", "reset"},
-    )
-    source_transactions = [dict(row) for row in resolution.resolved_rows]
-    resolved_source_ids = {
-        str(source["source_namespace_id"]): str(source["source_id"])
-        for source in resolution.next_manifest["sources"]
-    }
-    for source in identity_sources:
-        source_id_value = resolved_source_ids.get(source.namespace_id, "")
-        for file_report in file_reports:
-            if file_report.get("source_file") == source.source_display:
-                file_report["source_id"] = source_id_value
-    import_warnings.extend(
-        _identity_diagnostic_warning(item) for item in resolution.diagnostics
-    )
-    reset_ids = set(resolution.reset_transaction_ids)
-    removed_correction_ids = set(reset_ids)
-    retained_source_rows = [dict(row) for row in resolution.retained_ledger_rows]
-    source_rows = [*retained_source_rows, *source_transactions]
-    overlap_result = canonicalize_overlaps(
-        source_rows,
-        prior_canonical_rows,
-        prior_overlap_manifest,
-    )
-    ledger_rows = overlap_result.rows
-    if args.reset and config.get("corrections"):
-        prior_overlap = canonicalize_overlaps(
-            identity_state.source_rows,
-            prior_canonical_rows,
-            prior_overlap_manifest,
-        )
-        prior_source_by_transaction = {
-            row["transaction_id"]: row["source_id"]
-            for row in identity_state.source_rows
-            if row.get("transaction_id") and row.get("source_id")
-        }
-        reset_source_ids = set(resolution.replaced_source_ids)
-        for group in prior_overlap.diagnostic["groups"]:
-            occurrence_ids = {
-                occurrence_id
-                for pool in group["source_occurrence_pools"]
-                for occurrence_id in pool
-            }
-            supporting_source_ids = {
-                prior_source_by_transaction[occurrence_id]
-                for occurrence_id in occurrence_ids
-                if occurrence_id in prior_source_by_transaction
-            }
-            if supporting_source_ids and supporting_source_ids <= reset_source_ids:
-                removed_correction_ids.update(group["canonical_transaction_ids"])
-        fingerprint_sources = _active_source_ids_by_fingerprint(identity_state.manifest)
-        historical_fingerprint_sources = _source_ids_by_fingerprint(
-            identity_state.manifest
-        )
-        for group in identity_state.overlap_manifest["groups"]:
-            fingerprint = group["record_fingerprint"]
-            supporting_source_ids = fingerprint_sources.get(
-                fingerprint
-            ) or historical_fingerprint_sources.get(fingerprint, set())
-            if supporting_source_ids and supporting_source_ids <= reset_source_ids:
-                removed_correction_ids.update(
-                    slot["transaction_id"] for slot in group["slots"]
-                )
-        for transaction_id in removed_correction_ids:
-            corrections.pop(transaction_id, None)
-            migration_correction_updates.pop(transaction_id, None)
-        overlap_result = canonicalize_overlaps(
-            source_rows,
-            [
-                row
-                for row in prior_canonical_rows
-                if row.get("transaction_id") not in removed_correction_ids
-            ],
-            prior_overlap_manifest,
-        )
-        ledger_rows = overlap_result.rows
-    bound_owner_updates = canonical_bound_owners(
-        source_rows,
-        overlap_result.diagnostic["groups"],
-        profile_mappings,
-    )
-    if not has_processed_source:
-        ledger_rows = [dict(row) for row in identity_state.rows]
-    incoming_occurrence_ids = {row["transaction_id"] for row in source_transactions}
-    affected_group_ids = {
-        group["group_id"]
-        for group in overlap_result.diagnostic["groups"]
-        if any(
-            occurrence_id in incoming_occurrence_ids
-            for pool in group["source_occurrence_pools"]
-            for occurrence_id in pool
-        )
-    }
-    transactions = [
-        row
-        for row in ledger_rows
-        if row.get("canonical_group_id") in affected_group_ids
-    ]
-    release_overlap_review_ownership(transactions)
-    parser_upgrade_source_ids = _parser_upgrade_rekeyed_source_ids(
-        identity_state.manifest,
-        resolution.next_manifest,
-        set(resolution.replaced_source_ids),
-    )
-    review_history_ambiguous_ids: tuple[str, ...] = ()
-    if (
-        review_migration_detected
-        and prior_replacement_overlap is not None
-        and parser_upgrade_source_ids
-    ):
-        pending_review_state = _pending_review_state_by_id(prior_canonical_rows)
-        if pending_review_state:
-            review_history_projection = project_replacement_corrections(
-                prior_replacement_overlap,
-                overlap_result,
-                identity_state.source_rows,
-                source_rows,
-                pending_review_state,
-                parser_upgrade_source_ids,
-            )
-            _apply_projected_review_state(
-                ledger_rows,
-                review_history_projection.corrections,
-            )
-            review_history_ambiguous_ids = (
-                review_history_projection.ambiguous_transaction_ids
-            )
-    if migration_source_corrections:
-        migration_projection = project_migration_corrections(
-            overlap_result,
-            identity_state.source_rows,
-            source_rows,
-            migration_source_corrections,
-            corrections,
-        )
-        migration_correction_updates = migration_projection.corrections
-        corrections.update(migration_correction_updates)
-        removed_correction_ids.update(migration_projection.removed_transaction_ids)
-        correction_projection = migration_projection
-    elif prior_replacement_overlap is not None and parser_upgrade_source_ids:
-        replacement_projection = project_replacement_corrections(
-            prior_replacement_overlap,
-            overlap_result,
-            identity_state.source_rows,
-            source_rows,
-            corrections,
-            parser_upgrade_source_ids,
-        )
-        migration_correction_updates = replacement_projection.corrections
-        corrections.update(migration_correction_updates)
-        removed_correction_ids.update(replacement_projection.removed_transaction_ids)
-        correction_projection = replacement_projection
-    else:
-        correction_projection = project_corrections(overlap_result, corrections)
-    canonical_corrections = correction_projection.corrections
-    local_memory = build_local_categorization_memory(
-        ledger_rows, canonical_corrections, config
-    )
-    _status.update("Applying categorization rules...")
-    rules = load_rules(config)
-    apply_rules(transactions, rules, config)
-    _status.update("Applying local categorization memory...")
-    apply_local_categorization_memory(transactions, local_memory, config)
-    _status.update("Applying structural classifications...")
-    structural_count = apply_structural_classification(transactions, config)
-    ollama_report, ollama_warnings = apply_ollama_fallback(
-        transactions,
-        config,
-        progress=_ollama_progress,
-        corrections=canonical_corrections,
-    )
-    if ollama_warnings:
-        _status.clear()
-        for warning in ollama_warnings:
-            print(f"Warning: {warning}", file=sys.stderr)
-    _status.update("Applying corrections...")
-    apply_corrections(transactions, canonical_corrections)
-    enforce_bound_owners(transactions, bound_owner_updates)
-    for transaction_id, owner in bound_owner_updates.items():
-        correction = canonical_corrections.get(transaction_id)
-        if correction is None or "owner" not in correction:
-            continue
-        correction["owner"] = owner
-        corrections.setdefault(transaction_id, {})["owner"] = owner
-        migration_correction_updates.setdefault(transaction_id, {})["owner"] = owner
-    apply_history_ambiguity(
-        ledger_rows,
-        tuple(
-            sorted(
-                {
-                    *correction_projection.ambiguous_transaction_ids,
-                    *review_history_ambiguous_ids,
-                }
-            )
-        ),
-    )
-    if has_processed_source:
-        enforce_overlap_review(ledger_rows, overlap_result)
-    _enforce_identity_review(transactions)
-    _status.clear()
-    if interactive:
-        categorized_interactively = _prompt_uncategorized(transactions, config)
-    else:
-        categorized_interactively = []
-    _status.update("Writing output files...")
-    final_review_ids = _final_review_ids(corrections)
-    final_review_ids.update(
-        transaction["transaction_id"] for transaction in categorized_interactively
-    )
-    if has_processed_source:
-        reconciliation = reconcile_ledger(
-            ledger_rows,
-            config,
-            statement_rows=source_rows,
-        )
-        repair_source_data_review_state(
-            ledger_rows,
-            source_rows,
-            overlap_result.manifest,
-        )
-        refresh_duplicate_candidates(ledger_rows, final_review_ids=final_review_ids)
-        enforce_overlap_review(ledger_rows, overlap_result)
-        _enforce_identity_review(ledger_rows)
-        synchronize_review_states(ledger_rows, legacy=False)
-    else:
-        reconciliation = reconcile_ledger(
-            [dict(row) for row in preserved_ledger_rows],
-            config,
-            statement_rows=[dict(row) for row in preserved_source_rows],
-        )
-        ledger_rows = preserved_ledger_rows
-        source_rows = preserved_source_rows
-        transactions = []
-    review_rows = [row for row in transactions if row["needs_review"] == "true"]
-    duplicate_count, duplicate_group_count, duplicate_candidates = (
-        _duplicate_compatibility(overlap_result.diagnostic)
-    )
-    import_warnings.extend(
-        f"{warning['code']}: duplicate group membership changed; "
-        f"review {warning['group_id']}"
-        for warning in overlap_result.diagnostic["warnings"]
-    )
-    report = {
-        "status": "partial_success" if import_warnings else "success",
-        "input_count": len(input_files),
-        "transaction_count": len(transactions),
-        "successful_record_count": len(source_transactions),
-        "source_occurrence_count": len(source_transactions),
-        "canonical_occurrence_count": len(transactions),
-        "unsuccessful_record_count": _unsuccessful_record_count(file_reports),
-        "review_count": len(review_rows),
-        "uncategorized_count": _uncategorized_count(transactions),
-        "overlap": overlap_result.diagnostic,
-        "duplicate_count": duplicate_count,
-        "duplicate_group_count": duplicate_group_count,
-        "duplicate_candidates": duplicate_candidates,
-        "categorization": {
-            "structural_count": structural_count,
-            "provenance": _categorization_provenance(transactions),
-        },
-        "strict": args.strict,
-        "interactive": interactive,
-        "replace": args.replace or args.reset,
-        "reset": args.reset,
-        "migration": {
-            "legacy_review_state_detected": review_migration_detected,
-            "legacy_review_state_applied": (
-                review_migration_detected and has_processed_source
-            ),
-        },
-        "output": {
-            "categorized_csv": str(categorized_path),
-            "review_needed_csv": str(review_needed_path),
-            "import_report_json": str(import_report_path),
-        },
-        "ledger": {
-            "transaction_count": len(ledger_rows),
-            "source_occurrence_count": len(source_rows),
-            "canonical_occurrence_count": len(ledger_rows),
-            "review_count": sum(
-                1 for row in ledger_rows if row.get("needs_review") == "true"
-            ),
-            "uncategorized_count": _uncategorized_count(ledger_rows),
-            "review_reason_counts": review_summary(ledger_rows),
-            "valuation": valuation_summary(ledger_rows),
-        },
-        "files": file_reports,
-        "transaction_flags": _transaction_flags(ledger_rows),
-        "transaction_diagnostics": _transaction_diagnostics(ledger_rows),
-        "warnings": import_warnings + ollama_warnings,
-        "errors": [],
-        "ollama": ollama_report,
-        "reconciliation": reconciliation,
-    }
-    if review_migration_detected and not has_processed_source:
-        with categorized_path.open(encoding="utf-8", newline="") as existing_ledger:
-            files = {categorized_path: existing_ledger.read()}
-    else:
-        files = ledger_output_documents(
-            categorized_path,
-            ledger_rows,
-            identity_manifest=resolution.next_manifest,
-            source_occurrences=source_rows,
-            source_evidence=identity_state.source_evidence_rows,
-            overlap_manifest=overlap_result.manifest,
-        )
-    files[import_report_path] = json.dumps(report, indent=2, sort_keys=True) + "\n"
-    correction_updates = dict(migration_correction_updates)
-    correction_updates.update(
-        {
-            transaction["transaction_id"]: {
-                "category": transaction["category"],
-                "confidence": "1.00",
-                "reason": "Categorized interactively",
-                "needs_review": "false",
-            }
-            for transaction in categorized_interactively
-        }
-    )
-    correction_updates.update(review_state_correction_updates(corrections, ledger_rows))
-    if not has_processed_source:
-        correction_updates = {}
-        removed_correction_ids = set()
-    if config.get("corrections") and (correction_updates or removed_correction_ids):
-        corrections_path, corrections_content, _ = prepare_corrections_document(
-            config,
-            correction_updates,
-            removed_transaction_ids=removed_correction_ids,
-        )
-        files[corrections_path] = corrections_content
-    if has_processed_source and isinstance(config.get("rate_cache"), str):
-        rate_cache_path = _configured_rate_cache_path(config)
-        next_rate_cache = merge_rate_cache(
-            _loaded_rate_cache(config),
-            [],
-            _requested_rate_pairs(
-                source_rows,
-                base_currency=str(config.get("base_currency", "HKD")),
-            ),
-        )
-        rate_cache_content = rate_cache_document(next_rate_cache)
-        if not _document_matches(rate_cache_path, rate_cache_content):
-            files[rate_cache_path] = rate_cache_content
-    persist_generation(
-        categorized_path,
-        files,
-        expected_generation_hashes=expected_generation,
-    )
-    _status.clear()
-
-    if print_import_summary:
-        _print_import_summary(report)
-
-    if args.json:
-        _emit_json(
-            json_command,
-            report["status"],
-            data=report,
-            artifacts=report["output"],
-            warnings=report["warnings"],
-        )
-
-    if args.strict and import_warnings:
-        return 1
-    return 0
-
-
-def _prepare_replacement_review_migration(
-    state: IdentityState,
-    requested_action: str,
-) -> bool:
-    """Make legacy review meaning explicit before source rows can change."""
-    if requested_action not in {"replace", "reset"}:
-        return False
-    if not (
-        state.canonical_migration_required or state.ledger_schema_migration_required
-    ):
-        return False
-
-    seen: set[int] = set()
-    for rows in (state.rows, state.source_rows, state.source_evidence_rows):
-        if rows is None or id(rows) in seen:
-            continue
-        seen.add(id(rows))
-        synchronize_review_states(rows, legacy=True)
-    return True
-
-
-_MIGRATED_REVIEW_STATE_FIELDS = (
-    "category",
-    "flow_type",
-    "flow_source",
-    "owner",
-    "payment_method",
-    "confidence",
-    "needs_review",
-    "review_reasons",
-    "reason",
-    "flags",
-    "notes",
-)
-
-
-def _pending_review_state_by_id(
-    rows: list[dict[str, str]],
-) -> dict[str, dict[str, str]]:
-    return {
-        row["transaction_id"]: {
-            field: row.get(field, "") for field in _MIGRATED_REVIEW_STATE_FIELDS
-        }
-        for row in rows
-        if row.get("transaction_id") and row.get("review_reasons")
-    }
-
-
-def _apply_projected_review_state(
-    rows: list[dict[str, str]],
-    projected: Mapping[str, Mapping[str, str]],
-) -> None:
-    for row in rows:
-        state = projected.get(row.get("transaction_id", ""))
-        if state is None:
-            continue
-        for field in _MIGRATED_REVIEW_STATE_FIELDS:
-            row[field] = str(state.get(field, ""))
-
-
-def _parser_upgrade_rekeyed_source_ids(
-    prior_manifest: Mapping[str, object],
-    next_manifest: Mapping[str, object],
-    replaced_source_ids: set[str],
-) -> set[str]:
-    prior_sources = {
-        str(source.get("source_id", "")): source
-        for source in prior_manifest.get("sources", [])
-        if isinstance(source, dict)
-    }
-    next_sources = {
-        str(source.get("source_id", "")): source
-        for source in next_manifest.get("sources", [])
-        if isinstance(source, dict)
-    }
-    upgraded: set[str] = set()
-    for source_id in replaced_source_ids:
-        prior = prior_sources.get(source_id)
-        next_source = next_sources.get(source_id)
-        if prior is None or next_source is None:
-            continue
-        if prior.get("extractor_contract_id") != next_source.get(
-            "extractor_contract_id"
-        ):
-            upgraded.add(source_id)
-            continue
-        if prior.get("source_revision") != next_source.get("source_revision"):
-            continue
-        prior_fingerprints = sorted(
-            str(record.get("record_fingerprint", ""))
-            for record in prior.get("records", [])
-            if isinstance(record, dict) and record.get("state") == "active"
-        )
-        next_fingerprints = sorted(
-            str(record.get("record_fingerprint", ""))
-            for record in next_source.get("records", [])
-            if isinstance(record, dict) and record.get("state") == "active"
-        )
-        if prior_fingerprints != next_fingerprints:
-            upgraded.add(source_id)
-    return upgraded
+def _error_command(argv: Sequence[str]) -> str:
+    if len(argv) > 1 and argv[0] in {
+        "duplicates",
+        "imports",
+        "rates",
+        "valuation",
+        "views",
+    }:
+        return f"{argv[0]}.{argv[1]}"
+    return argv[0] if argv else "help"
 
 
 def _help_text() -> str:
-    return """Honeymoney
+    return """Honeymoney 0.2.0
 
-A local-first CLI for importing, categorizing, and reviewing household transactions.
+Local, clean-start household statement storage and monthly views.
 
 Commands:
-  honeymoney setup                 Create a local starter workspace
-  honeymoney setup --upgrade --root DIR
-                                   Safely refresh proven bundled profiles
-  honeymoney run                   Process configured CSV/PDF exports
-  honeymoney import [PATH] [--binding ID]
-                                   Import a pasted path with an optional binding
-  honeymoney review [--category CATEGORY]
-                                   Review queued or category-matched transactions
-  honeymoney review [FILTERS]      Review filtered accounting flow decisions
-  honeymoney review --transaction ID --as income
-                                   Apply one human accounting decision
-  honeymoney review --file FILE    Apply an accounting decision batch
-  honeymoney review pair ID ID --yes
-                                   Confirm one same-account cash-movement pair
-  honeymoney profile validate ... Validate a profile and optionally preview input
-  honeymoney profile bind ID ... Save a filename-to-account binding
-  honeymoney profile replace-pattern ID ...
-                                   Replace one saved binding pattern
-  honeymoney profile remove-pattern ID ...
-                                   Remove one saved binding pattern
-  honeymoney profile bindings    List saved account bindings
-  honeymoney evaluate LEDGER --reference CORRECTIONS
-                                   Report category coverage and exact accuracy
-  honeymoney learn [--yes]          Build exact rules from active reviews
-  honeymoney valuation missing      Trace missing values to source evidence
-  honeymoney source-data inspect ID Inspect one source-data review safely
-  honeymoney source-data resolve ID Clear a stale source-data review
-  honeymoney rates import FILE      Import downloaded official HKMA daily rates
-  honeymoney rates fetch EUR --start DATE --end DATE --allow-network
-                                   Fetch public official HKMA daily rates
-  honeymoney status [MONTH]        Show processed/categorized counts for a period
-  honeymoney pending [MONTH]       List transactions that need review
-  honeymoney duplicates            List unresolved exact-overlap count groups
-  honeymoney duplicates resolve ID --as same-event|keep-all
-                                   Resolve one current duplicate group
-  honeymoney correct --file FILE   Apply validated transaction corrections
-  honeymoney report [MONTH]        Open a web report for a period
-  honeymoney reconcile             Recompute and inspect ledger transfers
-  honeymoney config                View or edit config.json
-  honeymoney help                  Show this help
+  honeymoney setup [--root DIR]
+  honeymoney import PATH [--replace | --reset] [--binding ID]
+  honeymoney imports list
+  honeymoney imports show SOURCE_ID
+  honeymoney views rebuild [PERIOD | --month MONTH | --start DATE --end DATE | --undated | --all]
+  honeymoney status [PERIOD | --month MONTH | --start DATE --end DATE | --undated | --all]
+  honeymoney pending [PERIOD | --month MONTH | --start DATE --end DATE | --undated | --all]
+  honeymoney report [PERIOD | --month MONTH | --start DATE --end DATE | --undated | --all] [--export PATH]
+  honeymoney valuation missing [PERIOD | --month MONTH | --start DATE --end DATE | --undated | --all]
+  honeymoney review --transaction VIEW_TRANSACTION_ID --as DECISION
+  honeymoney review pair VIEW_TRANSACTION_ID VIEW_TRANSACTION_ID --yes
+  honeymoney correct --file corrections.csv
+  honeymoney learn [--yes]
+  honeymoney source-data inspect VIEW_TRANSACTION_ID
+  honeymoney source-data resolve VIEW_TRANSACTION_ID
+  honeymoney rates import hkma-rates.json
+  honeymoney rates fetch USD [EUR ...] --start DATE --end DATE --allow-network
+  honeymoney duplicates [resolve GROUP_ID --as same-event|keep-all]
+  honeymoney profile validate PROFILE
+  honeymoney profile bind ID --pattern PATTERN --profile PROFILE --owner OWNER --account SOURCE_ID=ACCOUNT_ID=ACCOUNT_NAME
+  honeymoney profile bindings
+  honeymoney profile replace-pattern ID --old-pattern PATTERN --new-pattern PATTERN
+  honeymoney profile remove-pattern ID --pattern PATTERN --yes
+  honeymoney config [edit [ollama --model MODEL | --enable | --disable]]
+  honeymoney reconcile [--dry-run]
+  honeymoney doctor [--fix]
 
-Common run options:
+Common options:
   --config config.json
-  --input DIR_OR_FILE
-  --output output/categorized.csv
-  --strict
-  --no-interactive                 Skip categorization and profile prompts
-  --replace                        Re-import a previously processed source file
-  --reset                          Re-import and clear old corrections for the source
-  --json                           Emit one machine-readable JSON document
+  --json
 
-Common status/report options:
-  --month june | --month 2026-06
-  --start 2026-06-01 --end 2026-06-30
-  --owner OWNER                     Repeat to include more than one owner
-  --no-open                        (report) Write the HTML without opening it
+Python 3.14.6 is required. Version 0.1 workspaces need a fresh setup; Honeymoney
+does not migrate or change them.
 
-Review filters and decisions:
-  --category CATEGORY              Compose with period, flow, and direction filters
-  --flow unresolved --direction inflow
-  --transaction ID --as DECISION  Non-interactive one-shot review
-  --file FILE                      Apply a CSV or JSON decision batch
-  --remember --yes                 Save an exact, directional income rule
-  --json                           Valid for one-shot or batch review
+The former `evaluate` CSV comparison command is retired because its cumulative
+CSV inputs are not part of the clean-start workspace contract.
 """
-
-
-def _learn_command(argv: list[str]) -> int:
-    parser = _command_parser(
-        argv,
-        prog="honeymoney learn",
-        description="Build safe exact rules from active human reviews.",
-    )
-    parser.add_argument("--config", dest="config_path")
-    parser.add_argument("--yes", action="store_true")
-    parser.add_argument("--json", action="store_true")
-    args = parser.parse_args(argv)
-
-    config = _load_config(args.config_path)
-    categorized_path = Path(config["paths"]["output"])
-    expected_generation, state = _load_configured_identity_generation(
-        categorized_path, config
-    )
-    if state.canonical_migration_required:
-        raise ValueError("The active ledger must be migrated before learning rules")
-    plan = plan_learned_rules(state.rows, load_corrections(config))
-
-    rules_value = config.get("rules")
-    if not isinstance(rules_value, str) or not rules_value.strip():
-        raise ValueError("Config must define a rules JSON path")
-    rules_path = Path(rules_value)
-    if not rules_path.exists():
-        raise ValueError("The configured rules file does not exist")
-    with rules_path.open(encoding="utf-8") as handle:
-        document = json.load(handle)
-    if not isinstance(document, dict) or not isinstance(document.get("rules"), list):
-        raise ValueError("Rules document field rules must be a list")
-    if not all(isinstance(rule, dict) for rule in document["rules"]):
-        raise ValueError("Rules document entries must be objects")
-    manual_rules = [
-        rule
-        for rule in document["rules"]
-        if rule.get("managed_by") != MANAGED_RULE_MARKER
-    ]
-    next_rules = [*manual_rules, *plan.rules]
-    validate_rules(next_rules, config)
-    next_document = dict(document)
-    next_document["rules"] = next_rules
-    next_content = json.dumps(next_document, indent=2, sort_keys=True) + "\n"
-    require_generation_snapshot(expected_generation)
-
-    if args.yes:
-        if not _document_matches(rules_path, next_content):
-            persist_generation(
-                categorized_path,
-                {
-                    rules_path: next_content,
-                    categorized_path: categorized_path.read_text(encoding="utf-8"),
-                },
-                expected_generation_hashes=expected_generation,
-            )
-        else:
-            require_generation_snapshot(expected_generation)
-
-    counts = plan.counts()
-    if args.json:
-        _emit_json(
-            "learn",
-            "success" if args.yes else "dry_run",
-            data=counts,
-        )
-        return 0
-    mode = "Updated" if args.yes else "Dry run"
-    print(
-        f"{mode}: {counts['candidates']} candidates, "
-        f"{counts['broad_rules']} broad rules, "
-        f"{counts['amount_specific_rules']} amount-specific rules, "
-        f"{counts['historical_rows_covered']} historical rows covered, "
-        f"{counts['conflicts']} conflicts, {counts['skips']} skips, "
-        f"{counts['projected_coverage']:.1%} projected coverage."
-    )
-    if not args.yes:
-        print("Run again with --yes to update managed rules.")
-    return 0
-
-
-def _valuation_command(argv: list[str]) -> int:
-    if not argv or argv[0] != "missing":
-        raise ValueError("honeymoney valuation requires the `missing` subcommand")
-    command_argv = argv[1:]
-    parser = _command_parser(
-        command_argv,
-        prog="honeymoney valuation missing",
-        description="List missing base-currency values with active source evidence.",
-    )
-    parser.add_argument("period", nargs="?", help="Month name or YYYY-MM")
-    parser.add_argument("--month")
-    parser.add_argument("--start")
-    parser.add_argument("--end")
-    parser.add_argument("--transaction", dest="transaction_id")
-    parser.add_argument("--config", dest="config_path")
-    parser.add_argument("--json", action="store_true")
-    args = parser.parse_args(command_argv)
-
-    has_period = bool(args.period or args.month or args.start or args.end)
-    if has_period:
-        start_date, end_date = _resolve_period(
-            args.month or args.period,
-            args.start,
-            args.end,
-        )
-        start = start_date.isoformat()
-        end = end_date.isoformat()
-    else:
-        start = None
-        end = None
-    config = _load_config_read_only(args.config_path)
-    categorized_path = Path(config["paths"]["output"])
-    state = load_configured_identity_state(
-        categorized_path,
-        config,
-        recover=False,
-    )
-    if args.transaction_id and not any(
-        row.get("transaction_id") == args.transaction_id for row in state.rows
-    ):
-        raise ValueError("Unknown transaction_id")
-    workspace_root = Path(config["_identity_workspace_root"])
-    missing = inspect_missing_valuations(
-        state,
-        workspace_root=workspace_root,
-        source_root=Path(config["paths"]["input"]),
-        transaction_id=args.transaction_id,
-        start=start,
-        end=end,
-    )
-    period = (
-        {"start": start, "end": end}
-        if start is not None and end is not None
-        else {"all_dates": True}
-    )
-    if args.json:
-        _emit_json(
-            "valuation.missing",
-            "success",
-            data={
-                "count": len(missing),
-                "period": period,
-                "transactions": missing,
-            },
-        )
-        return 0
-
-    label = f"{start} to {end}" if start and end else "all dates"
-    print(f"Missing valuations for {label}: {len(missing)}")
-    for item in missing:
-        print(
-            f"\n{item['transaction_id']}  {item['date']}  "
-            f"flow={item['flow_type'] or '(none)'}"
-        )
-        print(
-            "  Original: "
-            f"{item['original_amount'] or '(missing)'} "
-            f"{item['original_currency'] or '(missing)'}"
-        )
-        print(
-            "  Posted:   "
-            f"{item['posted_amount'] or '(missing)'} "
-            f"{item['posted_currency'] or '(missing)'}"
-        )
-        print(f"  Valuation: {item['valuation_status']} via {item['valuation_source']}")
-        print(f"  Active source occurrences: {item['source_occurrence_count']}")
-        for source in item["source_evidence"]:
-            print(
-                "    "
-                f"{source['source_file'] or source['source_display'] or '(file unavailable)'} "
-                f"page={source['source_page'] or '-'} "
-                f"row={source['source_row'] or '-'}"
-            )
-        if item["source_data_flags"]:
-            print("  Source-data flags: " + ", ".join(item["source_data_flags"]))
-    return 0
-
-
-def _source_data_command(argv: list[str]) -> int:
-    if not argv or argv[0] not in {"inspect", "resolve"}:
-        raise ValueError(
-            "honeymoney source-data requires an `inspect` or `resolve` subcommand"
-        )
-    action = argv[0]
-    command_argv = argv[1:]
-    parser = _command_parser(
-        command_argv,
-        prog=f"honeymoney source-data {action}",
-        description=(
-            "Inspect active source-data evidence without showing transaction values."
-            if action == "inspect"
-            else "Clear stale source-data review state after checking active evidence."
-        ),
-    )
-    parser.add_argument("transaction_id")
-    parser.add_argument("--config", dest="config_path")
-    parser.add_argument("--json", action="store_true")
-    args = parser.parse_args(command_argv)
-    if action == "inspect":
-        return _source_data_inspect_command(
-            args.transaction_id,
-            args.config_path,
-            json_output=args.json,
-        )
-    return _source_data_resolve_command(
-        args.transaction_id,
-        args.config_path,
-        json_output=args.json,
-    )
-
-
-def _source_data_inspect_command(
-    transaction_id: str,
-    config_path: str | None,
-    *,
-    json_output: bool,
-) -> int:
-    config = _load_config_read_only(config_path)
-    categorized_path = Path(config["paths"]["output"])
-    state = load_configured_identity_state(
-        categorized_path,
-        config,
-        recover=False,
-    )
-    corrections = load_corrections(config)
-    item = inspect_source_data_review(
-        state,
-        transaction_id,
-        workspace_root=Path(config["_identity_workspace_root"]),
-        source_root=Path(config["paths"]["input"]),
-        correction_review_reason_active=source_data_review_active(
-            corrections.get(transaction_id)
-        ),
-    )
-    if json_output:
-        _emit_json(
-            "source-data.inspect",
-            "success",
-            data={"transaction": item},
-        )
-        return 0
-    _print_source_data_inspection(item)
-    return 0
-
-
-def _source_data_resolve_command(
-    transaction_id: str,
-    config_path: str | None,
-    *,
-    json_output: bool,
-) -> int:
-    config = _load_config(config_path)
-    categorized_path = Path(config["paths"]["output"])
-    generation_paths = generation_member_paths(
-        categorized_path,
-        configured_generation_paths(config),
-    )
-    expected_generation = generation_hashes(generation_paths)
-    state = load_configured_identity_state(categorized_path, config)
-    if generation_hashes(generation_paths) != expected_generation:
-        raise GenerationConflictError(
-            "The ledger generation changed while this operation was reading it"
-        )
-    migration_required = (
-        state.canonical_migration_required
-        or state.overlap_migration_required
-        or state.ledger_schema_migration_required
-    )
-    corrections = load_corrections(config)
-    correction_active = source_data_review_active(corrections.get(transaction_id))
-    item = inspect_source_data_review(
-        state,
-        transaction_id,
-        workspace_root=Path(config["_identity_workspace_root"]),
-        source_root=Path(config["paths"]["input"]),
-        correction_review_reason_active=correction_active,
-    )
-    if item["active_evidence_flags"]:
-        raise SourceDataReviewError(
-            "source_data_evidence_active",
-            "Active source evidence still supports this source-data issue.",
-        )
-    source_rows = state.source_rows
-    overlap_manifest = state.overlap_manifest
-    if source_rows is None or overlap_manifest is None:
-        raise SourceDataReviewError(
-            "source_data_provenance_unavailable",
-            "Active source-data provenance is unavailable.",
-        )
-    ledger_rows = [dict(row) for row in state.rows]
-    changed_ids = repair_source_data_review_state(
-        ledger_rows,
-        source_rows,
-        overlap_manifest,
-        transaction_ids=None if migration_required else {transaction_id},
-    )
-    correction_updates = review_state_correction_updates(
-        (
-            corrections
-            if migration_required
-            else (
-                {transaction_id: corrections[transaction_id]}
-                if transaction_id in corrections
-                else {}
-            )
-        ),
-        ledger_rows,
-    )
-    changed = bool(changed_ids or correction_updates)
-    if changed:
-        documents = ledger_output_documents(
-            categorized_path,
-            ledger_rows,
-            identity_manifest_document=state.manifest_document,
-            source_occurrences=source_rows,
-            source_evidence=state.source_evidence_rows,
-            overlap_manifest=overlap_manifest,
-        )
-        if config.get("corrections"):
-            correction_path, correction_content, _ = prepare_corrections_document(
-                config,
-                (
-                    correction_updates
-                    if migration_required
-                    else (
-                        {transaction_id: correction_updates[transaction_id]}
-                        if transaction_id in correction_updates
-                        else {}
-                    )
-                ),
-            )
-            documents[correction_path] = correction_content
-        persist_generation(
-            categorized_path,
-            documents,
-            expected_generation_hashes=expected_generation,
-        )
-    elif generation_hashes(generation_paths) != expected_generation:
-        raise GenerationConflictError(
-            "The ledger generation changed while this operation was reading it"
-        )
-    data = {
-        "transaction_id": transaction_id,
-        "result": "resolved" if changed else "already_clear",
-        "changed": changed,
-        "evidence_status": "clear",
-    }
-    if json_output:
-        _emit_json(
-            "source-data.resolve",
-            "success",
-            data=data,
-            artifacts={"categorized_csv": str(categorized_path.resolve())},
-        )
-        return 0
-    if changed:
-        print(f"Cleared stale source-data review state for {transaction_id}.")
-    else:
-        print(f"Source-data review state is already clear for {transaction_id}.")
-    return 0
-
-
-def _print_source_data_inspection(item: Mapping[str, object]) -> None:
-    print(f"Source-data review for {item['transaction_id']}")
-    print(f"  Evidence status: {item['evidence_status']}")
-    print(f"  Valuation: {item['valuation_status']} via {item['valuation_source']}")
-    print(f"  Active source occurrences: {item['source_occurrence_count']}")
-    flags = item["source_data_flags"]
-    active_flags = item["active_evidence_flags"]
-    assert isinstance(flags, list)
-    assert isinstance(active_flags, list)
-    print("  Canonical flags: " + (", ".join(flags) if flags else "(none)"))
-    print(
-        "  Active evidence flags: "
-        + (", ".join(active_flags) if active_flags else "(none)")
-    )
-    evidence = item["evidence"]
-    assert isinstance(evidence, list)
-    for raw in evidence:
-        assert isinstance(raw, Mapping)
-        source = raw.get("source_file") or raw.get("source_display") or "(unknown)"
-        print(
-            "    "
-            f"source={source} "
-            f"page={raw.get('source_page') or '-'} "
-            f"section={raw.get('statement_section') or '-'} "
-            f"field={raw.get('field') or '-'} "
-            f"flag={raw.get('flag') or '-'} "
-            f"status={raw.get('evidence_status') or '-'}"
-        )
-
-
-def _rates_command(argv: list[str]) -> int:
-    if not argv or argv[0] not in {"import", "fetch"}:
-        raise ValueError("honeymoney rates requires an `import` or `fetch` subcommand")
-    if argv[0] == "fetch":
-        return _rates_fetch_command(argv[1:])
-    return _rates_import_command(argv[1:])
-
-
-def _rates_import_command(argv: list[str]) -> int:
-    command_argv = argv
-    parser = _command_parser(
-        command_argv,
-        prog="honeymoney rates import",
-        description="Import a downloaded official HKMA daily-rate JSON document.",
-    )
-    parser.add_argument("file")
-    parser.add_argument("--config", dest="config_path")
-    parser.add_argument("--json", action="store_true")
-    args = parser.parse_args(command_argv)
-
-    config = _load_config(args.config_path)
-    observations = parse_hkma_daily_document(
-        Path(args.file).read_bytes(),
-        base_currency=str(config.get("base_currency", "HKD")),
-    )
-    result = _apply_rate_observations(config, observations)
-    return _emit_rate_result(
-        "rates.import",
-        args.json,
-        result,
-    )
-
-
-def _rates_fetch_command(argv: list[str]) -> int:
-    parser = _command_parser(
-        argv,
-        prog="honeymoney rates fetch",
-        description="Fetch public official HKMA daily rates after explicit consent.",
-    )
-    parser.add_argument("currencies", nargs="+")
-    parser.add_argument("--start", required=True)
-    parser.add_argument("--end", required=True)
-    parser.add_argument("--allow-network", action="store_true")
-    parser.add_argument("--config", dest="config_path")
-    parser.add_argument("--json", action="store_true")
-    args = parser.parse_args(argv)
-
-    config = _load_config(args.config_path)
-    _configured_rate_cache_path(config)
-    request = prepare_hkma_fetch(
-        args.currencies,
-        start=args.start,
-        end=args.end,
-        base_currency=str(config.get("base_currency", "HKD")),
-    )
-    output = sys.stderr if args.json else sys.stdout
-    print(
-        f"Provider: {HKMA_PROVIDER}\n"
-        f"Public endpoint: {HKMA_API_ENDPOINT}\n"
-        f"Requested range: {request.start} to {request.end}\n"
-        f"Currencies: {', '.join(request.currencies)}",
-        file=output,
-        flush=True,
-    )
-    if not args.allow_network:
-        if args.json or not sys.stdin.isatty():
-            raise RateFetchError(
-                "rate_fetch_opt_in_required",
-                "Non-interactive rate fetch requires --allow-network.",
-            )
-        answer = input("Fetch these public rates now? [y/N] ").strip().casefold()
-        if answer not in {"y", "yes"}:
-            print("Rate fetch cancelled.")
-            return 0
-
-    fetched = fetch_hkma_daily_rates(request)
-    result = _apply_rate_observations(config, fetched.observations)
-    return _emit_rate_result(
-        "rates.fetch",
-        args.json,
-        result,
-        request=request,
-        fetched_page_count=len(fetched.request_urls),
-    )
-
-
-def _apply_rate_observations(
-    config: dict[str, Any],
-    observations: Sequence[Mapping[str, object]],
-) -> _RateApplicationResult:
-    rate_cache_path = _configured_rate_cache_path(config)
-    categorized_path = Path(config["paths"]["output"])
-    if not categorized_path.exists():
-        expected_generation = snapshot_generation(
-            rate_cache_path,
-            {*configured_generation_paths(config), categorized_path},
-            coordination_path=categorized_path,
-        )
-        if expected_generation.get(categorized_path.resolve()) is None:
-            config["_rate_cache"] = load_rate_cache(rate_cache_path)
-            require_generation_snapshot(expected_generation)
-            cache = merge_rate_cache(
-                _loaded_rate_cache(config),
-                observations,
-                [],
-            )
-            cache_content = rate_cache_document(cache)
-            changed = not _document_matches(rate_cache_path, cache_content)
-            if changed:
-                persist_generation(
-                    rate_cache_path,
-                    {rate_cache_path: cache_content},
-                    expected_generation_hashes=expected_generation,
-                    coordination_path=categorized_path,
-                )
-            else:
-                require_generation_snapshot(expected_generation)
-            return _RateApplicationResult(
-                rate_cache_path=rate_cache_path,
-                rate_cache_defaulted=_rate_cache_was_defaulted(config),
-                imported_count=len(observations),
-                cached_count=len(cache["observations"]),
-                requested_count=0,
-                resolved_count=0,
-                valued_count=0,
-                changed=changed,
-            )
-
-    expected_generation, state = _load_configured_identity_generation(
-        categorized_path, config
-    )
-    if state.source_rows is None or state.overlap_manifest is None:
-        raise IdentityError("identity_manifest_invalid")
-    migration_required = (
-        state.canonical_migration_required
-        or state.overlap_migration_required
-        or state.ledger_schema_migration_required
-    )
-    source_rows = [dict(row) for row in state.source_rows]
-    requested_pairs = _requested_rate_pairs(
-        source_rows,
-        base_currency=str(config.get("base_currency", "HKD")),
-    )
-    cache = merge_rate_cache(
-        _loaded_rate_cache(config),
-        observations,
-        requested_pairs,
-    )
-    valued_config = {**config, "_rate_cache": cache}
-    value_transactions(source_rows, valued_config, preserve_matched=False)
-    corrections = load_corrections(config)
-    effective_corrections = corrections
-    removed_correction_ids: set[str] = set()
-    prior_rows = [] if state.canonical_migration_required else state.rows
-    overlap_result = canonicalize_overlaps(
-        source_rows,
-        prior_rows,
-        state.overlap_manifest,
-    )
-    rows = overlap_result.rows
-    if state.canonical_migration_required and not state.bootstrap_required:
-        correction_projection = project_corrections(overlap_result, corrections)
-        effective_corrections = correction_projection.corrections
-        removed_correction_ids = {
-            row.get("transaction_id", "")
-            for row in state.source_rows
-            if row.get("transaction_id", "") in corrections
-        }
-        apply_corrections(rows, effective_corrections)
-        apply_history_ambiguity(
-            rows,
-            correction_projection.ambiguous_transaction_ids,
-        )
-    refresh_duplicate_candidates(
-        rows,
-        final_review_ids=_final_review_ids(effective_corrections),
-    )
-    reconcile_ledger(rows, valued_config, statement_rows=source_rows)
-    enforce_overlap_review(rows, overlap_result)
-    overlap_result = canonicalize_overlaps(
-        source_rows,
-        rows,
-        overlap_result.manifest,
-    )
-    rows = overlap_result.rows
-    reconcile_ledger(rows, valued_config, statement_rows=source_rows)
-    enforce_overlap_review(rows, overlap_result)
-    if migration_required:
-        repair_source_data_review_state(
-            rows,
-            source_rows,
-            overlap_result.manifest,
-        )
-    documents = ledger_output_documents(
-        categorized_path,
-        rows,
-        identity_manifest_document=state.manifest_document,
-        source_occurrences=source_rows,
-        source_evidence=state.source_evidence_rows,
-        overlap_manifest=overlap_result.manifest,
-    )
-    documents[rate_cache_path] = rate_cache_document(cache)
-    if config.get("corrections"):
-        correction_updates = (
-            {
-                transaction_id: dict(patch)
-                for transaction_id, patch in effective_corrections.items()
-            }
-            if removed_correction_ids
-            else {}
-        )
-        correction_updates.update(
-            review_state_correction_updates(effective_corrections, rows)
-        )
-        if correction_updates or removed_correction_ids:
-            correction_path, correction_content, _ = prepare_corrections_document(
-                config,
-                correction_updates,
-                removed_transaction_ids=removed_correction_ids,
-            )
-            documents[correction_path] = correction_content
-    changed = _documents_changed(documents)
-    if changed:
-        persist_generation(
-            categorized_path,
-            documents,
-            expected_generation_hashes=expected_generation,
-        )
-    else:
-        require_generation_snapshot(expected_generation)
-    requested_keys = set(requested_pairs)
-    resolved_count = sum(
-        (
-            str(item["quote_currency"]),
-            str(item["requested_transaction_date"]),
-        )
-        in requested_keys
-        for item in cache["resolutions"]
-    )
-    valued_count = sum(
-        row.get("valuation_source") == VALUATION_SOURCE_HKMA_RATE for row in rows
-    )
-    return _RateApplicationResult(
-        rate_cache_path=rate_cache_path,
-        rate_cache_defaulted=_rate_cache_was_defaulted(config),
-        imported_count=len(observations),
-        cached_count=len(cache["observations"]),
-        requested_count=len(requested_keys),
-        resolved_count=resolved_count,
-        valued_count=valued_count,
-        changed=changed,
-    )
-
-
-def _documents_changed(documents: Mapping[Path, str]) -> bool:
-    return any(
-        not _document_matches(path, content) for path, content in documents.items()
-    )
-
-
-def _document_matches(path: Path, content: str) -> bool:
-    if not path.exists():
-        return False
-    with path.open(encoding="utf-8", newline="") as existing:
-        return existing.read() == content
-
-
-def _requested_rate_pairs(
-    rows: list[dict[str, str]],
-    *,
-    base_currency: str,
-) -> list[tuple[str, str]]:
-    base = base_currency.strip().upper()
-    return sorted(
-        {
-            (row.get("posted_currency", "").strip().upper(), row.get("date", ""))
-            for row in rows
-            if row.get("posted_currency", "").strip().upper()
-            and row.get("posted_currency", "").strip().upper() != base
-            and _parse_iso_date(row.get("date", "")) is not None
-        }
-    )
-
-
-def _emit_rate_result(
-    command: str,
-    json_output: bool,
-    result: _RateApplicationResult,
-    *,
-    request: RateFetchRequest | None = None,
-    fetched_page_count: int | None = None,
-) -> int:
-    data: dict[str, Any] = {
-        "provider": HKMA_PROVIDER,
-        "rate_cache": {
-            "path": str(result.rate_cache_path.resolve()),
-            "defaulted": result.rate_cache_defaulted,
-        },
-        "imported_observation_count": result.imported_count,
-        "cached_observation_count": result.cached_count,
-        "requested_transaction_date_count": result.requested_count,
-        "resolved_transaction_date_count": result.resolved_count,
-        "valued_transaction_count": result.valued_count,
-        "max_prior_age_days": HKMA_MAX_RATE_AGE_DAYS,
-        "changed": result.changed,
-    }
-    if request is not None:
-        data.update(
-            {
-                "network_access": True,
-                "requested_currencies": list(request.currencies),
-                "requested_range": {
-                    "start": request.start,
-                    "end": request.end,
-                },
-                "fetched_page_count": fetched_page_count or 0,
-            }
-        )
-    if json_output:
-        _emit_json(
-            command,
-            "success",
-            data=data,
-            artifacts={"rate_cache_json": str(result.rate_cache_path.resolve())},
-        )
-        return 0
-    action = "Fetched" if command == "rates.fetch" else "Imported"
-    print(
-        f"{action} {result.imported_count} HKMA observations; "
-        f"{result.resolved_count}/{result.requested_count} transaction dates "
-        f"resolved; {result.valued_count} transaction(s) valued."
-    )
-    source = "default" if result.rate_cache_defaulted else "configured"
-    print(f"Rate cache: {result.rate_cache_path.resolve()} ({source})")
-    return 0
-
-
-def _evaluate_command(argv: list[str]) -> int:
-    parser = _command_parser(
-        argv,
-        prog="honeymoney evaluate",
-        description=(
-            "Compare candidate categories with an exact local reference without "
-            "printing transaction text."
-        ),
-    )
-    parser.add_argument("candidate_path", metavar="LEDGER")
-    parser.add_argument("--reference", required=True, dest="reference_path")
-    parser.add_argument("--json", action="store_true")
-    args = parser.parse_args(argv)
-
-    candidate = _category_rows(Path(args.candidate_path))
-    reference = _category_rows(Path(args.reference_path))
-    reference = {
-        identifier: category
-        for identifier, category in reference.items()
-        if category and category != "Unknown"
-    }
-    confusion: dict[tuple[str, str], int] = {}
-    covered = 0
-    correct = 0
-    unresolved = 0
-    missing = 0
-    for identifier, reference_category in reference.items():
-        candidate_category = candidate.get(identifier)
-        if candidate_category is None:
-            label = "Missing"
-            missing += 1
-        elif not candidate_category or candidate_category == "Unknown":
-            label = "Unknown"
-            unresolved += 1
-        else:
-            label = candidate_category
-            covered += 1
-            if candidate_category == reference_category:
-                correct += 1
-        key = (reference_category, label)
-        confusion[key] = confusion.get(key, 0) + 1
-    reference_count = len(reference)
-    data = {
-        "reference_count": reference_count,
-        "candidate_count": len(candidate),
-        "covered_count": covered,
-        "coverage": covered / reference_count if reference_count else 0.0,
-        "correct_count": correct,
-        "exact_category_accuracy": (
-            correct / reference_count if reference_count else 0.0
-        ),
-        "covered_category_accuracy": correct / covered if covered else 0.0,
-        "unresolved_count": unresolved,
-        "missing_candidate_count": missing,
-        "confusion_counts": [
-            {
-                "reference_category": reference_category,
-                "candidate_category": candidate_category,
-                "count": count,
-            }
-            for (reference_category, candidate_category), count in sorted(
-                confusion.items()
-            )
-        ],
-    }
-    if args.json:
-        _emit_json("evaluate", "success", data=data)
-        return 0
-    print(
-        f"Coverage: {covered}/{reference_count}; "
-        f"exact category accuracy: {correct}/{reference_count}; "
-        f"covered category accuracy: {correct}/{covered}"
-    )
-    for item in data["confusion_counts"]:
-        print(
-            f"{item['reference_category']} -> {item['candidate_category']}: "
-            f"{item['count']}"
-        )
-    return 0
-
-
-def _category_rows(path: Path) -> dict[str, str]:
-    if not path.exists() or not path.is_file():
-        raise ValueError("Category comparison input does not exist or is not a file")
-    with path.open(newline="", encoding="utf-8-sig") as handle:
-        reader = csv.DictReader(handle)
-        fields = set(reader.fieldnames or ())
-        if not {"transaction_id", "category"} <= fields:
-            raise ValueError(
-                "Category comparison input must contain transaction_id and category"
-            )
-        rows: dict[str, str] = {}
-        for row in reader:
-            identifier = canonical_csv_cell(
-                "transaction_id", row.get("transaction_id") or ""
-            ).strip()
-            if not identifier:
-                continue
-            if identifier in rows:
-                raise ValueError(
-                    "Category comparison input contains a duplicate transaction_id"
-                )
-            rows[identifier] = canonical_csv_cell(
-                "category", row.get("category") or ""
-            ).strip()
-    return rows
-
-
-def _categorization_provenance(rows: list[dict[str, str]]) -> dict[str, int]:
-    counts = {
-        "total_count": len(rows),
-        "deterministic_count": 0,
-        "memory_count": 0,
-        "exact_correction_count": 0,
-        "accepted_model_count": 0,
-        "reviewable_model_count": 0,
-        "unresolved_count": 0,
-    }
-    for row in rows:
-        flags = set(filter(None, row.get("flags", "").split(";")))
-        if "manual_correction" in flags:
-            counts["exact_correction_count"] += 1
-        elif "local_memory_categorized" in flags:
-            counts["memory_count"] += 1
-        elif "ollama_categorized" in flags:
-            key = (
-                "accepted_model_count"
-                if row.get("needs_review") == "false"
-                else "reviewable_model_count"
-            )
-            counts[key] += 1
-        elif row.get("category") in {"", "Unknown"}:
-            counts["unresolved_count"] += 1
-        else:
-            counts["deterministic_count"] += 1
-    return counts
-
-
-def _duplicates_command(argv: list[str]) -> int:
-    if argv and argv[0] == "resolve":
-        return _duplicates_resolve_command(argv[1:])
-    parser = _command_parser(
-        argv,
-        prog="honeymoney duplicates",
-        description="List unresolved exact-overlap count groups.",
-    )
-    parser.add_argument("--config", dest="config_path")
-    parser.add_argument("--output", dest="output_path")
-    parser.add_argument("--json", action="store_true")
-    args = parser.parse_args(argv)
-
-    config = _load_config(args.config_path)
-    categorized_path = Path(args.output_path or config["paths"]["output"])
-    state = load_configured_identity_state(categorized_path, config)
-    if state.canonical_migration_required:
-        raise DuplicateResolutionError("duplicate_canonical_migration_required")
-    current = canonicalize_overlaps(
-        state.source_rows,
-        state.rows,
-        state.overlap_manifest,
-    )
-    groups = list_duplicate_groups(current, state.source_rows)
-    if args.json:
-        _emit_json(
-            "duplicates",
-            "success",
-            data={"group_count": len(groups), "groups": groups},
-            warnings=current.diagnostic["warnings"],
-        )
-        return 0
-    if not groups:
-        print("No unresolved duplicate groups.")
-        return 0
-    print(f"{len(groups)} unresolved duplicate group(s):")
-    for group in groups:
-        print(
-            f"\n{group['group_id']}  "
-            f"match={group['match_basis']}  "
-            f"keep-all={group['keep_all_count']}  "
-            f"same-event={group['same_event_count']}"
-        )
-        for occurrence in group["occurrences"]:
-            print(
-                "  "
-                f"{occurrence['occurrence_id']}  "
-                f"{occurrence['date']}  "
-                f"{occurrence['amount']} {occurrence['currency']}  "
-                f"{occurrence['account_id']}  "
-                f"{occurrence['merchant']}  "
-                f"{occurrence['source_display']}"
-            )
-        print(f"  honeymoney duplicates resolve {group['group_id']} --as same-event")
-        print(f"  honeymoney duplicates resolve {group['group_id']} --as keep-all")
-    return 0
-
-
-def _duplicates_resolve_command(argv: list[str]) -> int:
-    parser = _command_parser(
-        argv,
-        prog="honeymoney duplicates resolve",
-        description="Resolve one current exact-overlap count group.",
-    )
-    parser.add_argument("group_id")
-    parser.add_argument(
-        "--as",
-        dest="resolution",
-        required=True,
-    )
-    parser.add_argument("--config", dest="config_path")
-    parser.add_argument("--output", dest="output_path")
-    parser.add_argument("--json", action="store_true")
-    args = parser.parse_args(argv)
-
-    config = _load_config(args.config_path)
-    categorized_path = Path(args.output_path or config["paths"]["output"])
-    expected_generation, state = _load_configured_identity_generation(
-        categorized_path, config
-    )
-    if state.canonical_migration_required:
-        raise DuplicateResolutionError("duplicate_canonical_migration_required")
-    corrections = load_corrections(config)
-    resolution = resolve_duplicate_group(
-        state.source_rows,
-        state.rows,
-        state.overlap_manifest,
-        args.group_id,
-        args.resolution,
-        corrections,
-    )
-    if resolution.idempotent:
-        require_generation_snapshot(expected_generation)
-        if args.json:
-            _emit_json(
-                "duplicates.resolve",
-                "success",
-                data={
-                    "group_id": args.group_id,
-                    "resolution": args.resolution,
-                    "changed": False,
-                    "old_group_canonical_count": (resolution.old_group_canonical_count),
-                    "new_group_canonical_count": (resolution.new_group_canonical_count),
-                    "remaining_unresolved_count": (
-                        resolution.remaining_unresolved_count
-                    ),
-                },
-            )
-        else:
-            print(
-                f"Duplicate group {args.group_id} is already resolved "
-                f"as {args.resolution}."
-            )
-        return 0
-
-    rows = [dict(row) for row in resolution.result.rows]
-    apply_corrections(rows, resolution.correction_updates)
-    reconcile_ledger(rows, config, statement_rows=state.source_rows)
-    correction_updates = {
-        transaction_id: dict(patch)
-        for transaction_id, patch in resolution.correction_updates.items()
-    }
-    removed_correction_ids = set(resolution.removed_correction_ids)
-    source_rows = state.source_rows
-    if source_rows is None:
-        raise SourceDataReviewError(
-            "source_data_provenance_unavailable",
-            "Active source-data provenance is unavailable.",
-        )
-    repair_source_data_review_state(
-        rows,
-        source_rows,
-        resolution.result.manifest,
-    )
-    effective_corrections = {
-        transaction_id: dict(correction)
-        for transaction_id, correction in corrections.items()
-        if transaction_id not in removed_correction_ids
-    }
-    for transaction_id, patch in correction_updates.items():
-        effective_corrections[transaction_id] = {
-            **effective_corrections.get(transaction_id, {}),
-            **patch,
-        }
-    correction_updates.update(
-        review_state_correction_updates(effective_corrections, rows)
-    )
-    files = ledger_output_documents(
-        categorized_path,
-        rows,
-        identity_manifest_document=state.manifest_document,
-        source_occurrences=state.source_rows,
-        source_evidence=state.source_evidence_rows,
-        overlap_manifest=resolution.result.manifest,
-    )
-    if removed_correction_ids or correction_updates:
-        corrections_path, corrections_document, _ = prepare_corrections_document(
-            config,
-            correction_updates,
-            removed_transaction_ids=removed_correction_ids,
-        )
-        files[corrections_path] = corrections_document
-    persist_generation(
-        categorized_path,
-        files,
-        expected_generation_hashes=expected_generation,
-    )
-
-    if args.json:
-        _emit_json(
-            "duplicates.resolve",
-            "success",
-            data={
-                "group_id": args.group_id,
-                "resolution": args.resolution,
-                "changed": True,
-                "old_group_canonical_count": (resolution.old_group_canonical_count),
-                "new_group_canonical_count": (resolution.new_group_canonical_count),
-                "remaining_unresolved_count": (resolution.remaining_unresolved_count),
-                "removed_correction_count": len(resolution.removed_correction_ids),
-            },
-            artifacts={
-                "categorized_csv": str(categorized_path.resolve()),
-                "review_needed_csv": str(
-                    (categorized_path.parent / "review_needed.csv").resolve()
-                ),
-            },
-        )
-        return 0
-    print(
-        f"Resolved duplicate group {args.group_id} as {args.resolution}; "
-        f"group count {resolution.old_group_canonical_count} -> "
-        f"{resolution.new_group_canonical_count}; "
-        f"{resolution.remaining_unresolved_count} unresolved group(s) remain."
-    )
-    return 0
-
-
-def _config_command(argv: list[str]) -> int:
-    parser = _command_parser(
-        argv,
-        prog="honeymoney config",
-        description="View or edit the Honeymoney configuration.",
-    )
-    parser.add_argument("action", nargs="?", choices=["edit"])
-    parser.add_argument("section", nargs="?", choices=["ollama"])
-    parser.add_argument("--config", dest="config_path")
-    parser.add_argument("--model")
-    enabled = parser.add_mutually_exclusive_group()
-    enabled.add_argument("--enable", action="store_true")
-    enabled.add_argument("--disable", action="store_true")
-    parser.add_argument("--json", action="store_true")
-    args = parser.parse_args(argv)
-
-    config_path = _existing_config_path(args.config_path)
-    config = _read_config_document(config_path)
-    _recover_config_path_generation(config_path, config)
-    artifacts = {"config_json": str(config_path)}
-
-    if args.action is None:
-        if args.section or args.model or args.enable or args.disable:
-            raise ValueError("Config changes require `honeymoney config edit`")
-        if args.json:
-            _emit_json(
-                "config",
-                "success",
-                data={"config": config},
-                artifacts=artifacts,
-            )
-        else:
-            print(json.dumps(config, indent=2, sort_keys=True))
-        return 0
-
-    if args.section is None:
-        if args.json:
-            raise ValueError("honeymoney config edit does not support --json")
-        if args.model or args.enable or args.disable:
-            raise ValueError("Ollama options require `honeymoney config edit ollama`")
-        _edit_config_in_editor(config_path)
-        print(f"Updated {config_path}")
-        return 0
-
-    ollama_config = config.setdefault("ollama", {})
-    if not isinstance(ollama_config, dict):
-        raise ValueError("Config field ollama must be a JSON object")
-    if args.disable and args.model:
-        raise ValueError("Use either --disable or --model, not both")
-
-    selected_model = args.model.strip() if args.model else None
-    if args.model is not None and not selected_model:
-        raise ValueError("--model must be a non-empty Ollama model name")
-    if not selected_model and not args.enable and not args.disable:
-        if args.json:
-            raise ValueError(
-                "honeymoney config edit ollama --json requires --model, "
-                "--enable, or --disable"
-            )
-        selected_model = _prompt_ollama_model(ollama_config)
-        if selected_model is None:
-            print("Config unchanged.")
-            return 0
-
-    if selected_model:
-        ollama_config["model"] = selected_model
-        ollama_config["enabled"] = True
-    elif args.enable:
-        _require_available_ollama_model(ollama_config)
-        ollama_config["enabled"] = True
-    elif args.disable:
-        ollama_config["enabled"] = False
-
-    _write_config_document(config_path, config)
-    if args.json:
-        _emit_json(
-            "config",
-            "success",
-            data={"ollama": ollama_config},
-            artifacts=artifacts,
-        )
-    elif ollama_config.get("enabled"):
-        print(f"Ollama enabled with model {ollama_config.get('model', '(not set)')}")
-    else:
-        print("Ollama disabled")
-    return 0
-
-
-def _existing_config_path(config_path: str | None) -> Path:
-    path = Path(config_path or "config.json").expanduser()
-    if not path.exists():
-        raise ValueError(
-            f"Config file does not exist: {path}. Run `honeymoney setup` first."
-        )
-    return path.resolve()
-
-
-def _read_config_document(path: Path) -> dict[str, Any]:
-    with path.open(encoding="utf-8") as fh:
-        config = json.load(fh)
-    if not isinstance(config, dict):
-        raise ValueError("Config must be a JSON object")
-    _validate_config_document(config)
-    return config
-
-
-def _validate_config_document(config: dict[str, Any]) -> None:
-    paths = config.get("paths")
-    if paths is not None and not isinstance(paths, dict):
-        raise ValueError("Config field paths must be a JSON object")
-    for path_field, path_value in (paths or {}).items():
-        if path_field not in {"input", "output"}:
-            continue
-        if not isinstance(path_value, str) or not path_value.strip():
-            raise ValueError(
-                f"Config field paths.{path_field} must be a non-empty string"
-            )
-
-    profiles = config.get("profiles")
-    if profiles is not None:
-        _validate_non_empty_string_array("profiles", profiles)
-
-    for field in ("profile_mappings", "rules", "corrections", "rate_cache"):
-        if field in config and (
-            not isinstance(config[field], str) or not config[field].strip()
-        ):
-            raise ValueError(f"Config field {field} must be a non-empty string")
-
-    pdf = config.get("pdf")
-    if pdf is not None:
-        if not isinstance(pdf, dict):
-            raise ValueError("Config field pdf must be a JSON object")
-        if "enabled" in pdf and not isinstance(pdf["enabled"], bool):
-            raise ValueError("Config field pdf.enabled must be a boolean")
-        if "parser" in pdf and (
-            not isinstance(pdf["parser"], str) or not pdf["parser"].strip()
-        ):
-            raise ValueError("Config field pdf.parser must be a non-empty string")
-
-    base_currency = config.get("base_currency")
-    if base_currency is not None and (
-        not isinstance(base_currency, str) or not base_currency.strip()
-    ):
-        raise ValueError("Config field base_currency must be a non-empty string")
-
-    exchange_rates = config.get("exchange_rates")
-    if exchange_rates is not None:
-        if not isinstance(exchange_rates, dict):
-            raise ValueError("Config field exchange_rates must be a JSON object")
-        for currency, rate in exchange_rates.items():
-            if not isinstance(currency, str) or not currency.strip():
-                raise ValueError(
-                    "Config field exchange_rates keys must be non-empty strings"
-                )
-            _validate_finite_number(
-                f"exchange_rates.{currency}", rate, minimum=Decimal("0"), exclusive=True
-            )
-    validate_dated_rates(config)
-
-    threshold = config.get("review_confidence_threshold")
-    if threshold is not None:
-        _validate_finite_number(
-            "review_confidence_threshold",
-            threshold,
-            minimum=Decimal("0"),
-            maximum=Decimal("1"),
-            range_message="must be a number from 0 to 1",
-        )
-
-    for field in ("categories", "owners", "payment_methods"):
-        if field in config:
-            _validate_non_empty_string_array(field, config[field], unique=True)
-
-    ollama = config.get("ollama")
-    if ollama is not None:
-        if not isinstance(ollama, dict):
-            raise ValueError("Config field ollama must be a JSON object")
-        if "enabled" in ollama and not isinstance(ollama["enabled"], bool):
-            raise ValueError("Config field ollama.enabled must be a boolean")
-        for field in ("url", "model"):
-            if field in ollama and (
-                not isinstance(ollama[field], str) or not ollama[field].strip()
-            ):
-                raise ValueError(
-                    f"Config field ollama.{field} must be a non-empty string"
-                )
-        if "url" in ollama:
-            validate_ollama_endpoint(ollama["url"])
-        if "batch_size" in ollama and (
-            isinstance(ollama["batch_size"], bool)
-            or not isinstance(ollama["batch_size"], int)
-            or ollama["batch_size"] < 1
-        ):
-            raise ValueError(
-                "Config field ollama.batch_size must be a positive integer"
-            )
-        if "timeout_seconds" in ollama:
-            _validate_finite_number(
-                "ollama.timeout_seconds",
-                ollama["timeout_seconds"],
-                minimum=Decimal("0"),
-                exclusive=True,
-            )
-        if "calibrated_acceptance_threshold" in ollama:
-            _validate_finite_number(
-                "ollama.calibrated_acceptance_threshold",
-                ollama["calibrated_acceptance_threshold"],
-                minimum=Decimal("0"),
-                maximum=Decimal("1"),
-                range_message="must be a number from 0 to 1",
-            )
-        if "think" in ollama and not isinstance(ollama["think"], (bool, str)):
-            raise ValueError("Config field ollama.think must be a boolean or string")
-
-    reconciliation = config.get("reconciliation")
-    if reconciliation is not None:
-        if not isinstance(reconciliation, dict):
-            raise ValueError("Config field reconciliation must be a JSON object")
-    validate_reconciliation_config(config)
-
-    categorization_memory = config.get("categorization_memory")
-    if categorization_memory is not None:
-        if not isinstance(categorization_memory, dict):
-            raise ValueError("Config field categorization_memory must be a JSON object")
-        if "enabled" in categorization_memory and not isinstance(
-            categorization_memory["enabled"], bool
-        ):
-            raise ValueError(
-                "Config field categorization_memory.enabled must be a boolean"
-            )
-    validate_category_policies(config)
-
-
-def _validate_non_empty_string_array(
-    field: str, value: Any, *, unique: bool = False
-) -> None:
-    if not isinstance(value, list):
-        raise ValueError(f"Config field {field} must be a JSON array")
-    if not value:
-        raise ValueError(f"Config field {field} must not be empty")
-    normalized: list[str] = []
-    for index, item in enumerate(value):
-        if not isinstance(item, str) or not item.strip():
-            raise ValueError(
-                f"Config field {field}[{index}] must be a non-empty string"
-            )
-        normalized.append(item.strip())
-    if unique and len(set(normalized)) != len(normalized):
-        raise ValueError(f"Config field {field} must not contain duplicates")
-
-
-def _validate_finite_number(
-    field: str,
-    value: Any,
-    *,
-    minimum: Decimal | None = None,
-    maximum: Decimal | None = None,
-    exclusive: bool = False,
-    range_message: str | None = None,
-) -> None:
-    message = range_message or "must be a finite number greater than 0"
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise ValueError(f"Config field {field} {message}")
-    number = Decimal(str(value))
-    if not number.is_finite():
-        raise ValueError(f"Config field {field} {message}")
-    invalid_minimum = minimum is not None and (
-        number <= minimum if exclusive else number < minimum
-    )
-    if invalid_minimum or (maximum is not None and number > maximum):
-        raise ValueError(f"Config field {field} {message}")
-
-
-def _write_config_document(path: Path, config: dict[str, Any]) -> None:
-    _atomic_write_text_files(
-        {path: f"{json.dumps(config, indent=2, sort_keys=True)}\n"}
-    )
-
-
-def _prompt_ollama_model(ollama_config: dict[str, Any]) -> str | None:
-    models = list_ollama_models(ollama_config)
-    if not models:
-        raise ValueError("No local Ollama models found; run `ollama pull MODEL` first")
-    print("Available Ollama models:")
-    for index, model in enumerate(models, start=1):
-        print(f"  {index}. {model}")
-    while True:
-        try:
-            choice = input(f"Select model [1-{len(models)}/q]: ").strip().casefold()
-        except EOFError as error:
-            raise ValueError("No Ollama model selected") from error
-        if choice == "q":
-            return None
-        try:
-            selected = int(choice)
-        except ValueError:
-            selected = 0
-        if 1 <= selected <= len(models):
-            return models[selected - 1]
-        print(f"Enter a number from 1 to {len(models)}, or q to cancel.")
-
-
-def _require_available_ollama_model(ollama_config: dict[str, Any]) -> None:
-    configured = str(ollama_config.get("model", "")).strip()
-    if not configured:
-        raise ValueError(
-            "Set an Ollama model with --model before enabling the fallback"
-        )
-    available = list_ollama_models(ollama_config)
-    aliases = {
-        alias for model in available for alias in (model, model.removesuffix(":latest"))
-    }
-    if configured not in aliases:
-        raise ValueError(
-            f"Configured Ollama model {configured!r} is not installed; "
-            "pass --model or run `honeymoney config edit ollama` to select one"
-        )
-
-
-def _edit_config_in_editor(config_path: Path) -> None:
-    editor = os.environ.get("VISUAL") or os.environ.get("EDITOR") or shutil.which("vi")
-    if not editor:
-        raise ValueError("Set $VISUAL or $EDITOR before running config edit")
-
-    descriptor, temporary_name = tempfile.mkstemp(
-        dir=config_path.parent,
-        prefix=f".{config_path.stem}.",
-        suffix=".json",
-    )
-    temporary_path = Path(temporary_name)
-    try:
-        with os.fdopen(descriptor, "w", encoding="utf-8") as fh:
-            fh.write(config_path.read_text(encoding="utf-8"))
-        result = subprocess.run(
-            [*shlex.split(editor), str(temporary_path)],
-            check=False,
-        )
-        if result.returncode != 0:
-            raise ValueError(f"Editor exited with status {result.returncode}")
-        config = _read_config_document(temporary_path)
-        _write_config_document(config_path, config)
-    finally:
-        temporary_path.unlink(missing_ok=True)
-
-
-def _setup_command(argv: list[str]) -> int:
-    parser = _command_parser(
-        argv,
-        prog="honeymoney setup",
-        description="Create a starter Honeymoney workspace.",
-    )
-    parser.add_argument("--root")
-    parser.add_argument("--force", action="store_true")
-    parser.add_argument("--upgrade", action="store_true")
-    parser.add_argument("--dry-run", action="store_true")
-    parser.add_argument("--yes", action="store_true")
-    parser.add_argument("--json", action="store_true")
-    args = parser.parse_args(argv)
-
-    if args.json and not args.root:
-        raise ValueError("honeymoney setup --json requires --root")
-    if args.upgrade and args.force:
-        raise ValueError("honeymoney setup --upgrade cannot be combined with --force")
-    if not args.upgrade and (args.dry_run or args.yes):
-        raise ValueError("honeymoney setup --dry-run and --yes require --upgrade")
-    root = _setup_root(args.root)
-    if args.upgrade:
-        return _upgrade_workspace(
-            root,
-            dry_run=args.dry_run,
-            approved=args.yes,
-            json_output=args.json,
-        )
-    existing_config_path = root / "config.json"
-    if existing_config_path.exists():
-        _recover_config_path_generation(existing_config_path)
-    force_warning = (
-        "Warning: --force replaces existing starter workspace files."
-        if args.force
-        else None
-    )
-    if force_warning and not args.json:
-        print(force_warning, file=sys.stderr)
-    _write_starter_workspace(root, force=args.force)
-    rate_cache_path = (root / "rates.json").resolve()
-    if args.json:
-        _emit_json(
-            "setup",
-            "success",
-            data={
-                "root": str(root),
-                "rate_cache": {
-                    "path": str(rate_cache_path),
-                    "defaulted": False,
-                },
-            },
-            artifacts={
-                "config_json": str(root / "config.json"),
-                "corrections_csv": str(root / "corrections.csv"),
-                "rate_cache_json": str(rate_cache_path),
-                "managed_files_json": str(root / MANAGED_FILES_NAME),
-                "input_directory": str(root / "input"),
-                "output_directory": str(root / "output"),
-            },
-            warnings=[force_warning] if force_warning else None,
-        )
-        return 0
-    print(f"Created Honeymoney workspace at {root}")
-    print(f"Rate cache: {rate_cache_path} (configured)")
-    print("")
-    print("Next:")
-    print(f"  1. Put exported CSV/PDF files in {root / 'input'}")
-    print(f"  2. Edit {root / 'config.json'} and {root / 'rules.json'} as needed")
-    print(f"  3. Run cd {root} && honeymoney run")
-    return 0
-
-
-def _upgrade_workspace(
-    root: Path,
-    *,
-    dry_run: bool,
-    approved: bool,
-    json_output: bool,
-) -> int:
-    if not root.is_dir():
-        raise ValueError(f"Workspace does not exist: {root}")
-    config_path = root / "config.json"
-    if not config_path.is_file():
-        raise ValueError(f"Workspace config does not exist: {config_path}")
-    config = _read_config_document(config_path)
-    desired_documents = _installed_profile_documents(root)
-    if dry_run:
-        require_clean_upgrade_generation(root)
-    else:
-        recover_upgrade_generation(root, desired_documents)
-    plan = build_upgrade_plan(
-        root,
-        desired_documents,
-        protected_directories=_upgrade_protected_paths(root, config),
-        preserved_results=_upgrade_preserved_results(),
-    )
-
-    if dry_run:
-        if json_output:
-            _emit_upgrade_json(root, plan, applied=False, dry_run=True)
-        else:
-            _print_upgrade_plan(plan)
-            print("Dry run; no files changed.")
-        return 1 if plan.has_conflicts else 0
-
-    if plan.changed and not approved:
-        if json_output:
-            _emit_upgrade_json(
-                root,
-                plan,
-                applied=False,
-                dry_run=False,
-                status="error",
-                errors=[
-                    {
-                        "type": "ApprovalRequired",
-                        "message": "Pass --yes to approve this non-interactive upgrade",
-                    }
-                ],
-            )
-            return 2
-        _print_upgrade_plan(plan)
-        if not sys.stdin.isatty():
-            print(
-                "No files changed. Pass --yes to approve a non-interactive upgrade.",
-                file=sys.stderr,
-            )
-            return 2
-        if input("Apply this upgrade? [y/N]: ").strip().casefold() not in {"y", "yes"}:
-            print("Upgrade declined; no files changed.")
-            return 0
-
-    apply_upgrade_plan(root, plan)
-    if json_output:
-        _emit_upgrade_json(root, plan, applied=plan.changed, dry_run=False)
-    else:
-        _print_upgrade_plan(plan)
-        if plan.changed:
-            print("Workspace upgrade complete.")
-        else:
-            print("Workspace is already current; no files changed.")
-    return 1 if plan.has_conflicts else 0
-
-
-def _emit_upgrade_json(
-    root: Path,
-    plan: UpgradePlan,
-    *,
-    applied: bool,
-    dry_run: bool,
-    status: str | None = None,
-    errors: list[Any] | None = None,
-) -> None:
-    _emit_json(
-        "setup",
-        status or ("partial_success" if plan.has_conflicts else "success"),
-        data={
-            "operation": "upgrade",
-            "root": str(root),
-            "applied": applied,
-            "dry_run": dry_run,
-            "changed": plan.changed,
-            "result_counts": result_counts(plan.results),
-            "results": list(plan.results),
-        },
-        artifacts={"managed_files_json": str(root / MANAGED_FILES_NAME)},
-        errors=errors,
-    )
-
-
-def _print_upgrade_plan(plan: UpgradePlan) -> None:
-    print("Workspace upgrade plan:")
-    for item in plan.results:
-        print(f"  {item['result']:<9} {item['path']} ({item['kind']})")
-
-
-def _installed_profile_documents(root: Path) -> dict[Path, str]:
-    profiles_dir = root / "profiles"
-    documents = {
-        profiles_dir / "starter_csv.json": json.dumps(
-            _starter_csv_profile(),
-            indent=2,
-            sort_keys=True,
-        )
-    }
-    profile_resources = resources.files("honeymoney").joinpath("data/profiles")
-    for resource in sorted(profile_resources.iterdir(), key=lambda item: item.name):
-        if resource.name.endswith(".json"):
-            documents[profiles_dir / resource.name] = resource.read_text(
-                encoding="utf-8"
-            )
-    return documents
-
-
-def _upgrade_protected_paths(root: Path, config: Mapping[str, Any]) -> list[Path]:
-    paths = config.get("paths")
-    path_values = paths if isinstance(paths, Mapping) else {}
-    input_path = _workspace_config_path(root, path_values.get("input"), "input")
-    output_path = _workspace_config_path(
-        root,
-        path_values.get("output"),
-        "output/categorized.csv",
-    )
-    protected = [input_path, output_path.parent, root / "config.json"]
-    for field, default in (
-        ("profile_mappings", "profile_mappings.json"),
-        ("rules", "rules.json"),
-        ("corrections", "corrections.csv"),
-        ("rate_cache", "rates.json"),
-    ):
-        protected.append(_workspace_config_path(root, config.get(field), default))
-    return protected
-
-
-def _workspace_config_path(root: Path, value: object, default: str) -> Path:
-    raw_path = Path(value if isinstance(value, str) and value.strip() else default)
-    return (raw_path if raw_path.is_absolute() else root / raw_path).resolve()
-
-
-def _upgrade_preserved_results() -> list[UpgradeResult]:
-    items = (
-        ("config.json", "configuration"),
-        ("<configured-input>", "statement_input"),
-        ("<configured-output>", "generated_output"),
-        ("<configured-corrections>", "corrections"),
-        ("<configured-rules>", "rules"),
-        ("<configured-rate-cache>", "rate_cache"),
-        ("<configured-profile-mappings>", "profile_mappings"),
-        ("<configured-custom-profiles>", "custom_profiles"),
-    )
-    return [
-        {
-            "path": path,
-            "kind": kind,
-            "result": "preserved",
-            "reason": "user-owned workspace state is never changed",
-        }
-        for path, kind in items
-    ]
-
-
-def _setup_root(root_arg: str | None) -> Path:
-    if root_arg:
-        return Path(root_arg).expanduser().resolve()
-    try:
-        value = input("Root folder [./money]: ").strip()
-    except EOFError:
-        value = ""
-    return Path(value or "./money").expanduser().resolve()
-
-
-def _import_command(argv: list[str]) -> int:
-    parser = _command_parser(
-        argv,
-        prog="honeymoney import",
-        description="Import one pasted CSV/PDF file or folder path.",
-    )
-    parser.add_argument("path", nargs="?")
-    parser.add_argument("--config", dest="config_path")
-    parser.add_argument("--output", dest="output_path")
-    parser.add_argument("--strict", action="store_true")
-    parser.add_argument("--no-interactive", action="store_true")
-    parser.add_argument("--replace", action="store_true")
-    parser.add_argument("--reset", action="store_true")
-    parser.add_argument("--binding", metavar="ID")
-    parser.add_argument("--json", action="store_true")
-    args = parser.parse_args(argv)
-
-    input_path = args.path
-    if not input_path:
-        if args.json:
-            raise ValueError("honeymoney import --json requires a path")
-        input_path = input("Paste a CSV/PDF file or folder path: ")
-    input_path = _clean_pasted_path(input_path)
-    if not input_path:
-        raise ValueError("No import path provided")
-    binding_id = args.binding.strip() if args.binding is not None else None
-    if args.binding is not None and not binding_id:
-        raise ValueError("--binding requires a non-empty binding id")
-
-    run_args = ["--input", input_path]
-    if args.config_path:
-        run_args.extend(["--config", args.config_path])
-    if args.output_path:
-        run_args.extend(["--output", args.output_path])
-    if args.strict:
-        run_args.append("--strict")
-    if args.no_interactive:
-        run_args.append("--no-interactive")
-    if args.json:
-        run_args.append("--json")
-    if args.reset:
-        run_args.append("--reset")
-    elif args.replace:
-        run_args.append("--replace")
-    return _run_pipeline(
-        run_args,
-        print_import_summary=not args.json,
-        json_command="import",
-        explicit_binding_id=binding_id,
-    )
-
-
-def _profile_command(argv: list[str]) -> int:
-    if argv and argv[0] == "bind":
-        return _profile_bind_command(argv[1:])
-    if argv and argv[0] == "replace-pattern":
-        return _profile_replace_pattern_command(argv[1:])
-    if argv and argv[0] == "remove-pattern":
-        return _profile_remove_pattern_command(argv[1:])
-    if argv and argv[0] == "bindings":
-        return _profile_bindings_command(argv[1:])
-    parser = _command_parser(
-        argv,
-        prog="honeymoney profile",
-        description="Validate a local import profile and optionally preview one input.",
-    )
-    parser.add_argument("operation", choices=["validate"])
-    parser.add_argument("profile_path", metavar="PROFILE")
-    parser.add_argument("--input", dest="input_path", metavar="FILE")
-    parser.add_argument("--config", dest="config_path", metavar="CONFIG")
-    parser.add_argument("--json", action="store_true")
-    args = parser.parse_args(argv)
-
-    profile_path = Path(args.profile_path).expanduser().resolve()
-    if not profile_path.exists():
-        raise ValueError(f"Profile path does not exist: {profile_path}")
-    if not profile_path.is_file():
-        raise ValueError(f"Profile path is not a file: {profile_path}")
-
-    config = _load_config_read_only(args.config_path)
-    try:
-        with profile_path.open(encoding="utf-8") as fh:
-            profile = json.load(fh)
-    except json.JSONDecodeError as error:
-        raise ValueError(
-            f"Invalid JSON in profile {profile_path}: {error.msg}"
-        ) from error
-    _validate_profile(profile, profile_path, config)
-
-    profile_id = str(profile.get("id") or profile.get("account_id"))
-    parsers = [parser_name for parser_name in ("csv", "pdf") if parser_name in profile]
-    data: dict[str, Any] = {
-        "mode": "validation",
-        "parsers": parsers,
-        "profile_id": profile_id,
-        "profile_path": str(profile_path),
-    }
-    warnings: list[str] = []
-
-    if args.input_path:
-        input_path = Path(args.input_path).expanduser().resolve()
-        if not input_path.exists():
-            raise ValueError(f"Input path does not exist: {input_path}")
-        if not input_path.is_file():
-            raise ValueError(f"Input path is not a file: {input_path}")
-        rows, parser_warnings = _preview_profile_input(
-            profile, profile_id, input_path, config
-        )
-        preview_rows = [
-            {field: row.get(field, "") for field in PROFILE_PREVIEW_FIELDS}
-            for row in rows[:PROFILE_PREVIEW_LIMIT]
-        ]
-        warnings = [
-            "Preview output contains normalized local statement data; keep it private.",
-            *parser_warnings,
-        ]
-        if len(rows) > PROFILE_PREVIEW_LIMIT:
-            warnings.append(
-                f"Preview limited to the first {PROFILE_PREVIEW_LIMIT} of "
-                f"{len(rows)} normalized rows."
-            )
-        data.update(
-            {
-                "base_currency": str(config.get("base_currency", "HKD")).upper(),
-                "input_path": str(input_path),
-                "mode": "preview",
-                "preview_count": len(preview_rows),
-                "preview_limit": PROFILE_PREVIEW_LIMIT,
-                "rows": preview_rows,
-                "transaction_count": len(rows),
-            }
-        )
-
-    if args.json:
-        _emit_json("profile.validate", "success", data=data, warnings=warnings)
-        return 0
-
-    parser_label = ", ".join(parsers)
-    print(f"Profile {profile_id} is valid ({parser_label}).")
-    if data["mode"] == "preview":
-        print(
-            f"Preview: {data['transaction_count']} normalized rows; "
-            f"showing {data['preview_count']}."
-        )
-        for row in data["rows"]:
-            print(
-                f"  {row['date']} | {row['original_amount']} "
-                f"{row['original_currency']} | {row['merchant']} | "
-                f"base {row['amount_hkd']} {data['base_currency']}"
-            )
-        for warning in warnings:
-            print(f"Warning: {warning}", file=sys.stderr)
-    return 0
-
-
-def _profile_bind_command(argv: list[str]) -> int:
-    parser = _command_parser(
-        argv,
-        prog="honeymoney profile bind",
-        description="Bind matching statement files to owned account identities.",
-    )
-    parser.add_argument("binding_id", metavar="ID")
-    parser.add_argument("--pattern", required=True)
-    parser.add_argument("--profile", required=True, dest="profile_id")
-    parser.add_argument("--owner", required=True)
-    parser.add_argument(
-        "--account",
-        action="append",
-        required=True,
-        metavar="SOURCE_ID=ACCOUNT_ID=ACCOUNT_NAME",
-    )
-    parser.add_argument("--config", dest="config_path")
-    parser.add_argument("--json", action="store_true")
-    args = parser.parse_args(argv)
-
-    for field, value in (
-        ("binding id", args.binding_id),
-        ("filename pattern", args.pattern),
-        ("profile id", args.profile_id),
-        ("owner", args.owner),
-    ):
-        if not value.strip():
-            raise ValueError(f"Account {field} must be a non-empty string")
-
-    binding_id = args.binding_id.strip()
-    pattern = args.pattern.strip()
-    selected_profile_id = args.profile_id.strip()
-    owner = args.owner.strip()
-
-    accounts = [_parse_bound_account(value) for value in args.account]
-    config, profiles, mappings, mapping_path = _load_account_binding_edit(
-        args.config_path,
-        validate_current_bindings=False,
-    )
-    if selected_profile_id not in {
-        account_binding_profile_id(profile) for profile in profiles
-    }:
-        raise ValueError(f"Unknown profile for account binding: {selected_profile_id}")
-    binding = {
-        "id": binding_id,
-        "profile": selected_profile_id,
-        "owner": owner,
-        "accounts": accounts,
-    }
-    next_mappings = upsert_binding(mappings, binding, pattern)
-    _publish_account_binding_edit(
-        next_mappings,
-        config=config,
-        profiles=profiles,
-        mapping_path=mapping_path,
-        changed=True,
-    )
-    view = next(
-        item for item in binding_views(next_mappings) if item.get("id") == binding_id
-    )
-    if args.json:
-        _emit_json(
-            "profile.bind",
-            "success",
-            data={"binding": view},
-            artifacts={"profile_mappings_json": str(mapping_path)},
-        )
-    else:
-        print(
-            f"Saved account binding {binding_id} for {pattern} "
-            f"using profile {selected_profile_id}."
-        )
-    return 0
-
-
-def _parse_bound_account(value: str) -> dict[str, str]:
-    parts = value.split("=", 2)
-    if len(parts) != 3 or any(not part.strip() for part in parts):
-        raise ValueError(
-            "--account must use SOURCE_ID=ACCOUNT_ID=ACCOUNT_NAME with no empty field"
-        )
-    return {
-        "source_account_id": parts[0].strip(),
-        "account_id": parts[1].strip(),
-        "account": parts[2].strip(),
-    }
-
-
-def _load_account_binding_edit(
-    config_path: str | None,
-    *,
-    validate_current_bindings: bool = True,
-) -> tuple[dict[str, Any], list[dict[str, Any]], dict[str, Any], Path]:
-    config = _load_config_read_only(config_path)
-    profiles = importers._load_profiles(config)
-    mappings = importers._load_profile_mappings(config)
-    if validate_current_bindings:
-        validate_bindings_for_profiles(mappings, profiles)
-    mapping_value = config.get("profile_mappings")
-    if not isinstance(mapping_value, str) or not mapping_value.strip():
-        raise ValueError("Config must define a profile_mappings JSON path")
-    return config, profiles, mappings, Path(mapping_value)
-
-
-def _publish_account_binding_edit(
-    mappings: dict[str, Any],
-    *,
-    config: dict[str, Any],
-    profiles: list[dict[str, Any]],
-    mapping_path: Path,
-    changed: bool,
-) -> None:
-    validate_profile_mappings(mappings, config)
-    validate_bindings_for_profiles(mappings, profiles)
-    if not changed:
-        return
-    ensure_private_directory(mapping_path.parent)
-    private_atomic_write_text(
-        mapping_path,
-        json.dumps(mappings, indent=2, sort_keys=True) + "\n",
-    )
-
-
-def _profile_replace_pattern_command(argv: list[str]) -> int:
-    parser = _command_parser(
-        argv,
-        prog="honeymoney profile replace-pattern",
-        description="Replace one saved account-binding filename pattern.",
-    )
-    parser.add_argument("binding_id", metavar="ID")
-    parser.add_argument("--old-pattern", required=True)
-    parser.add_argument("--new-pattern", required=True)
-    parser.add_argument("--config", dest="config_path")
-    parser.add_argument("--json", action="store_true")
-    args = parser.parse_args(argv)
-    for field, value in (
-        ("binding id", args.binding_id),
-        ("old filename pattern", args.old_pattern),
-        ("new filename pattern", args.new_pattern),
-    ):
-        if not value.strip():
-            raise ValueError(f"Account {field} must be a non-empty string")
-
-    binding_id = args.binding_id.strip()
-    old_pattern = args.old_pattern.strip()
-    new_pattern = args.new_pattern.strip()
-    config, profiles, mappings, mapping_path = _load_account_binding_edit(
-        args.config_path
-    )
-    next_mappings, changed = replace_binding_pattern(
-        mappings,
-        binding_id,
-        old_pattern,
-        new_pattern,
-    )
-    _publish_account_binding_edit(
-        next_mappings,
-        config=config,
-        profiles=profiles,
-        mapping_path=mapping_path,
-        changed=changed,
-    )
-    binding = next(
-        item for item in binding_views(next_mappings) if item.get("id") == binding_id
-    )
-    data = {
-        "binding_id": binding_id,
-        "changed": changed,
-        "new_pattern": new_pattern,
-        "old_pattern": old_pattern,
-        "profile": binding["profile"],
-        "result": "replaced" if changed else "already_replaced",
-    }
-    if args.json:
-        _emit_json(
-            "profile.replace-pattern",
-            "success",
-            data=data,
-            artifacts={"profile_mappings_json": str(mapping_path)},
-        )
-    elif changed:
-        print(
-            f"Replaced account binding {binding_id} pattern "
-            f"{old_pattern} with {new_pattern}."
-        )
-    else:
-        print(
-            f"Account binding {binding_id} already uses {new_pattern}; "
-            "profile mappings unchanged."
-        )
-    return 0
-
-
-def _profile_remove_pattern_command(argv: list[str]) -> int:
-    parser = _command_parser(
-        argv,
-        prog="honeymoney profile remove-pattern",
-        description="Remove one saved account-binding filename pattern.",
-    )
-    parser.add_argument("binding_id", metavar="ID")
-    parser.add_argument("--pattern", required=True)
-    parser.add_argument("--yes", action="store_true")
-    parser.add_argument("--config", dest="config_path")
-    parser.add_argument("--json", action="store_true")
-    args = parser.parse_args(argv)
-    for field, value in (
-        ("binding id", args.binding_id),
-        ("filename pattern", args.pattern),
-    ):
-        if not value.strip():
-            raise ValueError(f"Account {field} must be a non-empty string")
-
-    binding_id = args.binding_id.strip()
-    pattern = args.pattern.strip()
-    config, profiles, mappings, mapping_path = _load_account_binding_edit(
-        args.config_path
-    )
-    next_mappings, changed, binding_removed, selected_profile = remove_binding_pattern(
-        mappings,
-        binding_id,
-        pattern,
-        confirm_final=args.yes,
-    )
-    _publish_account_binding_edit(
-        next_mappings,
-        config=config,
-        profiles=profiles,
-        mapping_path=mapping_path,
-        changed=changed,
-    )
-    data = {
-        "binding_id": binding_id,
-        "binding_removed": binding_removed,
-        "changed": changed,
-        "pattern": pattern,
-        "profile": selected_profile,
-        "result": "removed" if changed else "already_removed",
-    }
-    if args.json:
-        _emit_json(
-            "profile.remove-pattern",
-            "success",
-            data=data,
-            artifacts={"profile_mappings_json": str(mapping_path)},
-        )
-    elif changed:
-        suffix = " and removed the unused binding" if binding_removed else ""
-        print(f"Removed {pattern} from account binding {binding_id}{suffix}.")
-    else:
-        print(
-            f"Account binding {binding_id} pattern {pattern} is already removed; "
-            "profile mappings unchanged."
-        )
-    return 0
-
-
-def _profile_bindings_command(argv: list[str]) -> int:
-    parser = _command_parser(
-        argv,
-        prog="honeymoney profile bindings",
-        description="List saved statement account bindings.",
-    )
-    parser.add_argument("--config", dest="config_path")
-    parser.add_argument("--json", action="store_true")
-    args = parser.parse_args(argv)
-    config = _load_config_read_only(args.config_path)
-    profiles = importers._load_profiles(config)
-    mappings = importers._load_profile_mappings(config)
-    validate_bindings_for_profiles(mappings, profiles)
-    views = binding_views(mappings)
-    if args.json:
-        _emit_json(
-            "profile.bindings",
-            "success",
-            data={"binding_count": len(views), "bindings": views},
-        )
-        return 0
-    if not views:
-        print("No account bindings are saved.")
-        return 0
-    for binding in views:
-        patterns = ", ".join(str(item) for item in binding["patterns"])
-        print(
-            f"{binding['id']}: profile={binding['profile']} owner={binding['owner']} "
-            f"patterns={patterns}"
-        )
-        for account in binding["accounts"]:
-            print(
-                f"  {account['source_account_id']} -> {account['account_id']} "
-                f"({account['account']})"
-            )
-    return 0
-
-
-def _preview_profile_input(
-    profile: dict[str, Any],
-    profile_id: str,
-    input_path: Path,
-    config: dict[str, Any],
-) -> tuple[list[dict[str, str]], list[str]]:
-    suffix = input_path.suffix.lower()
-    if suffix == ".csv":
-        if "csv" not in profile:
-            raise ValueError(
-                f"Profile {profile_id} does not define csv parser settings "
-                f"required for {input_path.name}"
-            )
-        source_snapshot = importers._capture_input_source(input_path, config)
-        return (
-            importers._import_csv(
-                input_path,
-                profile,
-                config,
-                input_path.parent,
-                source_bytes=source_snapshot.source_bytes,
-            ),
-            [],
-        )
-    if suffix == ".pdf":
-        if "pdf" not in profile:
-            raise ValueError(
-                f"Profile {profile_id} does not define pdf parser settings "
-                f"required for {input_path.name}"
-            )
-        source_snapshot = importers._capture_input_source(input_path, config)
-        return importers._import_pdf(
-            input_path,
-            profile,
-            config,
-            input_path.parent,
-            source_bytes=source_snapshot.source_bytes,
-        )
-    raise ValueError(
-        f"Unsupported preview input type for {input_path.name}; expected .csv or .pdf"
-    )
-
-
-def _print_import_summary(report: dict[str, Any]) -> None:
-    print(
-        "Import complete: "
-        f"{report['successful_record_count']} successful records, "
-        f"{report['unsuccessful_record_count']} unsuccessful records"
-    )
-    explicit_binding_ids = {
-        str(file_report.get("binding_id"))
-        for file_report in report.get("files", [])
-        if file_report.get("binding_selection") == "explicit"
-        and file_report.get("binding_id")
-    }
-    for binding_id in sorted(explicit_binding_ids):
-        print(f"Explicit account binding: {binding_id}")
-    if report.get("migration", {}).get("legacy_review_state_applied"):
-        print(
-            "Migration: legacy review decisions were made explicit before replacement"
-        )
-    uncategorized = report.get("uncategorized_count", 0)
-    if uncategorized:
-        print(
-            f"{uncategorized} records are still uncategorized; "
-            "run `honeymoney status` to see totals or `honeymoney review` to categorize"
-        )
-    overlap = report.get("overlap", {})
-    consolidated = overlap.get("consolidated_occurrence_count", 0)
-    if consolidated:
-        print(
-            "Canonical overlap: "
-            f"{consolidated} source occurrence"
-            f"{'' if consolidated == 1 else 's'} consolidated across "
-            f"{overlap.get('group_count', 0)} group"
-            f"{'' if overlap.get('group_count', 0) == 1 else 's'}"
-        )
-    ambiguous = overlap.get("ambiguous_group_count", 0)
-    if ambiguous:
-        print(
-            f"Overlap review: {ambiguous} ambiguous group"
-            f"{'' if ambiguous == 1 else 's'}"
-        )
-    if report.get("source_occurrence_count") is not None:
-        print(
-            "This import parsed "
-            f"{report['source_occurrence_count']} source occurrence"
-            f"{'' if report['source_occurrence_count'] == 1 else 's'} and "
-            f"affected {report['canonical_occurrence_count']} canonical transaction"
-            f"{'' if report['canonical_occurrence_count'] == 1 else 's'}"
-        )
-    ledger = report.get("ledger", {})
-    if ledger:
-        print(
-            f"Ledger now has {ledger['transaction_count']} canonical records "
-            f"({ledger['uncategorized_count']} uncategorized)"
-        )
-
-
-def _review_command(argv: list[str]) -> int:
-    if argv and argv[0] == "pair":
-        return _manual_pair_review(argv[1:])
-    parser = _command_parser(
-        argv,
-        prog="honeymoney review",
-        description="Review category and accounting flow decisions.",
-    )
-    parser.add_argument("period", nargs="?", help="Month name or YYYY-MM")
-    parser.add_argument("--month")
-    parser.add_argument("--start")
-    parser.add_argument("--end")
-    parser.add_argument("--config", dest="config_path")
-    parser.add_argument("--output", dest="output_path")
-    parser.add_argument(
-        "--category",
-        action="append",
-        dest="categories",
-        metavar="CATEGORY",
-        help=(
-            "Review rows currently in CATEGORY regardless of review state; "
-            "repeat to select multiple categories"
-        ),
-    )
-    parser.add_argument(
-        "--flow",
-        action="append",
-        dest="flows",
-        choices=sorted(ALLOWED_FLOW_TYPES),
-        help="Review rows with this accounting flow; repeat to select more than one",
-    )
-    parser.add_argument("--direction", choices=["inflow", "outflow"])
-    parser.add_argument("--transaction", dest="transaction_id")
-    parser.add_argument("--as", dest="decision")
-    parser.add_argument("--file", dest="decision_file")
-    parser.add_argument("--remember", action="store_true")
-    parser.add_argument("--yes", action="store_true")
-    parser.add_argument("--json", action="store_true")
-    args = parser.parse_args(argv)
-
-    has_period = bool(args.month or args.period or args.start or args.end)
-    has_filters = bool(args.categories or args.flows or args.direction or has_period)
-    one_shot = bool(args.transaction_id or args.decision or args.remember or args.yes)
-    batch_review = bool(args.decision_file)
-    if args.json and not (batch_review or args.transaction_id and args.decision):
-        raise ValueError(
-            "honeymoney review --json requires --file FILE or "
-            "--transaction ID and --as DECISION; JSON mode cannot prompt"
-        )
-    if bool(args.transaction_id) != bool(args.decision):
-        raise ValueError(
-            "One-shot review requires both --transaction ID and --as DECISION"
-        )
-    if one_shot and not args.transaction_id:
-        raise ValueError(
-            "--remember and --yes require one-shot --transaction ID and --as DECISION"
-        )
-    if one_shot and has_filters:
-        raise ValueError("One-shot review cannot be combined with review filters")
-    if batch_review and (one_shot or has_filters):
-        raise ValueError(
-            "Batch review cannot be combined with filters or one-shot options"
-        )
-    if args.yes and not args.remember:
-        raise ValueError("--yes is valid only with --remember")
-    if args.remember and not args.yes:
-        raise ValueError("One-shot --remember requires --yes")
-
-    config = _load_config(args.config_path)
-    category_filters = args.categories or []
-    unsupported_categories = sorted(set(category_filters) - allowed_categories(config))
-    if unsupported_categories:
-        raise ValueError(
-            "Unsupported review category: " + ", ".join(unsupported_categories)
-        )
-    categorized_path = Path(args.output_path or config["paths"]["output"])
-    ledger_rows = read_ledger(categorized_path, config=config)
-    _reject_ambiguous_legacy_transaction_ids(ledger_rows)
-    if not ledger_rows:
-        if args.transaction_id:
-            raise ValueError(f"Unknown transaction_id: {args.transaction_id}")
-        if batch_review:
-            return _batch_review(
-                args,
-                config,
-                categorized_path,
-                ledger_rows,
-            )
-        print(f"No processed records found at {categorized_path}")
-        print("Run `honeymoney import` or `honeymoney run` first.")
-        return 0
-
-    if args.transaction_id:
-        return _one_shot_review(
-            args,
-            config,
-            categorized_path,
-            ledger_rows,
-        )
-    if batch_review:
-        return _batch_review(
-            args,
-            config,
-            categorized_path,
-            ledger_rows,
-        )
-
-    if args.flows or args.direction or has_period:
-        filter_period = (
-            (args.month or args.period, args.start, args.end) if has_period else None
-        )
-        selected = _filtered_review_rows(
-            ledger_rows,
-            category_filters=category_filters,
-            flow_filters=args.flows or [],
-            direction=args.direction,
-            period=filter_period,
-        )
-        if not selected:
-            print(
-                "No transactions matched the selected review filters; no changes written."
-            )
-            print(_review_filter_summary(args))
-            return 0
-        patches, remembered_rules = _prompt_accounting_decisions(selected, ledger_rows)
-        if patches:
-            result = apply_correction_operation(
-                config,
-                categorized_path,
-                patches,
-                remembered_rules=list(remembered_rules.values()),
-            )
-            resulting_rows = result.ledger_rows
-        else:
-            resulting_rows = ledger_rows
-        remaining_matches = _filtered_review_rows(
-            resulting_rows,
-            category_filters=category_filters,
-            flow_filters=args.flows or [],
-            direction=args.direction,
-            period=filter_period,
-        )
-        review_queue_count = sum(
-            1 for row in resulting_rows if row.get("needs_review") == "true"
-        )
-        print(
-            f"Review complete: {len(patches)} updated from {len(selected)} matched; "
-            f"{len(remaining_matches)} still match these filters; "
-            f"{review_queue_count} in review queue"
-        )
-        return 0
-
-    reviewed = _prompt_review_transactions(ledger_rows, config, category_filters)
-    patches = {
-        row["transaction_id"]: {
-            "category": row["category"],
-            "confidence": "1.00",
-            "reason": "Categorized interactively",
-            "needs_review": "false",
-        }
-        for row in reviewed
-    }
-    if patches:
-        result = apply_correction_operation(config, categorized_path, patches)
-        remaining = result.remaining_review_count
-    else:
-        remaining = sum(1 for row in ledger_rows if row.get("needs_review") == "true")
-    if category_filters:
-        print(
-            f"Review complete: {len(patches)} updated from selected categories, "
-            f"{remaining} still need review"
-        )
-    else:
-        print(f"Review complete: {len(patches)} updated, {remaining} still need review")
-    return 0
-
-
-def _one_shot_review(
-    args: argparse.Namespace,
-    config: dict[str, Any],
-    categorized_path: Path,
-    ledger_rows: list[dict[str, str]],
-) -> int:
-    transaction = next(
-        (
-            row
-            for row in ledger_rows
-            if row.get("transaction_id") == args.transaction_id
-        ),
-        None,
-    )
-    if transaction is None:
-        raise ValueError(f"Unknown transaction_id: {args.transaction_id}")
-    decision = _normalize_review_decision(args.decision)
-    patch = _accounting_decision_patch(
-        transaction, decision, "Accounting flow confirmed by one-shot review"
-    )
-    remembered_rules: list[dict[str, Any]] = []
-    rule_matches = 0
-    if args.remember:
-        if decision != "income":
-            raise ValueError("--remember is supported only with --as income")
-        rule = _remembered_income_rule(transaction)
-        rule_matches = _remembered_rule_match_count(ledger_rows, transaction)
-        remembered_rules.append(rule)
-
-    result = apply_correction_operation(
-        config,
-        categorized_path,
-        {args.transaction_id: patch},
-        remembered_rules=remembered_rules,
-    )
-    data = {
-        "applied_count": result.applied_count,
-        "remaining_review_count": result.remaining_review_count,
-        "transaction_ids": result.transaction_ids,
-        "decision": decision,
-        "rules_added": result.rules_added,
-        "rule_matches": rule_matches,
-    }
-    artifacts = _correction_artifacts(config, categorized_path)
-    if args.remember:
-        artifacts["rules_json"] = str(Path(config["rules"]).resolve())
-    if args.json:
-        _emit_json("review", "success", data=data, artifacts=artifacts)
-    else:
-        suffix = (
-            f" and remembered an exact inflow rule matching {rule_matches} current rows"
-            if args.remember
-            else ""
-        )
-        print(f"Reviewed {args.transaction_id} as {decision}{suffix}.")
-    return 0
-
-
-def _manual_pair_review(argv: list[str]) -> int:
-    parser = _command_parser(
-        argv,
-        prog="honeymoney review pair",
-        description="Confirm two same-account cash movements as one transfer pair.",
-    )
-    parser.add_argument("transaction_ids", nargs=2, metavar="TRANSACTION_ID")
-    parser.add_argument("--config", dest="config_path")
-    parser.add_argument("--output", dest="output_path")
-    parser.add_argument("--yes", action="store_true")
-    parser.add_argument("--json", action="store_true")
-    args = parser.parse_args(argv)
-    if not args.yes:
-        raise ManualPairError(
-            "manual_pair_confirmation_required",
-            "Manual transfer pairing requires --yes confirmation.",
-        )
-
-    config = _load_config(args.config_path)
-    categorized_path = Path(args.output_path or config["paths"]["output"])
-    recover_generation(
-        categorized_path,
-        allowed_generation_paths=configured_generation_paths(config),
-    )
-    generation_paths = generation_member_paths(
-        categorized_path,
-        configured_generation_paths(config),
-    )
-    expected_generation = generation_hashes(generation_paths)
-    ledger_rows = read_ledger(categorized_path, config=config)
-    if generation_hashes(generation_paths) != expected_generation:
-        raise GenerationConflictError(
-            "The ledger generation changed while this operation was reading it"
-        )
-    _reject_ambiguous_legacy_transaction_ids(ledger_rows)
-    by_id = {
-        row["transaction_id"]: row for row in ledger_rows if row.get("transaction_id")
-    }
-    selected_ids = list(args.transaction_ids)
-    replaying_retired_ids = any(identifier not in by_id for identifier in selected_ids)
-    if replaying_retired_ids:
-        aliases = _proven_manual_pair_aliases(config, categorized_path)
-        selected_ids = [
-            identifier if identifier in by_id else aliases.get(identifier, "")
-            for identifier in selected_ids
-        ]
-    if (
-        any(not identifier or identifier not in by_id for identifier in selected_ids)
-        or len(set(selected_ids)) != 2
-    ):
-        raise ManualPairError(
-            "manual_pair_stale_transaction",
-            "A nominated transaction is no longer current.",
-        )
-    left = by_id[selected_ids[0]]
-    right = by_id[selected_ids[1]]
-    protected_flags = {
-        IDENTITY_MIGRATION_AMBIGUITY_FLAG,
-        "overlap_count_ambiguous",
-        "overlap_history_ambiguous",
-    }
-    if any(
-        bool(protected_flags & set(row.get("flags", "").split(";")))
-        for row in (left, right)
-    ):
-        raise ManualPairError(
-            "manual_pair_ambiguous_transaction",
-            "A nominated transaction has ambiguous current state.",
-        )
-    validate_manual_pair_facts(left, right)
-
-    markers = [manual_pair_marker(row) for row in (left, right)]
-    malformed_marker = any(
-        any(
-            token.startswith(MANUAL_PAIR_FLAG_PREFIX)
-            for token in row.get("flags", "").split(";")
-        )
-        and not marker
-        for row, marker in zip((left, right), markers)
-    )
-    if malformed_marker:
-        raise ManualPairError(
-            "manual_pair_conflict",
-            "A nominated transaction has conflicting manual-pair state.",
-        )
-    existing_group = markers[0] if markers[0] and markers[0] == markers[1] else ""
-    if any(markers) and not existing_group:
-        raise ManualPairError(
-            "manual_pair_conflict",
-            "A nominated transaction belongs to a conflicting active manual pair.",
-        )
-    for row, other in ((left, right), (right, left)):
-        partner = row.get("paired_transaction_id", "")
-        if partner and partner != other["transaction_id"]:
-            raise ManualPairError(
-                "manual_pair_conflict",
-                "A nominated transaction belongs to a conflicting active pair.",
-            )
-        if partner and not existing_group:
-            raise ManualPairError(
-                "manual_pair_conflict",
-                "A nominated transaction already belongs to an active pair.",
-            )
-    candidate_pair_id = existing_group or manual_pair_id(args.transaction_ids)
-    _require_unambiguous_manual_pair_corrections(
-        config,
-        candidate_pair_id,
-        set(selected_ids),
-    )
-    corrections = load_corrections(config)
-    if not existing_group:
-        proposed_pair_id = candidate_pair_id
-        nominated_correction_groups = {
-            corrections.get(row["transaction_id"], {}).get(MANUAL_PAIR_FIELD, "")
-            for row in (left, right)
-        }
-        nominated_correction_groups.discard("")
-        proposed_correction_members = {
-            transaction_id
-            for transaction_id, correction in corrections.items()
-            if correction.get(MANUAL_PAIR_FIELD) == proposed_pair_id
-        }
-        proposed_marker = f"{MANUAL_PAIR_FLAG_PREFIX}{proposed_pair_id}"
-        proposed_ledger_members = {
-            row.get("transaction_id", "")
-            for row in ledger_rows
-            if proposed_marker in row.get("flags", "").split(";")
-        }
-        if (
-            nominated_correction_groups
-            or proposed_correction_members
-            or proposed_ledger_members
-        ):
-            raise ManualPairError(
-                "manual_pair_conflict",
-                "A nominated transaction has conflicting stored pair membership.",
-            )
-    if existing_group:
-        if (
-            replaying_retired_ids
-            and manual_pair_id(args.transaction_ids) != existing_group
-        ):
-            raise ManualPairError(
-                "manual_pair_conflict",
-                "The nominated transactions do not match the stored manual pair.",
-            )
-        _require_complete_manual_pair(
-            ledger_rows,
-            corrections,
-            left,
-            right,
-            existing_group,
-        )
-        current_ids = sorted(selected_ids)
-        data = {
-            "paired_count": 2,
-            "unchanged": True,
-            "changed": False,
-            "result": "already_paired",
-            "pair_id": existing_group,
-            "transaction_ids": current_ids,
-            "remaining_review_count": sum(
-                1 for row in ledger_rows if row.get("needs_review") == "true"
-            ),
-        }
-        if generation_hashes(generation_paths) != expected_generation:
-            raise GenerationConflictError(
-                "The ledger generation changed while this operation was reading it"
-            )
-        if args.json:
-            _emit_json(
-                "review.pair",
-                "success",
-                data=data,
-                artifacts=_correction_artifacts(config, categorized_path),
-            )
-        else:
-            print(
-                "Manual internal-transfer pair already paired: "
-                f"{existing_group}; current transactions {', '.join(current_ids)}."
-            )
-        return 0
-    if replaying_retired_ids:
-        raise ManualPairError(
-            "manual_pair_stale_transaction",
-            "The nominated retired transactions do not map to one active manual pair.",
-        )
-
-    pair_id = existing_group or manual_pair_id(args.transaction_ids)
-    patches = {}
-    for row in (left, right):
-        patch = _accounting_decision_patch(
-            row,
-            "internal-transfer",
-            "Internal transfer confirmed by manual pair review",
-        )
-        patch[MANUAL_PAIR_FIELD] = pair_id
-        patches[row["transaction_id"]] = patch
-    result = apply_correction_operation(config, categorized_path, patches)
-    current_ids = sorted(
-        row["transaction_id"]
-        for row in result.ledger_rows
-        if manual_pair_marker(row) == pair_id
-    )
-    data = {
-        "paired_count": 2,
-        "unchanged": False,
-        "changed": True,
-        "result": "paired",
-        "pair_id": pair_id,
-        "transaction_ids": current_ids,
-        "remaining_review_count": result.remaining_review_count,
-    }
-    if args.json:
-        _emit_json(
-            "review.pair",
-            "success",
-            data=data,
-            artifacts=_correction_artifacts(config, categorized_path),
-        )
-    else:
-        print(
-            "Manual internal-transfer pair confirmed: "
-            f"{pair_id}; current transactions {', '.join(current_ids)}."
-        )
-    return 0
-
-
-def _proven_manual_pair_aliases(
-    config: dict[str, Any],
-    categorized_path: Path,
-) -> dict[str, str]:
-    """Map source occurrence IDs only through one active canonical slot."""
-    state = load_configured_identity_state(categorized_path, config)
-    manifest = state.overlap_manifest
-    evidence_rows = state.source_evidence_rows
-    if manifest is None or evidence_rows is None:
-        return {}
-    current_ids = {
-        row.get("transaction_id", "") for row in state.rows if row.get("transaction_id")
-    }
-    target_by_fingerprint = {
-        group["record_fingerprint"]: active_ids[0]
-        for group in manifest["groups"]
-        if len(
-            active_ids := [
-                slot["transaction_id"]
-                for slot in group["slots"]
-                if slot["state"] == "active" and slot["transaction_id"] in current_ids
-            ]
-        )
-        == 1
-    }
-    targets_by_source_id: dict[str, set[str]] = {}
-    try:
-        for row in evidence_rows:
-            target = target_by_fingerprint.get(record_fingerprint(row))
-            source_id = row.get("transaction_id", "")
-            if target and source_id:
-                targets_by_source_id.setdefault(source_id, set()).add(target)
-    except IdentityError:
-        return {}
-    return {
-        source_id: next(iter(targets))
-        for source_id, targets in targets_by_source_id.items()
-        if len(targets) == 1
-    }
-
-
-def _require_unambiguous_manual_pair_corrections(
-    config: Mapping[str, object],
-    pair_id: str,
-    member_ids: set[str],
-) -> None:
-    """Reject raw correction rows that a transaction-keyed map would lose."""
-    corrections_value = config.get("corrections")
-    if not corrections_value:
-        return
-    corrections_path = Path(str(corrections_value))
-    if not corrections_path.exists():
-        return
-    rows = read_csv_artifact(corrections_path, CORRECTION_COLUMNS).rows
-    memberships = [
-        (
-            row.get("transaction_id", "").strip(),
-            row.get(MANUAL_PAIR_FIELD, "").strip(),
-        )
-        for row in rows
-    ]
-    counts: dict[str, int] = {}
-    for transaction_id, _ in memberships:
-        if transaction_id:
-            counts[transaction_id] = counts.get(transaction_id, 0) + 1
-    malformed_idless = any(
-        not transaction_id and stored_pair_id == pair_id
-        for transaction_id, stored_pair_id in memberships
-    )
-    duplicate_members = {
-        transaction_id
-        for transaction_id, count in counts.items()
-        if count > 1
-        and (
-            transaction_id in member_ids
-            or any(
-                candidate_id == transaction_id and stored_pair_id == pair_id
-                for candidate_id, stored_pair_id in memberships
-            )
-        )
-    }
-    if malformed_idless or duplicate_members:
-        raise ManualPairError(
-            "manual_pair_conflict",
-            "The stored manual-pair corrections are malformed or conflicting.",
-        )
-
-
-def _require_complete_manual_pair(
-    ledger_rows: list[dict[str, str]],
-    corrections: Mapping[str, Mapping[str, str]],
-    left: dict[str, str],
-    right: dict[str, str],
-    pair_id: str,
-) -> None:
-    """Fail unless the two rows are the whole current stored pair."""
-    expected_ids = {left["transaction_id"], right["transaction_id"]}
-    pair_marker = f"{MANUAL_PAIR_FLAG_PREFIX}{pair_id}"
-    ledger_members = {
-        row.get("transaction_id", "")
-        for row in ledger_rows
-        if pair_marker in row.get("flags", "").split(";")
-    }
-    correction_members = {
-        transaction_id
-        for transaction_id, correction in corrections.items()
-        if correction.get(MANUAL_PAIR_FIELD) == pair_id
-    }
-    complete = ledger_members == expected_ids and correction_members == expected_ids
-    for row, other in ((left, right), (right, left)):
-        complete = complete and all(
-            (
-                manual_pair_marker(row) == pair_id,
-                row.get("transfer_group_id") == pair_id,
-                row.get("paired_transaction_id") == other["transaction_id"],
-                row.get("reconciliation_status") == "paired",
-                row.get("category") == "Internal Transfer",
-                row.get("flow_type") == "internal_transfer",
-                row.get("flow_source") == "correction",
-            )
-        )
-    if not complete:
-        raise ManualPairError(
-            "manual_pair_conflict",
-            "The current stored manual pair is incomplete or conflicting.",
-        )
-
-
-def _batch_review(
-    args: argparse.Namespace,
-    config: dict[str, Any],
-    categorized_path: Path,
-    ledger_rows: list[dict[str, str]],
-) -> int:
-    entries = _load_accounting_decision_batch(args.decision_file)
-    ledger_ids = {
-        row.get("transaction_id", "")
-        for row in ledger_rows
-        if row.get("transaction_id")
-    }
-    aliases = (
-        _proven_accounting_decision_aliases(config, categorized_path)
-        if any(identifier.strip() not in ledger_ids for identifier, _ in entries)
-        else {}
-    )
-    plan = _plan_accounting_decision_batch(entries, ledger_rows, aliases=aliases)
-
-    def require_same_plan(current_rows: list[dict[str, str]]) -> None:
-        current_plan = _plan_accounting_decision_batch(
-            entries,
-            current_rows,
-            aliases=aliases,
-        )
-        if current_plan != plan:
-            raise _review_batch_input_error(
-                "stale_batch_generation",
-                "The ledger changed after this decision batch was checked",
-                rejected_count=len(entries),
-            )
-
-    try:
-        result = apply_correction_operation(
-            config,
-            categorized_path,
-            plan.patches,
-            ledger_precondition=require_same_plan,
-        )
-    except GenerationConflictError as error:
-        raise _review_batch_input_error(
-            "stale_batch_generation",
-            "The ledger changed before this decision batch could be saved",
-            rejected_count=len(entries),
-        ) from error
-    data = {
-        "applied_count": plan.applied_count,
-        "unchanged_count": plan.unchanged_count,
-        "rejected_count": 0,
-        "remaining_review_count": result.remaining_review_count,
-    }
-    if args.json:
-        _emit_json(
-            "review",
-            "success",
-            data=data,
-            artifacts=_correction_artifacts(config, categorized_path),
-        )
-    else:
-        print(
-            "Batch review complete: "
-            f"{plan.applied_count} applied, {plan.unchanged_count} unchanged, "
-            f"0 rejected; {result.remaining_review_count} transactions still need review"
-        )
-    return 0
-
-
-def _load_accounting_decision_batch(source: str) -> list[tuple[str, str]]:
-    try:
-        if source == "-":
-            return _json_accounting_decision_entries(json.load(sys.stdin))
-        path = Path(source)
-        suffix = path.suffix.casefold()
-        if suffix == ".json":
-            with path.open(encoding="utf-8") as handle:
-                return _json_accounting_decision_entries(json.load(handle))
-        if suffix == ".csv":
-            with path.open(newline="", encoding="utf-8") as handle:
-                reader = csv.DictReader(handle)
-                if reader.fieldnames != ["transaction_id", "decision"]:
-                    raise _review_batch_input_error(
-                        "invalid_columns",
-                        "CSV decision input must have exactly "
-                        "transaction_id,decision columns",
-                    )
-                rows = list(reader)
-                rejected_count = max(1, len(rows))
-                entries: list[tuple[str, str]] = []
-                for index, row in enumerate(rows):
-                    if None in row:
-                        raise _review_batch_input_error(
-                            "invalid_entry",
-                            f"Decision at index {index} has extra CSV fields",
-                            rejected_count=rejected_count,
-                            index=index,
-                        )
-                    entries.append(
-                        (
-                            str(row.get("transaction_id") or ""),
-                            str(row.get("decision") or ""),
-                        )
-                    )
-                return entries
-        raise _review_batch_input_error(
-            "unsupported_format",
-            "Decision input must be a .csv or .json file",
-        )
-    except _ReviewBatchError:
-        raise
-    except (csv.Error, json.JSONDecodeError, OSError, UnicodeError) as error:
-        raise _review_batch_input_error(
-            "unreadable_input",
-            "Decision input could not be read",
-        ) from error
-
-
-def _json_accounting_decision_entries(payload: Any) -> list[tuple[str, str]]:
-    if not isinstance(payload, list):
-        raise _review_batch_input_error(
-            "invalid_document",
-            "JSON decision input must be an array",
-        )
-    entries: list[tuple[str, str]] = []
-    for index, item in enumerate(payload):
-        if not isinstance(item, dict) or set(item) != {"transaction_id", "decision"}:
-            raise _review_batch_input_error(
-                "invalid_entry",
-                f"Decision at index {index} must contain only "
-                "transaction_id and decision",
-                rejected_count=max(1, len(payload)),
-                index=index,
-            )
-        transaction_id = item["transaction_id"]
-        decision = item["decision"]
-        if not isinstance(transaction_id, str) or not isinstance(decision, str):
-            raise _review_batch_input_error(
-                "invalid_entry",
-                f"Decision at index {index} must use string values",
-                rejected_count=max(1, len(payload)),
-                index=index,
-            )
-        entries.append((transaction_id, decision))
-    return entries
-
-
-def _plan_accounting_decision_batch(
-    entries: list[tuple[str, str]],
-    ledger_rows: list[dict[str, str]],
-    *,
-    aliases: Mapping[str, str] | None = None,
-) -> _ReviewBatchPlan:
-    if not entries:
-        raise _review_batch_input_error(
-            "empty_batch",
-            "Decision batch must contain at least one entry",
-        )
-    ledger_by_id = {
-        row["transaction_id"]: row for row in ledger_rows if row.get("transaction_id")
-    }
-    patches: dict[str, dict[str, str]] = {}
-    unchanged_count = 0
-    seen: set[str] = set()
-    errors: list[dict[str, Any]] = []
-    for index, (raw_transaction_id, raw_decision) in enumerate(entries):
-        supplied_transaction_id = raw_transaction_id.strip()
-        if not supplied_transaction_id:
-            errors.append(
-                _review_batch_error(
-                    "invalid_transaction_id",
-                    index,
-                    f"Decision at index {index} requires a transaction ID",
-                )
-            )
-            continue
-        transaction_id = (aliases or {}).get(
-            supplied_transaction_id,
-            supplied_transaction_id,
-        )
-        if transaction_id in seen:
-            errors.append(
-                _review_batch_error(
-                    "duplicate_transaction_id",
-                    index,
-                    f"Decision at index {index} repeats a transaction ID",
-                )
-            )
-            continue
-        seen.add(transaction_id)
-        transaction = ledger_by_id.get(transaction_id)
-        if transaction is None:
-            errors.append(
-                _review_batch_error(
-                    "stale_transaction_id",
-                    index,
-                    f"Decision at index {index} has a stale transaction ID",
-                )
-            )
-            continue
-        try:
-            decision = _normalize_review_decision(raw_decision)
-        except ValueError:
-            errors.append(
-                _review_batch_error(
-                    "unsupported_decision",
-                    index,
-                    f"Decision at index {index} is not supported",
-                )
-            )
-            continue
-        reasons = review_reason_tokens(transaction.get("review_reasons", ""))
-        if REVIEW_REASON_ACCOUNTING_FLOW not in reasons:
-            if _accounting_decision_matches(transaction, decision):
-                unchanged_count += 1
-            else:
-                errors.append(
-                    _review_batch_error(
-                        "stale_review_state",
-                        index,
-                        f"Decision at index {index} no longer has an "
-                        "accounting-flow review reason",
-                    )
-                )
-            continue
-        if transaction.get(
-            "reason"
-        ) == _BATCH_REVIEW_REASON and _accounting_decision_matches(
-            transaction, decision
-        ):
-            unchanged_count += 1
-            continue
-        try:
-            patches[transaction_id] = _accounting_decision_patch(
-                transaction,
-                decision,
-                _BATCH_REVIEW_REASON,
-            )
-        except ValueError:
-            errors.append(
-                _review_batch_error(
-                    "decision_not_applicable",
-                    index,
-                    f"Decision at index {index} is not valid for the current transaction",
-                )
-            )
-    if errors:
-        raise _ReviewBatchError(errors, rejected_count=len(entries))
-    return _ReviewBatchPlan(
-        patches,
-        applied_count=len(patches),
-        unchanged_count=unchanged_count,
-    )
-
-
-def _proven_accounting_decision_aliases(
-    config: dict[str, Any],
-    categorized_path: Path,
-) -> dict[str, str]:
-    state = load_configured_identity_state(categorized_path, config)
-    if state.source_rows is None or state.overlap_manifest is None:
-        return {}
-    current = canonicalize_overlaps(
-        state.source_rows,
-        state.rows,
-        state.overlap_manifest,
-    )
-    aliases: dict[str, str] = {}
-    for group in current.diagnostic["groups"]:
-        canonical_ids = [
-            str(identifier) for identifier in group["canonical_transaction_ids"]
-        ]
-        if len(canonical_ids) != 1:
-            continue
-        for pool in group["source_occurrence_pools"]:
-            for identifier in pool:
-                aliases[str(identifier)] = canonical_ids[0]
-    return aliases
-
-
-def _accounting_decision_matches(
-    transaction: dict[str, str],
-    decision: str,
-) -> bool:
-    expected = _ACCOUNTING_DECISION_FIELDS[decision]
-    return all(transaction.get(field, "") == value for field, value in expected.items())
-
-
-def _review_batch_input_error(
-    code: str,
-    message: str,
-    *,
-    rejected_count: int = 1,
-    index: int | None = None,
-) -> _ReviewBatchError:
-    detail: dict[str, Any] = {
-        "type": "ReviewBatchValidationError",
-        "code": code,
-        "message": message,
-    }
-    if index is not None:
-        detail["index"] = index
-    return _ReviewBatchError([detail], rejected_count=rejected_count)
-
-
-def _review_batch_error(
-    code: str,
-    index: int,
-    message: str,
-) -> dict[str, Any]:
-    return {
-        "type": "ReviewBatchValidationError",
-        "code": code,
-        "index": index,
-        "message": message,
-    }
-
-
-def _filtered_review_rows(
-    rows: list[dict[str, str]],
-    *,
-    category_filters: list[str],
-    flow_filters: list[str],
-    direction: str | None,
-    period: tuple[str | None, str | None, str | None] | None,
-) -> list[dict[str, str]]:
-    selected = list(rows)
-    if period is not None:
-        month, start, end = period
-        period_start, period_end = _resolve_period(month, start, end)
-        selected = _rows_in_period(selected, period_start, period_end)
-    if category_filters:
-        categories = set(category_filters)
-        selected = [row for row in selected if row.get("category") in categories]
-    if flow_filters:
-        flows = set(flow_filters)
-        selected = [row for row in selected if row.get("flow_type") in flows]
-    if direction:
-        selected = [row for row in selected if transaction_direction(row) == direction]
-    return selected
-
-
-def _prompt_accounting_decisions(
-    selected: list[dict[str, str]], ledger_rows: list[dict[str, str]]
-) -> tuple[dict[str, dict[str, str]], dict[str, dict[str, Any]]]:
-    print(f"\n{len(selected)} transactions matched the selected review filters.")
-    print(
-        "Choose [i]ncome, [r]efund, internal [t]ransfer, [c]ard payment, "
-        "in[v]estment transfer, [e]xpense, [u]nresolved, [s]kip, or [q]uit."
-    )
-    choices = {
-        "i": "income",
-        "income": "income",
-        "r": "refund",
-        "refund": "refund",
-        "t": "internal-transfer",
-        "internal-transfer": "internal-transfer",
-        "c": "credit-card-payment",
-        "credit-card-payment": "credit-card-payment",
-        "v": "investment-transfer",
-        "investment-transfer": "investment-transfer",
-        "e": "expense",
-        "expense": "expense",
-        "u": "unresolved",
-        "unresolved": "unresolved",
-    }
-    patches: dict[str, dict[str, str]] = {}
-    remembered: dict[str, dict[str, Any]] = {}
-    for position, transaction in enumerate(selected, start=1):
-        print(f"\n[{position}/{len(selected)}] {_accounting_review_line(transaction)}")
-        while True:
-            try:
-                raw_choice = (
-                    input("Decision [i/r/t/c/v/e/u/Enter/q]: ").strip().casefold()
-                )
-            except EOFError:
-                return patches, remembered
-            if raw_choice in {"", "s", "skip"}:
-                break
-            if raw_choice in {"q", "quit"}:
-                return {}, {}
-            decision = choices.get(raw_choice)
-            if decision is None:
-                print("Enter i, r, t, c, v, e, u, Enter to skip, or q to quit.")
-                continue
-            try:
-                patch = _accounting_decision_patch(
-                    transaction,
-                    decision,
-                    "Accounting flow confirmed interactively",
-                )
-            except ValueError as error:
-                print(str(error))
-                continue
-            patches[transaction["transaction_id"]] = patch
-            if decision == "income" and _can_remember_income(transaction):
-                match_count = _remembered_rule_match_count(ledger_rows, transaction)
-                print(
-                    "Rule preview: exact institution, account, and description; "
-                    f"inflow direction only; {match_count} current row(s) match."
-                )
-                try:
-                    remember = (
-                        input("Remember matching future inflows as income? [y/N]: ")
-                        .strip()
-                        .casefold()
-                    )
-                except EOFError:
-                    remember = ""
-                if remember in {"y", "yes"}:
-                    rule = _remembered_income_rule(transaction)
-                    remembered[rule["id"]] = rule
-            break
-    return patches, remembered
-
-
-def _normalize_review_decision(value: str) -> str:
-    normalized = value.strip().casefold().replace("_", "-")
-    aliases = {
-        "leave-unresolved": "unresolved",
-        "internal-transfer": "internal-transfer",
-    }
-    normalized = aliases.get(normalized, normalized)
-    supported = {
-        "income",
-        "refund",
-        "internal-transfer",
-        "credit-card-payment",
-        "investment-transfer",
-        "expense",
-        "unresolved",
-    }
-    if normalized not in supported:
-        raise ValueError(
-            "Unsupported review decision: "
-            f"{value}. Choose income, refund, internal-transfer, credit-card-payment, "
-            "investment-transfer, expense, or unresolved"
-        )
-    return normalized
-
-
-def _accounting_decision_patch(
-    transaction: dict[str, str], decision: str, reason: str
-) -> dict[str, str]:
-    if decision == "income" and transaction_direction(transaction) != "inflow":
-        raise ValueError("Income can be confirmed only for a normalized inflow")
-    remaining_reasons = [
-        item
-        for item in review_reason_tokens(transaction.get("review_reasons", ""))
-        if item != REVIEW_REASON_ACCOUNTING_FLOW
-    ]
-    patch = {"confidence": "1.00", "reason": reason}
-    patch.update(_ACCOUNTING_DECISION_FIELDS[decision])
-    if "category" in patch:
-        remaining_reasons = [
-            item
-            for item in remaining_reasons
-            if item not in {REVIEW_REASON_CATEGORY, REVIEW_REASON_CATEGORY_SUGGESTION}
-        ]
-    if decision == "unresolved":
-        remaining_reasons.append(REVIEW_REASON_ACCOUNTING_FLOW)
-    patch["review_reasons"] = ";".join(dict.fromkeys(remaining_reasons))
-    patch["needs_review"] = str(bool(remaining_reasons)).lower()
-    return patch
-
-
-def _accounting_review_line(transaction: dict[str, str]) -> str:
-    amount = transaction.get("amount_hkd", "")
-    posted = " ".join(
-        part
-        for part in [
-            transaction.get("posted_amount", ""),
-            transaction.get("posted_currency", ""),
-        ]
-        if part
-    )
-    base_currency = "HKD"
-    amount_label = f"{amount} {base_currency}"
-    if posted and posted != amount_label:
-        amount_label = f"{posted} ({amount_label})"
-    merchant = transaction.get("merchant", "") or "(no merchant)"
-    description = transaction.get("original_description", "")
-    merchant_label = merchant
-    if description and description != merchant:
-        merchant_label += f" / {description}"
-    parts = [
-        transaction.get("date", ""),
-        amount_label,
-        transaction.get("account", "") or transaction.get("account_id", ""),
-        merchant_label,
-        f"category={transaction.get('category', '')}",
-        f"flow={transaction.get('flow_type', '')}",
-    ]
-    labels = review_reason_labels(transaction.get("review_reasons", ""))
-    if labels:
-        parts.append("review=" + ", ".join(labels))
-    return "  ".join(parts)
-
-
-def _can_remember_income(transaction: dict[str, str]) -> bool:
-    return bool(
-        transaction.get("institution", "").strip()
-        and transaction.get("account_id", "").strip()
-        and transaction.get("original_description", "").strip()
-        and transaction_direction(transaction) == "inflow"
-    )
-
-
-def _remembered_income_rule(transaction: dict[str, str]) -> dict[str, Any]:
-    if not _can_remember_income(transaction):
-        raise ValueError(
-            "Cannot remember income without institution, account_id, exact description, "
-            "and inflow direction"
-        )
-    identity_values = [
-        transaction[field].strip().casefold()
-        for field in ["institution", "account_id", "original_description"]
-    ]
-    identity = "|".join(identity_values)
-    digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:16]
-    return {
-        "id": f"review_income_{digest}",
-        "enabled": True,
-        "priority": 100,
-        "conditions": [
-            {
-                "field": "institution",
-                "match_type": "exact",
-                "patterns": [identity_values[0]],
-            },
-            {
-                "field": "account_id",
-                "match_type": "exact",
-                "patterns": [identity_values[1]],
-            },
-            {
-                "field": "original_description",
-                "match_type": "exact",
-                "patterns": [identity_values[2]],
-            },
-            {"field": "direction", "match_type": "exact", "patterns": ["inflow"]},
-        ],
-        "category": "Income",
-        "flow_type": "income",
-        "confidence": 1.0,
-        "notes": "Confirmed in human cash-flow review",
-    }
-
-
-def _remembered_rule_match_count(
-    rows: list[dict[str, str]], transaction: dict[str, str]
-) -> int:
-    return sum(
-        1
-        for row in rows
-        if row.get("institution", "").strip().casefold()
-        == transaction.get("institution", "").strip().casefold()
-        and row.get("account_id", "").strip().casefold()
-        == transaction.get("account_id", "").strip().casefold()
-        and row.get("original_description", "").strip().casefold()
-        == transaction.get("original_description", "").strip().casefold()
-        and transaction_direction(row) == "inflow"
-    )
-
-
-def _review_filter_summary(args: argparse.Namespace) -> str:
-    parts = []
-    if args.month or args.period:
-        parts.append(f"period={args.month or args.period}")
-    if args.start:
-        parts.append(f"start={args.start}")
-    if args.end:
-        parts.append(f"end={args.end}")
-    if args.categories:
-        parts.append("category=" + ",".join(args.categories))
-    if args.flows:
-        parts.append("flow=" + ",".join(args.flows))
-    if args.direction:
-        parts.append(f"direction={args.direction}")
-    return "Matched filters: " + "; ".join(parts)
-
-
-def _correction_artifacts(
-    config: dict[str, Any], categorized_path: Path
-) -> dict[str, str]:
-    return {
-        "corrections_csv": str(Path(config["corrections"]).resolve()),
-        "categorized_csv": str(categorized_path.resolve()),
-        "review_needed_csv": str(
-            (categorized_path.parent / "review_needed.csv").resolve()
-        ),
-    }
-
-
-def _unsuccessful_record_count(file_reports: list[dict[str, str]]) -> int:
-    return sum(
-        1
-        for file_report in file_reports
-        if file_report.get("status") in {"failed", "skipped"}
-    )
-
-
-def _overlap_diagnostic_for_rows(
-    overlap_result: Any,
-    rows: list[dict[str, str]],
-    source_rows: list[dict[str, str]],
-) -> dict[str, Any]:
-    canonical_ids = {row.get("transaction_id", "") for row in rows}
-    groups = [
-        group
-        for group in overlap_result.diagnostic["groups"]
-        if canonical_ids.intersection(group["canonical_transaction_ids"])
-    ]
-    source_ids = {
-        occurrence_id
-        for group in groups
-        for pool in group["source_occurrence_pools"]
-        for occurrence_id in pool
-    }
-    legacy_source_count = sum(
-        1
-        for row in source_rows
-        if not row.get("canonical_group_id")
-        and row.get("transaction_id", "") in canonical_ids
-    )
-    source_count = len(source_ids) + legacy_source_count
-    canonical_count = len(rows)
-    return {
-        "group_count": len(groups),
-        "ambiguous_group_count": sum(
-            group["provenance_status"] == "ambiguous_count_mismatch"
-            and group.get("decision") is None
-            for group in groups
-        ),
-        "source_occurrence_count": source_count,
-        "canonical_occurrence_count": canonical_count,
-        "consolidated_occurrence_count": source_count - canonical_count,
-        "provenance_counts": {
-            status: sum(int(row.get("provenance_status") == status) for row in rows)
-            for status in (
-                "single_source",
-                "exact_one_to_one",
-                "pooled_equal_count",
-                "ambiguous_count_mismatch",
-            )
-        },
-        "groups": groups,
-    }
-
-
-def _normalize_loaded_rows(
-    rows: list[dict[str, str]],
-    config: Mapping[str, object] | None = None,
-) -> list[dict[str, str]]:
-    normalized = [dict(row) for row in rows]
-    for row in normalized:
-        if not row.get("account_type") and not row.get("canonical_group_id"):
-            row["account_type"] = {
-                "Bank Account": "bank",
-                "Credit Card": "credit_card",
-                "Brokerage": "investment",
-            }.get(row.get("payment_method", ""), "unknown")
-    if config is not None:
-        value_transactions(normalized, config)
-    synchronize_review_states(normalized, legacy=True)
-    return normalized
-
-
-def _unmigrated_overlap(rows: list[dict[str, str]]) -> dict[str, Any]:
-    return {
-        "group_count": 0,
-        "ambiguous_group_count": 0,
-        "source_occurrence_count": len(rows),
-        "canonical_occurrence_count": len(rows),
-        "consolidated_occurrence_count": 0,
-        "provenance_counts": {},
-        "groups": [],
-    }
-
-
-def _duplicate_compatibility(
-    overlap: dict[str, Any],
-) -> tuple[int, int, dict[str, Any]]:
-    groups = []
-    for group in overlap["groups"]:
-        occurrence_ids = sorted(
-            occurrence_id
-            for pool in group["source_occurrence_pools"]
-            for occurrence_id in pool
-        )
-        if len(occurrence_ids) <= len(group["canonical_transaction_ids"]):
-            continue
-        groups.append(
-            {
-                "match_type": DUPLICATE_MATCH_TYPE,
-                "occurrence_ids": occurrence_ids,
-            }
-        )
-    occurrence_count = sum(len(group["occurrence_ids"]) for group in groups)
-    diagnostic = {
-        "group_count": len(groups),
-        "occurrence_count": occurrence_count,
-        "groups": groups,
-    }
-    return occurrence_count, len(groups), diagnostic
-
-
-def _clean_pasted_path(value: str) -> str:
-    cleaned = value.strip()
-    if len(cleaned) >= 2 and cleaned[0] == cleaned[-1] and cleaned[0] in {"'", '"'}:
-        return cleaned[1:-1]
-    return cleaned
-
-
-def _add_owner_filter_argument(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument(
-        "--owner",
-        dest="owners",
-        action="append",
-        metavar="OWNER",
-        help="Filter by owner. Repeat to include more than one owner.",
-    )
-
-
-def _validated_owner_filters(
-    requested: Sequence[str] | None,
-    config: Mapping[str, object],
-) -> list[str]:
-    owners = list(dict.fromkeys(requested or []))
-    unsupported = [owner for owner in owners if owner not in allowed_owners(config)]
-    if unsupported:
-        noun = "filter" if len(unsupported) == 1 else "filters"
-        supported = ", ".join(sorted(allowed_owners(config)))
-        raise ValueError(
-            f"Unsupported owner {noun}: {', '.join(unsupported)}. "
-            f"Supported owners: {supported}"
-        )
-    return owners
-
-
-def _load_reporting_config(
-    config_path: str | None,
-    requested_owners: Sequence[str] | None,
-) -> tuple[dict[str, Any], list[str]]:
-    read_only_config = _load_config_read_only(config_path)
-    owner_filters = _validated_owner_filters(requested_owners, read_only_config)
-    return _load_config(config_path), owner_filters
-
-
-def _filter_rows_by_owners(
-    rows: Sequence[dict[str, str]],
-    owners: Sequence[str],
-) -> list[dict[str, str]]:
-    if not owners:
-        return list(rows)
-    selected = set(owners)
-    return [row for row in rows if row.get("owner", "") in selected]
-
-
-def _source_rows_for_canonical_rows(
-    overlap_result: CanonicalizationResult | None,
-    canonical_rows: Sequence[Mapping[str, str]],
-    source_rows: Sequence[dict[str, str]],
-) -> list[dict[str, str]]:
-    canonical_ids = {row.get("transaction_id", "") for row in canonical_rows}
-    source_ids: set[str] = set()
-    if overlap_result is not None:
-        for group in overlap_result.diagnostic["groups"]:
-            if not canonical_ids.intersection(group["canonical_transaction_ids"]):
-                continue
-            source_ids.update(
-                occurrence_id
-                for pool in group["source_occurrence_pools"]
-                for occurrence_id in pool
-            )
-    selected_ids = canonical_ids | source_ids
-    return [row for row in source_rows if row.get("transaction_id", "") in selected_ids]
-
-
-def _status_command(argv: list[str]) -> int:
-    parser = _command_parser(
-        argv,
-        prog="honeymoney status",
-        description="Show processed and categorized counts for a time period.",
-    )
-    parser.add_argument("period", nargs="?", help="Month name or YYYY-MM")
-    parser.add_argument("--month")
-    parser.add_argument("--start")
-    parser.add_argument("--end")
-    _add_owner_filter_argument(parser)
-    parser.add_argument("--config", dest="config_path")
-    parser.add_argument("--json", action="store_true")
-    args = parser.parse_args(argv)
-
-    start, end = _resolve_period(args.month or args.period, args.start, args.end)
-    config, owner_filters = _load_reporting_config(args.config_path, args.owners)
-    categorized_path = Path(config["paths"]["output"])
-    state = load_configured_identity_state(categorized_path, config)
-    ledger_rows = _normalize_loaded_rows(state.rows, config)
-    if not ledger_rows:
-        if args.json:
-            _emit_json(
-                "status",
-                "success",
-                data={
-                    "period": {"start": start.isoformat(), "end": end.isoformat()},
-                    "filters": {"owners": owner_filters},
-                    "statements_processed": 0,
-                    "records_processed": 0,
-                    "categorized": 0,
-                    "uncategorized": 0,
-                    "needs_review": 0,
-                    "review_reason_counts": review_summary([]),
-                    "valuation": valuation_summary([]),
-                    "source_occurrence_count": 0,
-                    "canonical_occurrence_count": 0,
-                    "consolidated_occurrence_count": 0,
-                    "duplicate_count": 0,
-                    "duplicate_group_count": 0,
-                    "duplicate_candidates": {
-                        "group_count": 0,
-                        "occurrence_count": 0,
-                        "groups": [],
-                    },
-                    "overlap": {
-                        "group_count": 0,
-                        "ambiguous_group_count": 0,
-                        "source_occurrence_count": 0,
-                        "canonical_occurrence_count": 0,
-                        "consolidated_occurrence_count": 0,
-                        "provenance_counts": {},
-                        "groups": [],
-                    },
-                    "unresolved_inflows": 0,
-                    "unresolved_outflows": 0,
-                    "ledger": {
-                        "total_records": 0,
-                        "outside_period": 0,
-                        "unparseable_dates": 0,
-                    },
-                },
-                artifacts={"categorized_csv": str(categorized_path.resolve())},
-            )
-            return 0
-        print(f"No processed records found at {categorized_path}")
-        print("Run `honeymoney import` or `honeymoney run` first.")
-        return 0
-
-    current_overlap = (
-        None
-        if state.canonical_migration_required
-        else canonicalize_overlaps(
-            state.source_rows,
-            ledger_rows,
-            state.overlap_manifest,
-        )
-    )
-    reconcile_ledger(ledger_rows, config, statement_rows=state.source_rows)
-    enforce_overlap_review(ledger_rows, current_overlap)
-    owner_ledger_rows = _filter_rows_by_owners(ledger_rows, owner_filters)
-    rows = _rows_in_period(owner_ledger_rows, start, end)
-    source_rows = _source_rows_for_canonical_rows(
-        current_overlap,
-        rows,
-        _rows_in_period(state.source_rows, start, end),
-    )
-    categorized = [row for row in rows if _is_categorized(row)]
-    statements = {
-        row.get("source_id") or f"legacy:{row.get('source_file', '')}"
-        for row in source_rows
-        if row.get("source_id") or row.get("source_file")
-    }
-    review = [row for row in rows if row.get("needs_review") == "true"]
-    if state.canonical_migration_required:
-        overlap = _unmigrated_overlap(rows)
-    else:
-        overlap_result = canonicalize_overlaps(
-            state.source_rows,
-            ledger_rows,
-            state.overlap_manifest,
-        )
-        overlap = _overlap_diagnostic_for_rows(overlap_result, rows, source_rows)
-    duplicate_count, duplicate_group_count, duplicate_candidates = (
-        _duplicate_compatibility(overlap)
-    )
-    unresolved_inflows = sum(
-        1
-        for row in rows
-        if row.get("flow_type") == "unresolved"
-        and transaction_direction(row) == "inflow"
-    )
-    unresolved_outflows = sum(
-        1
-        for row in rows
-        if row.get("flow_type") == "unresolved"
-        and transaction_direction(row) == "outflow"
-    )
-    undated = sum(
-        1 for row in owner_ledger_rows if _parse_iso_date(row.get("date", "")) is None
-    )
-    outside = len(owner_ledger_rows) - len(rows) - undated
-    period_valuation = valuation_summary(rows)
-
-    if args.json:
-        _emit_json(
-            "status",
-            "success",
-            data={
-                "period": {"start": start.isoformat(), "end": end.isoformat()},
-                "filters": {"owners": owner_filters},
-                "statements_processed": len(statements),
-                "records_processed": len(rows),
-                "source_occurrence_count": len(source_rows),
-                "canonical_occurrence_count": len(rows),
-                "consolidated_occurrence_count": len(source_rows) - len(rows),
-                "categorized": len(categorized),
-                "uncategorized": len(rows) - len(categorized),
-                "needs_review": len(review),
-                "review_reason_counts": review_summary(rows),
-                "valuation": period_valuation,
-                "overlap": overlap,
-                "duplicate_count": duplicate_count,
-                "duplicate_group_count": duplicate_group_count,
-                "duplicate_candidates": duplicate_candidates,
-                "unresolved_inflows": unresolved_inflows,
-                "unresolved_outflows": unresolved_outflows,
-                "ledger": {
-                    "total_records": len(owner_ledger_rows),
-                    "outside_period": outside,
-                    "unparseable_dates": undated,
-                },
-            },
-            artifacts={"categorized_csv": str(categorized_path.resolve())},
-        )
-        return 0
-
-    print(f"Status for {start.isoformat()} to {end.isoformat()}")
-    print(
-        "  Owners:               "
-        + (", ".join(owner_filters) if owner_filters else "Combined household")
-    )
-    print(f"  Statements processed: {len(statements)}")
-    print(f"  Source occurrences:   {len(source_rows)}")
-    print(f"  Canonical records:    {len(rows)}")
-    print(f"  Categorized:          {len(categorized)}")
-    print(f"  Uncategorized:        {len(rows) - len(categorized)}")
-    print(f"  Needs review:         {len(review)}")
-    print(f"  Missing HKD values:   {period_valuation['missing_count']}")
-    print(
-        "    Cash-flow blockers: "
-        f"{period_valuation['cash_flow_blocking_missing_count']}"
-    )
-    print(f"    Excluded flows:     {period_valuation['excluded_flow_missing_count']}")
-    print(
-        f"    Unresolved flows:   {period_valuation['unresolved_flow_missing_count']}"
-    )
-    print(f"    Zero cash-flow rows:{period_valuation['zero_amount_missing_count']:>2}")
-    print(f"    Other flows:        {period_valuation['other_flow_missing_count']}")
-    cash_flow = period_valuation["cash_flow"]
-    print(_valuation_cash_flow_line("Actual", cash_flow["actual"]))
-    print(_valuation_cash_flow_line("Estimated", cash_flow["estimated"]))
-    print(
-        _valuation_cash_flow_line(
-            "Combined estimate",
-            cash_flow["combined_estimate"],
-        )
-    )
-    print(f"  Consolidated overlap: {len(source_rows) - len(rows)}")
-    print(f"  Ambiguous groups:     {overlap['ambiguous_group_count']}")
-    print(f"  Unresolved inflows:   {unresolved_inflows}")
-    print(f"  Unresolved outflows:  {unresolved_outflows}")
-    print(
-        "  Review inflows:       honeymoney review --flow unresolved --direction inflow"
-    )
-    print(
-        f"Ledger total: {len(owner_ledger_rows)} records "
-        f"({outside} outside this period, {undated} with unparseable dates)"
-    )
-    return 0
-
-
-def _valuation_cash_flow_line(label: str, totals: Mapping[str, str]) -> str:
-    return (
-        f"  {label} HKD: "
-        f"income={totals['income']}, "
-        f"spending={totals['spending']}, "
-        f"refunds={totals['refunds']}, "
-        f"net={totals['net_cash_flow']}"
-    )
-
-
-def _report_command(argv: list[str]) -> int:
-    parser = _command_parser(
-        argv,
-        prog="honeymoney report",
-        description="Write and open an HTML report for a time period.",
-    )
-    parser.add_argument("period", nargs="?", help="Month name or YYYY-MM")
-    parser.add_argument("--month")
-    parser.add_argument("--start")
-    parser.add_argument("--end")
-    _add_owner_filter_argument(parser)
-    parser.add_argument("--config", dest="config_path")
-    parser.add_argument("--output", dest="output_path", help="Report HTML path")
-    parser.add_argument("--no-open", action="store_true")
-    parser.add_argument("--json", action="store_true")
-    args = parser.parse_args(argv)
-
-    config, owner_filters = _load_reporting_config(args.config_path, args.owners)
-    categorized_path = Path(config["paths"]["output"])
-    state = load_configured_identity_state(categorized_path, config)
-    ledger_rows = _normalize_loaded_rows(state.rows, config)
-    current_overlap = (
-        None
-        if state.canonical_migration_required
-        else canonicalize_overlaps(
-            state.source_rows, ledger_rows, state.overlap_manifest
-        )
-    )
-    reconcile_ledger(ledger_rows, config, statement_rows=state.source_rows)
-    enforce_overlap_review(ledger_rows, current_overlap)
-
-    start, end = _resolve_period(args.month or args.period, args.start, args.end)
-    all_period_rows = _rows_in_period(ledger_rows, start, end)
-    rows = _filter_rows_by_owners(all_period_rows, owner_filters)
-    period_source_rows = _source_rows_for_canonical_rows(
-        current_overlap,
-        rows,
-        _rows_in_period(state.source_rows, start, end),
-    )
-    if state.canonical_migration_required:
-        period_overlap = _unmigrated_overlap(rows)
-    else:
-        overlap_result = canonicalize_overlaps(
-            state.source_rows, ledger_rows, state.overlap_manifest
-        )
-        period_overlap = _overlap_diagnostic_for_rows(
-            overlap_result, rows, period_source_rows
-        )
-    duplicate_count, duplicate_group_count, duplicate_candidates = (
-        _duplicate_compatibility(period_overlap)
-    )
-    period_label = f"{start.isoformat()} to {end.isoformat()}"
-    period_statement_rows = complete_statement_rows(
-        state.source_rows,
-        period_source_rows,
-    )
-    period_summary = reconcile_ledger(
-        [dict(row) for row in rows],
-        config,
-        statement_rows=period_statement_rows,
-    )
-    balance_reconciliation = period_summary["balance_reconciliation"]
-
-    report_path = Path(args.output_path or categorized_path.parent / "report.html")
-    private_atomic_write_text(
-        report_path,
-        build_report_html(
-            rows,
-            period_label,
-            source_occurrence_count=len(period_source_rows),
-            balance_reconciliation=balance_reconciliation,
-        ),
-    )
-    if args.json:
-        _emit_json(
-            "report",
-            "success",
-            data={
-                "period": {"start": start.isoformat(), "end": end.isoformat()},
-                "filters": {"owners": owner_filters},
-                "transaction_count": len(rows),
-                "missing_base_currency_count": missing_base_currency_count(rows),
-                "valuation": valuation_summary(rows),
-                "review_reason_counts": review_summary(rows),
-                "balance_reconciliation": balance_reconciliation,
-                "overlap": period_overlap,
-                "duplicate_count": duplicate_count,
-                "duplicate_group_count": duplicate_group_count,
-                "duplicate_candidates": duplicate_candidates,
-            },
-            artifacts={"report_html": str(report_path.resolve())},
-        )
-        return 0
-    print(f"Report written to {report_path} ({len(rows)} transactions)")
-    if not args.no_open:
-        webbrowser.open(report_path.resolve().as_uri())
-    return 0
-
-
-def _reconcile_command(argv: list[str]) -> int:
-    parser = _command_parser(
-        argv,
-        prog="honeymoney reconcile",
-        description="Recompute and inspect cash-flow and transfer reconciliation.",
-    )
-    parser.add_argument("--config", dest="config_path")
-    parser.add_argument("--output", dest="output_path")
-    parser.add_argument("--dry-run", action="store_true")
-    parser.add_argument("--json", action="store_true")
-    args = parser.parse_args(argv)
-
-    config = _load_config(args.config_path)
-    categorized_path = Path(args.output_path or config["paths"]["output"])
-    expected_generation = _snapshot_configured_generation(categorized_path, config)
-    corrections = load_corrections(config)
-    effective_corrections = corrections
-    removed_correction_ids: set[str] = set()
-    final_review_ids = _final_review_ids(corrections)
-    state = load_configured_identity_state(categorized_path, config, recover=False)
-    require_generation_snapshot(expected_generation)
-    if (
-        state.canonical_migration_required
-        and not state.bootstrap_required
-        and not args.dry_run
-    ):
-        overlap_result = canonicalize_overlaps(
-            state.source_rows, [], state.overlap_manifest
-        )
-        rows = _normalize_loaded_rows(overlap_result.rows, config)
-        correction_projection = project_corrections(overlap_result, corrections)
-        effective_corrections = correction_projection.corrections
-        removed_correction_ids = {
-            row.get("transaction_id", "")
-            for row in state.source_rows
-            if row.get("transaction_id", "") in corrections
-        }
-        final_review_ids = _final_review_ids(effective_corrections)
-        apply_corrections(rows, correction_projection.corrections)
-        apply_history_ambiguity(rows, correction_projection.ambiguous_transaction_ids)
-    else:
-        rows = _normalize_loaded_rows(state.rows, config)
-        overlap_result = (
-            None
-            if state.canonical_migration_required
-            or not any(row.get("canonical_group_id") for row in rows)
-            else canonicalize_overlaps(state.source_rows, rows, state.overlap_manifest)
-        )
-    refresh_duplicate_candidates(rows, final_review_ids=final_review_ids)
-    summary = reconcile_ledger(rows, config, statement_rows=state.source_rows)
-    enforce_overlap_review(rows, overlap_result)
-    if overlap_result is not None and not state.bootstrap_required:
-        overlap_result = canonicalize_overlaps(
-            state.source_rows, rows, overlap_result.manifest
-        )
-        rows = overlap_result.rows
-        summary = reconcile_ledger(rows, config, statement_rows=state.source_rows)
-        enforce_overlap_review(rows, overlap_result)
-    source_rows = state.source_rows
-    operation_overlap_manifest = (
-        state.overlap_manifest if overlap_result is None else overlap_result.manifest
-    )
-    if source_rows is None or operation_overlap_manifest is None:
-        raise SourceDataReviewError(
-            "source_data_provenance_unavailable",
-            "Active source-data provenance is unavailable.",
-        )
-    repair_source_data_review_state(
-        rows,
-        source_rows,
-        operation_overlap_manifest,
-    )
-    overlap_diagnostic = (
-        _unmigrated_overlap(rows)
-        if overlap_result is None
-        else overlap_result.diagnostic
-    )
-    if not args.dry_run:
-        correction_document: tuple[Path, str] | None = None
-        if config.get("corrections"):
-            correction_updates = (
-                {
-                    transaction_id: dict(patch)
-                    for transaction_id, patch in effective_corrections.items()
-                }
-                if removed_correction_ids
-                else {}
-            )
-            correction_updates.update(
-                review_state_correction_updates(effective_corrections, rows)
-            )
-            correction_path, correction_content, _ = prepare_corrections_document(
-                config,
-                correction_updates,
-                removed_transaction_ids=removed_correction_ids,
-            )
-            correction_document = (correction_path, correction_content)
-        _write_ledger_outputs(
-            categorized_path,
-            rows,
-            final_review_ids=final_review_ids,
-            source_rows=source_rows,
-            source_evidence=state.source_evidence_rows,
-            overlap_manifest=(operation_overlap_manifest),
-            overlap_result=overlap_result,
-            identity_manifest_document=state.manifest_document,
-            correction_document=correction_document,
-            expected_generation=expected_generation,
-        )
-
-    artifacts = {"categorized_csv": str(categorized_path.resolve())}
-    if args.json:
-        duplicate_count, duplicate_group_count, duplicate_candidates = (
-            _duplicate_compatibility(overlap_diagnostic)
-        )
-        _emit_json(
-            "reconcile",
-            "success",
-            data={
-                **summary,
-                "dry_run": args.dry_run,
-                "overlap": overlap_diagnostic,
-                "duplicate_count": duplicate_count,
-                "duplicate_group_count": duplicate_group_count,
-                "duplicate_candidates": duplicate_candidates,
-            },
-            artifacts=artifacts,
-        )
-        return 0
-    mode = "Inspected" if args.dry_run else "Reconciled"
-    print(
-        f"{mode} {summary['transaction_count']} transactions: "
-        f"{summary['paired_groups']} paired groups, "
-        f"{summary['ambiguous_transactions']} ambiguous, "
-        f"{summary['unmatched_transactions']} unmatched, "
-        f"{summary['unresolved_transactions']} unresolved"
-    )
-    print(
-        "Canonical overlap: "
-        f"{overlap_diagnostic['consolidated_occurrence_count']} consolidated, "
-        f"{overlap_diagnostic['ambiguous_group_count']} ambiguous groups"
-    )
-    for account_id, account in summary["balance_reconciliation"].items():
-        for statement in account["statements"]:
-            source_file = statement["source_file"] or "(unknown)"
-            statement_section = statement["statement_section"] or "(none)"
-            posted_currency = statement["posted_currency"] or "(unknown)"
-            opening = "found" if statement["opening_evidence_found"] else "missing"
-            closing = "found" if statement["closing_evidence_found"] else "missing"
-            coverage = (
-                "Balance coverage: "
-                f"account={account_id or '(unknown)'} "
-                f"source={source_file} "
-                f"section={statement_section} "
-                f"currency={posted_currency} "
-                f"result={statement['result']} "
-                f"opening={opening} "
-                f"closing={closing}"
-            )
-            if reason := statement.get("reason"):
-                coverage += f" reason={reason}"
-            print(coverage)
-            for conflict in statement.get("conflicts", []):
-                print(
-                    "Balance issue: "
-                    f"source={conflict['source_file'] or '(unknown)'} "
-                    f"page={conflict['source_page'] or '(unknown)'} "
-                    f"section={conflict['statement_section'] or '(none)'} "
-                    f"field={conflict['field']}"
-                )
-    return 0
-
-
-def _pending_command(argv: list[str]) -> int:
-    parser = _command_parser(
-        argv,
-        prog="honeymoney pending",
-        description="List transactions that need review for a time period.",
-    )
-    parser.add_argument("period", nargs="?", help="Month name or YYYY-MM")
-    parser.add_argument("--month")
-    parser.add_argument("--start")
-    parser.add_argument("--end")
-    parser.add_argument("--config", dest="config_path")
-    parser.add_argument("--json", action="store_true")
-    args = parser.parse_args(argv)
-
-    start, end = _resolve_period(args.month or args.period, args.start, args.end)
-    config = _load_config(args.config_path)
-    categorized_path = Path(config["paths"]["output"])
-    state = load_configured_identity_state(categorized_path, config)
-    ledger_rows = _normalize_loaded_rows(state.rows, config)
-    refresh_duplicate_candidates(
-        ledger_rows,
-        final_review_ids=_final_review_ids(load_corrections(config)),
-    )
-    overlap_result = (
-        None
-        if state.canonical_migration_required
-        else canonicalize_overlaps(
-            state.source_rows, state.rows, state.overlap_manifest
-        )
-    )
-    pending_rows = [
-        {
-            **to_review_row(row),
-            "review_reason_labels": review_reason_labels(row.get("review_reasons", "")),
-        }
-        for row in _rows_in_period(ledger_rows, start, end)
-        if row.get("needs_review") == "true"
-    ]
-    period_source_rows = _rows_in_period(state.source_rows, start, end)
-
-    if args.json:
-        pending_overlap = (
-            _unmigrated_overlap(pending_rows)
-            if overlap_result is None
-            else _overlap_diagnostic_for_rows(
-                overlap_result, pending_rows, period_source_rows
-            )
-        )
-        duplicate_count, duplicate_group_count, duplicate_candidates = (
-            _duplicate_compatibility(pending_overlap)
-        )
-        _emit_json(
-            "pending",
-            "success",
-            data={
-                "period": {"start": start.isoformat(), "end": end.isoformat()},
-                "count": len(pending_rows),
-                "transactions": pending_rows,
-                "review_reason_counts": review_summary(pending_rows),
-                "overlap": pending_overlap,
-                "duplicate_count": duplicate_count,
-                "duplicate_group_count": duplicate_group_count,
-                "duplicate_candidates": duplicate_candidates,
-            },
-            artifacts={
-                "categorized_csv": str(categorized_path.resolve()),
-                "review_needed_csv": str(
-                    (categorized_path.parent / "review_needed.csv").resolve()
-                ),
-            },
-        )
-        return 0
-
-    print(f"Pending review for {start.isoformat()} to {end.isoformat()}")
-    print(f"  Transactions: {len(pending_rows)}")
-    pending_overlap = (
-        _unmigrated_overlap(pending_rows)
-        if overlap_result is None
-        else _overlap_diagnostic_for_rows(
-            overlap_result, pending_rows, period_source_rows
-        )
-    )
-    if pending_overlap["ambiguous_group_count"]:
-        print(f"  Ambiguous overlap groups: {pending_overlap['ambiguous_group_count']}")
-    for row in pending_rows:
-        labels = ", ".join(row["review_reason_labels"])
-        print(
-            f"  {row['transaction_id']}  {row['date']}  {row['merchant']}  [{labels}]"
-        )
-    return 0
-
-
-def _correct_command(argv: list[str]) -> int:
-    parser = _command_parser(
-        argv,
-        prog="honeymoney correct",
-        description="Apply a validated JSON batch of transaction corrections.",
-    )
-    parser.add_argument("--file", dest="correction_file")
-    parser.add_argument("--config", dest="config_path")
-    parser.add_argument("--output", dest="output_path")
-    parser.add_argument("--json", action="store_true")
-    args = parser.parse_args(argv)
-    if not args.correction_file:
-        raise ValueError(
-            "honeymoney correct requires --file PATH (or --file - for stdin)"
-        )
-
-    config = _load_config(args.config_path)
-    categorized_path = Path(args.output_path or config["paths"]["output"])
-    ledger_rows = read_ledger(categorized_path, config=config)
-    _reject_ambiguous_legacy_transaction_ids(ledger_rows)
-    ledger_ids = {
-        row["transaction_id"] for row in ledger_rows if row.get("transaction_id")
-    }
-    correction_batch = _load_json_correction_batch(
-        args.correction_file, config, ledger_ids
-    )
-    result = apply_correction_operation(config, categorized_path, correction_batch)
-
-    data = {
-        "applied_count": result.applied_count,
-        "remaining_review_count": result.remaining_review_count,
-        "transaction_ids": result.transaction_ids,
-    }
-    artifacts = _correction_artifacts(config, categorized_path)
-    if args.json:
-        _emit_json("correct", "success", data=data, artifacts=artifacts)
-    else:
-        print(
-            f"Applied {result.applied_count} corrections; "
-            f"{result.remaining_review_count} transactions still need review"
-        )
-    return 0
-
-
-def _load_json_correction_batch(
-    source: str,
-    config: dict[str, Any],
-    ledger_ids: set[str],
-) -> dict[str, dict[str, str]]:
-    if source == "-":
-        payload = json.load(sys.stdin)
-    else:
-        with Path(source).open(encoding="utf-8") as fh:
-            payload = json.load(fh)
-    if not isinstance(payload, list):
-        raise ValueError("Correction input must be a JSON array")
-
-    corrections: dict[str, dict[str, str]] = {}
-    for index, item in enumerate(payload):
-        if not isinstance(item, dict):
-            raise ValueError(f"Correction at index {index} must be a JSON object")
-        unknown_fields = set(item) - {"transaction_id", *EDITABLE_CORRECTION_FIELDS}
-        if unknown_fields:
-            fields = ", ".join(sorted(unknown_fields))
-            raise ValueError(
-                f"Unsupported correction fields at index {index}: {fields}"
-            )
-        transaction_id = item.get("transaction_id")
-        if not isinstance(transaction_id, str) or not transaction_id.strip():
-            raise ValueError(f"Correction at index {index} requires transaction_id")
-        transaction_id = transaction_id.strip()
-        if transaction_id in corrections:
-            raise ValueError(
-                f"Duplicate transaction_id in correction batch: {transaction_id}"
-            )
-        if transaction_id not in ledger_ids:
-            raise ValueError(
-                f"Unknown transaction_id in correction batch: {transaction_id}"
-            )
-
-        correction = _normalize_json_correction(index, item)
-        if not correction:
-            raise ValueError(
-                f"Correction for {transaction_id} must set at least one correction field"
-            )
-        validate_correction(transaction_id, correction, config)
-        corrections[transaction_id] = correction
-    return corrections
-
-
-def _normalize_json_correction(index: int, item: dict[str, Any]) -> dict[str, str]:
-    correction: dict[str, str] = {}
-    for field in EDITABLE_CORRECTION_FIELDS:
-        if field not in item:
-            continue
-        value = item[field]
-        if field == "needs_review":
-            if isinstance(value, bool):
-                correction[field] = str(value).lower()
-                continue
-            if isinstance(value, str):
-                normalized = value.strip().casefold()
-                if not normalized:
-                    raise ValueError(
-                        f"Correction field {field} at index {index} must not be empty"
-                    )
-                if normalized in {"true", "false"}:
-                    correction[field] = normalized
-                    continue
-            raise ValueError(
-                f"Correction field needs_review at index {index} must be boolean"
-            )
-        if (
-            field == "confidence"
-            and isinstance(value, (int, float))
-            and not isinstance(value, bool)
-        ):
-            correction[field] = str(value)
-            continue
-        if not isinstance(value, str):
-            raise ValueError(
-                f"Correction field {field} at index {index} must be a string"
-            )
-        normalized = value.strip()
-        if field != "notes" and not normalized:
-            raise ValueError(
-                f"Correction field {field} at index {index} must not be empty"
-            )
-        correction[field] = normalized
-    return correction
-
-
-def _atomic_write_text_files(files: dict[Path, str]) -> None:
-    for target, content in files.items():
-        private_atomic_write_text(target, content)
-
-
-def _resolve_period(
-    month: str | None, start: str | None, end: str | None, today: date | None = None
-) -> tuple[date, date]:
-    today = today or date.today()
-    if month and (start or end):
-        raise ValueError("Use either a month or --start/--end, not both")
-    if month:
-        return _month_period(month, today)
-    if start or end:
-        start_date = date.fromisoformat(start) if start else date.min
-        end_date = date.fromisoformat(end) if end else today
-        if start_date > end_date:
-            raise ValueError(f"Start date {start_date} is after end date {end_date}")
-        return start_date, end_date
-    return _month_period(f"{today.year}-{today.month:02d}", today)
-
-
-def _month_period(value: str, today: date) -> tuple[date, date]:
-    text = value.strip().casefold()
-    numeric = re.fullmatch(r"(\d{4})-(\d{1,2})", text)
-    if numeric:
-        year, month = int(numeric.group(1)), int(numeric.group(2))
-    else:
-        month_names = {
-            name.casefold(): index
-            for index, name in enumerate(calendar.month_name)
-            if name
-        }
-        month_names.update(
-            {
-                name.casefold(): index
-                for index, name in enumerate(calendar.month_abbr)
-                if name
-            }
-        )
-        month = month_names.get(text, 0)
-        year = today.year
-    if not 1 <= month <= 12:
-        raise ValueError(f"Unrecognized month: {value}")
-    last_day = calendar.monthrange(year, month)[1]
-    return date(year, month, 1), date(year, month, last_day)
-
-
-def _rows_in_period(
-    rows: list[dict[str, str]], start: date, end: date
-) -> list[dict[str, str]]:
-    in_period = []
-    for row in rows:
-        row_date = _parse_iso_date(row.get("date", ""))
-        if row_date is not None and start <= row_date <= end:
-            in_period.append(row)
-    return in_period
-
-
-def _is_categorized(row: dict[str, str]) -> bool:
-    return row.get("category", "") not in {"", "Unknown"}
-
-
-def _uncategorized_count(rows: list[dict[str, str]]) -> int:
-    return sum(1 for row in rows if not _is_categorized(row))
-
-
-def _reject_ambiguous_legacy_transaction_ids(
-    ledger_rows: list[dict[str, str]],
-) -> None:
-    if ambiguous_legacy_transaction_ids(ledger_rows):
-        raise IdentityError("identity_legacy_transaction_id_ambiguous")
-
-
-def _write_ledger_outputs(
-    categorized_path: Path,
-    ledger_rows: list[dict[str, str]],
-    *,
-    final_review_ids: set[str] | None = None,
-    source_rows: list[dict[str, str]] | None = None,
-    source_evidence: list[dict[str, str]] | None = None,
-    overlap_manifest: dict[str, object] | None = None,
-    overlap_result: CanonicalizationResult | None = None,
-    identity_manifest_document: str | None = None,
-    correction_document: tuple[Path, str] | None = None,
-    expected_generation: Mapping[Path, str | None] | None = None,
-) -> None:
-    refresh_duplicate_candidates(ledger_rows, final_review_ids=final_review_ids)
-    enforce_overlap_review(ledger_rows, overlap_result)
-    documents = ledger_output_documents(
-        categorized_path,
-        ledger_rows,
-        source_occurrences=source_rows,
-        source_evidence=source_evidence,
-        overlap_manifest=overlap_manifest,
-        identity_manifest_document=identity_manifest_document,
-    )
-    if correction_document is not None:
-        documents[correction_document[0]] = correction_document[1]
-    persist_generation(
-        categorized_path,
-        documents,
-        expected_generation_hashes=expected_generation,
-    )
-
-
-def _active_source_ids_by_fingerprint(
-    manifest: Mapping[str, Any],
-) -> dict[str, set[str]]:
-    """Return only active source support for reset ownership checks."""
-    return _source_ids_by_fingerprint(manifest, active_only=True)
-
-
-def _source_ids_by_fingerprint(
-    manifest: Mapping[str, Any],
-    *,
-    active_only: bool = False,
-) -> dict[str, set[str]]:
-    support: dict[str, set[str]] = {}
-    sources = manifest.get("sources", [])
-    if not isinstance(sources, list):
-        return support
-    for source in sources:
-        if not isinstance(source, Mapping):
-            continue
-        source_id = source.get("source_id")
-        records = source.get("records", [])
-        if not isinstance(source_id, str) or not isinstance(records, list):
-            continue
-        for record in records:
-            if not isinstance(record, Mapping):
-                continue
-            if active_only and record.get("state") != "active":
-                continue
-            fingerprint = record.get("record_fingerprint")
-            if isinstance(fingerprint, str):
-                support.setdefault(fingerprint, set()).add(source_id)
-    return support
-
-
-def _prompt_uncategorized(
-    transactions: list[dict[str, str]], config: dict[str, Any]
-) -> list[dict[str, str]]:
-    pending = [row for row in transactions if not _is_categorized(row)]
-    if pending and not config.get("ollama", {}).get("enabled", False):
-        print(
-            "\nOllama fallback is disabled; set ollama.enabled to true in "
-            "config.json to enable it."
-        )
-    return _prompt_category_assignments(
-        pending,
-        config,
-        f"\n{len(pending)} imported records have no category.",
-    )
-
-
-def _prompt_review_transactions(
-    transactions: list[dict[str, str]],
-    config: dict[str, Any],
-    category_filters: list[str] | None = None,
-) -> list[dict[str, str]]:
-    if category_filters:
-        selected_categories = set(category_filters)
-        selected_rows = [
-            row for row in transactions if row.get("category") in selected_categories
-        ]
-        category_label = ", ".join(sorted(selected_categories))
-        return _prompt_category_assignments(
-            selected_rows,
-            config,
-            f"\n{len(selected_rows)} records in selected categories ({category_label}).",
-            empty_message=(
-                "No transactions found in selected categories: " + category_label
-            ),
-        )
-    pending = [row for row in transactions if row.get("needs_review") == "true"]
-    return _prompt_category_assignments(
-        pending,
-        config,
-        f"\n{len(pending)} records need review.",
-        empty_message="No transactions need review.",
-    )
-
-
-def _prompt_category_assignments(
-    pending: list[dict[str, str]],
-    config: dict[str, Any],
-    heading: str,
-    empty_message: str | None = None,
-) -> list[dict[str, str]]:
-    if not pending:
-        if empty_message:
-            print(empty_message)
-        return []
-    categories = sorted(
-        category for category in allowed_categories(config) if category != "Unknown"
-    )
-    print(heading)
-    print(
-        "Pick a category number, press Enter to skip one, or enter q to skip the rest."
-    )
-    _print_category_menu(categories)
-    categorized = []
-    for position, transaction in enumerate(pending, start=1):
-        print(f"\n[{position}/{len(pending)}] {_transaction_prompt_line(transaction)}")
-        while True:
-            try:
-                choice = input("Category [number/Enter/q]: ").strip().casefold()
-            except EOFError:
-                return categorized
-            if choice == "":
-                break
-            if choice == "q":
-                return categorized
-            try:
-                selected = int(choice)
-            except ValueError:
-                selected = 0
-            if 1 <= selected <= len(categories):
-                _apply_interactive_category(transaction, categories[selected - 1])
-                categorized.append(transaction)
-                break
-            print("Enter a number from the list, Enter to skip, or q to stop.")
-    return categorized
-
-
-def _print_category_menu(categories: list[str], columns: int = 3) -> None:
-    if not categories:
-        return
-    row_count = (len(categories) + columns - 1) // columns
-    for row in range(row_count):
-        cells = []
-        for column in range(columns):
-            index = column * row_count + row
-            if index < len(categories):
-                cells.append(f"{index + 1:>2}. {categories[index]:<22}")
-        print("  " + "".join(cells).rstrip())
-
-
-def _transaction_prompt_line(transaction: dict[str, str]) -> str:
-    amount = transaction.get("posted_amount", "")
-    currency = transaction.get("posted_currency", "")
-    merchant = transaction.get("merchant", "")
-    description = transaction.get("original_description", "")
-    name = merchant or description or "(no description)"
-    parts = [transaction.get("date", ""), f"{amount} {currency}".strip(), name]
-    if description and description != name:
-        parts.append(description)
-    labels = review_reason_labels(transaction.get("review_reasons", ""))
-    if labels:
-        parts.append("Review: " + ", ".join(labels))
-    return "  ".join(part for part in parts if part)
-
-
-def _apply_interactive_category(transaction: dict[str, str], category: str) -> None:
-    transaction["category"] = category
-    transaction["confidence"] = "1.00"
-    release_duplicate_review_ownership(transaction)
-    transaction["needs_review"] = "false"
-    transaction["reason"] = "Categorized interactively"
-    transaction["flags"] = _remove_flag(transaction["flags"], "uncategorized")
-    transaction["flags"] = _append_flag(transaction["flags"], "manual_correction")
-
-
-def _interactive_correction_documents(
-    categorized: list[dict[str, str]],
-    config: dict[str, Any],
-    *,
-    removed_transaction_ids: set[str] | None = None,
-) -> dict[Path, str]:
-    if not categorized or not config.get("corrections"):
-        return {}
-    path, content, _ = prepare_corrections_document(
-        config,
-        {
-            transaction["transaction_id"]: {
-                "category": transaction["category"],
-                "confidence": "1.00",
-                "reason": "Categorized interactively",
-                "needs_review": "false",
-            }
-            for transaction in categorized
-        },
-        removed_transaction_ids=removed_transaction_ids,
-    )
-    return {path: content}
-
-
-def _write_starter_workspace(root: Path, force: bool) -> None:
-    input_dir = root / "input"
-    output_dir = root / "output"
-    profiles_dir = root / "profiles"
-    ensure_private_directory(root)
-    ensure_private_directory(input_dir)
-    ensure_private_directory(output_dir)
-    ensure_private_directory(profiles_dir)
-
-    profile_documents = _installed_profile_documents(root)
-    profile_path = profiles_dir / "starter_csv.json"
-    starter_profile_paths = [path for path in profile_documents if path != profile_path]
-    rules_path = root / "rules.json"
-    corrections_path = root / "corrections.csv"
-    rate_cache_path = root / "rates.json"
-    profile_mappings_path = root / "profile_mappings.json"
-    config_path = root / "config.json"
-
-    for path, content in profile_documents.items():
-        _write_text_file(path, content, force)
-    _write_json_file(
-        profile_mappings_path,
-        {"account_bindings": [], "filename_patterns": []},
-        force,
-    )
-    _write_json_file(rules_path, _starter_rules(), force)
-    _write_text_file(
-        corrections_path,
-        ",".join(CORRECTION_COLUMNS) + "\n",
-        force,
-    )
-    _write_text_file(
-        rate_cache_path,
-        rate_cache_document(empty_rate_cache()),
-        force,
-    )
-    _write_json_file(
-        config_path,
-        {
-            "base_currency": "HKD",
-            "exchange_rates": {"HKD": 1.0, "USD": 7.8},
-            "review_confidence_threshold": 0.8,
-            "reconciliation": {"date_window_days": 3},
-            "categorization_memory": {"enabled": False},
-            "profiles": [str(profile_path)]
-            + [str(path) for path in starter_profile_paths],
-            "profile_mappings": str(profile_mappings_path),
-            "rules": str(rules_path),
-            "corrections": str(corrections_path),
-            "rate_cache": str(rate_cache_path),
-            "pdf": {"enabled": True, "parser": "pdfplumber"},
-            "ollama": {
-                "enabled": False,
-                "url": "http://localhost:11434/api/generate",
-                "model": "qwen2.5:7b-instruct",
-                "batch_size": 5,
-                "timeout_seconds": 120,
-            },
-            "paths": {
-                "input": str(input_dir),
-                "output": str(output_dir / "categorized.csv"),
-            },
-        },
-        force,
-    )
-    _write_text_file(
-        root / MANAGED_FILES_NAME,
-        managed_files_document(root, [profile_path, *starter_profile_paths]),
-        force,
-    )
-
-
-def _starter_csv_profile() -> dict[str, Any]:
-    return {
-        "id": "starter_csv",
-        "account_id": "starter_csv",
-        "account": "Starter CSV",
-        "account_type": "bank",
-        "institution": "Local",
-        "country": "HK",
-        "account_currency": "HKD",
-        "owner": "Household",
-        "payment_method": "Bank Account",
-        "csv": {
-            "detect_headers": ["Date", "Description", "Amount", "Currency"],
-            "columns": {
-                "transaction_date": "Date",
-                "description": "Description",
-                "amount": "Amount",
-                "original_currency": "Currency",
-            },
-        },
-    }
-
-
-def _starter_rules() -> dict[str, Any]:
-    return {
-        "version": 1,
-        "rules": [
-            {
-                "id": "mox-credit-card-payment",
-                "enabled": True,
-                "priority": 20,
-                "conditions": [
-                    {
-                        "field": "institution",
-                        "match_type": "exact",
-                        "patterns": ["Mox"],
-                    },
-                    {
-                        "field": "original_description",
-                        "match_type": "regex",
-                        "patterns": [
-                            "^(?:PAYMENT TO MOX CREDIT CARD|MOX CREDIT CARD PAYMENT)$"
-                        ],
-                    },
-                ],
-                "category": "Credit Card Payment",
-                "flow_type": "credit_card_payment",
-                "owner": "Household",
-                "confidence": 0.99,
-                "notes": "Institution-specific payment treatment runs before Ollama",
-            }
-        ],
-    }
-
-
-def _write_json_file(path: Path, data: dict[str, Any], force: bool) -> None:
-    if path.exists() and not force:
-        raise ValueError(f"Refusing to overwrite {path}; pass --force to replace it")
-    private_atomic_write_text(
-        path,
-        json.dumps(data, indent=2, sort_keys=True),
-        overwrite=force,
-    )
-
-
-def _write_text_file(path: Path, content: str, force: bool) -> None:
-    if path.exists() and not force:
-        raise ValueError(f"Refusing to overwrite {path}; pass --force to replace it")
-    private_atomic_write_text(path, content, overwrite=force)
-
-
-def _load_config(config_path: str | None) -> dict[str, Any]:
-    return _load_config_document(config_path, recover=True)
-
-
-def _load_config_read_only(config_path: str | None) -> dict[str, Any]:
-    """Load validated configuration without recovering workspace artifacts."""
-    return _load_config_document(config_path, recover=False)
-
-
-def _load_config_document(config_path: str | None, *, recover: bool) -> dict[str, Any]:
-    if config_path is None:
-        default_config = Path("config.json")
-        if default_config.exists():
-            config_path = str(default_config)
-        else:
-            resolved_config_path = default_config.resolve()
-            return {
-                "paths": {"input": "./input", "output": "./output/categorized.csv"},
-                "_rate_cache": empty_rate_cache(),
-                "_identity_config_path": resolved_config_path,
-                "_identity_workspace_root": resolved_config_path.parent,
-            }
-
-    resolved_config_path = Path(config_path).resolve(strict=True)
-    config = _read_config_document(resolved_config_path)
-
-    config.setdefault("paths", {})
-    config["paths"].setdefault("input", "./input")
-    config["paths"].setdefault("output", "./output/categorized.csv")
-    config["_identity_config_path"] = resolved_config_path
-    config["_identity_workspace_root"] = resolved_config_path.parent
-    _resolve_rate_cache_config(config, resolved_config_path)
-    if recover:
-        _recover_config_generation(config)
-    rate_cache_path = _configured_rate_cache_path(config)
-    if recover:
-        _recover_rate_cache_generation(config)
-    config["_rate_cache"] = load_rate_cache(rate_cache_path)
-    return config
-
-
-def _resolve_rate_cache_config(config: dict[str, Any], config_path: Path) -> None:
-    value = config.get("rate_cache")
-    if isinstance(value, str) and value.strip():
-        config["_rate_cache_defaulted"] = False
-        return
-    workspace_root = config_path.parent.resolve()
-    rate_cache_path = (workspace_root / "rates.json").resolve()
-    if not rate_cache_path.is_relative_to(workspace_root):
-        raise ValueError("The default rate cache must stay inside the workspace")
-    config["rate_cache"] = str(rate_cache_path)
-    config["_rate_cache_defaulted"] = True
-
-
-def _configured_rate_cache_path(config: Mapping[str, object]) -> Path:
-    value = config.get("rate_cache")
-    if not isinstance(value, str) or not value.strip():
-        raise ValueError("Config must define a rate_cache JSON path")
-    return Path(value)
-
-
-def _rate_cache_was_defaulted(config: Mapping[str, object]) -> bool:
-    return config.get("_rate_cache_defaulted") is True
-
-
-def _loaded_rate_cache(config: Mapping[str, object]) -> RateCache:
-    value = config.get("_rate_cache")
-    if not isinstance(value, Mapping):
-        raise ValueError("The loaded rate cache is invalid")
-    return validate_rate_cache(value)
-
-
-def _snapshot_configured_generation(
-    categorized_path: Path,
-    config: dict[str, Any],
-) -> dict[Path, str | None]:
-    """Capture a coherent ledger generation and refresh its cached rate input."""
-    generation_paths = configured_generation_paths(config)
-    rate_cache = config.get("rate_cache")
-    if isinstance(rate_cache, str) and rate_cache.strip():
-        recover_generation(
-            Path(rate_cache),
-            allowed_generation_paths=generation_paths,
-            coordination_path=categorized_path,
-        )
-    expected_generation = snapshot_generation(
-        categorized_path,
-        generation_paths,
-    )
-    if isinstance(rate_cache, str) and rate_cache.strip():
-        config["_rate_cache"] = load_rate_cache(Path(rate_cache))
-    require_generation_snapshot(expected_generation)
-    return expected_generation
-
-
-def _load_configured_identity_generation(
-    categorized_path: Path,
-    config: dict[str, Any],
-) -> tuple[dict[Path, str | None], IdentityState]:
-    """Load identity state from one unchanged configured generation."""
-    expected_generation = _snapshot_configured_generation(categorized_path, config)
-    state = load_configured_identity_state(categorized_path, config, recover=False)
-    require_generation_snapshot(expected_generation)
-    return expected_generation, state
-
-
-def _recover_config_generation(config: dict[str, Any]) -> None:
-    paths = config.get("paths", {})
-    output = paths.get("output") if isinstance(paths, dict) else None
-    if isinstance(output, str) and output.strip():
-        recover_generation(
-            Path(output),
-            allowed_generation_paths=configured_generation_paths(config),
-        )
-
-
-def _recover_rate_cache_generation(config: dict[str, Any]) -> None:
-    paths = config.get("paths", {})
-    output = paths.get("output") if isinstance(paths, dict) else None
-    coordination_path = (
-        Path(output) if isinstance(output, str) and output.strip() else None
-    )
-    recover_generation(
-        _configured_rate_cache_path(config),
-        allowed_generation_paths=configured_generation_paths(config),
-        coordination_path=coordination_path,
-    )
-
-
-def _recover_config_path_generation(
-    config_path: Path,
-    config: dict[str, Any] | None = None,
-) -> None:
-    recovery_config = dict(
-        config if config is not None else _read_config_document(config_path)
-    )
-    _resolve_rate_cache_config(recovery_config, config_path.resolve())
-    _recover_config_generation(recovery_config)
-    _recover_rate_cache_generation(recovery_config)
-
-
-def _identity_diagnostic_warning(diagnostic: Any) -> str:
-    """Format the resolver's safe diagnostic without exposing identity inputs."""
-    count = getattr(diagnostic, "affected_count", None)
-    if count is None:
-        count = getattr(diagnostic, "candidate_count", 0)
-    return (
-        f"{diagnostic.code}: {diagnostic.source_display}; "
-        f"action={diagnostic.action}; count={count}; {diagnostic.remediation}"
-    )
-
-
-def _transaction_flags(transactions: list[dict[str, str]]) -> dict[str, list[str]]:
-    flagged: dict[str, list[str]] = {}
-    for transaction in transactions:
-        flags = sorted(item for item in transaction.get("flags", "").split(";") if item)
-        if flags:
-            flagged[transaction["transaction_id"]] = flags
-    return flagged
-
-
-def _transaction_diagnostics(
-    transactions: list[dict[str, str]],
-) -> dict[str, dict[str, Any]]:
-    diagnostics: dict[str, dict[str, Any]] = {}
-    for transaction in transactions:
-        if transaction.get("needs_review") != "true" and not transaction.get("reason"):
-            continue
-        diagnostics[transaction["transaction_id"]] = {
-            "needs_review": transaction.get("needs_review") == "true",
-            "review_reasons": transaction.get("review_reasons", "").split(";")
-            if transaction.get("review_reasons")
-            else [],
-            "review_reason_labels": review_reason_labels(
-                transaction.get("review_reasons", "")
-            ),
-            "reason": transaction.get("reason", ""),
-            "category": transaction.get("category", ""),
-            "owner": transaction.get("owner", ""),
-            "amount_hkd": transaction.get("amount_hkd", ""),
-            "valuation_source": transaction.get("valuation_source", ""),
-            "valuation_status": transaction.get("valuation_status", ""),
-        }
-    return diagnostics
-
-
-def _enforce_identity_review(transactions: list[dict[str, str]]) -> None:
-    for transaction in transactions:
-        flags = {flag for flag in transaction.get("flags", "").split(";") if flag}
-        if IDENTITY_MIGRATION_AMBIGUITY_FLAG not in flags:
-            continue
-        release_duplicate_review_ownership(transaction)
-        set_review_reason(transaction, REVIEW_REASON_IDENTITY, True)
-        transaction["reason"] = (
-            "Identity migration is ambiguous; explicit resolution is required"
-        )
-
-
-def _final_review_ids(corrections: dict[str, dict[str, str]]) -> set[str]:
-    return {
-        transaction_id
-        for transaction_id, correction in corrections.items()
-        if correction.get("needs_review", "").casefold() == "false"
-    }
-
-
-def _write_report(path: Path, report: dict[str, Any]) -> None:
-    private_atomic_write_text(path, json.dumps(report, indent=2, sort_keys=True))
-
-
-def run() -> int:
-    try:
-        return main()
-    except (OSError, ValueError) as error:
-        _status.clear()
-        argv = sys.argv[1:]
-        identity_error = error if isinstance(error, IdentityError) else None
-        identity_details = (
-            _identity_error_details(identity_error) if identity_error else None
-        )
-        duplicate_details = (
-            {
-                "type": "DuplicateResolutionError",
-                "code": error.code,
-                "message": error.code,
-            }
-            if isinstance(error, DuplicateResolutionError)
-            else None
-        )
-        manual_pair_details = (
-            {
-                "type": "ManualPairError",
-                "code": error.code,
-                "message": str(error),
-            }
-            if isinstance(error, ManualPairError)
-            else None
-        )
-        valuation_inspection_details = (
-            {
-                "type": "ValuationInspectionError",
-                "code": error.code,
-                "message": str(error),
-            }
-            if isinstance(error, ValuationInspectionError)
-            else None
-        )
-        source_data_review_details = (
-            {
-                "type": "SourceDataReviewError",
-                "code": error.code,
-                "message": str(error),
-            }
-            if isinstance(error, SourceDataReviewError)
-            else None
-        )
-        rate_import_details = (
-            {
-                "type": "RateImportError",
-                "code": error.code,
-                "message": str(error),
-            }
-            if isinstance(error, RateImportError)
-            else None
-        )
-        rate_fetch_details = (
-            {
-                "type": "RateFetchError",
-                "code": error.code,
-                "message": str(error),
-            }
-            if isinstance(error, RateFetchError)
-            else None
-        )
-        if "--json" in argv:
-            command = _json_error_command(argv)
-            error_items = (
-                error.errors
-                if isinstance(error, _ReviewBatchError)
-                else [
-                    identity_details
-                    or duplicate_details
-                    or manual_pair_details
-                    or valuation_inspection_details
-                    or source_data_review_details
-                    or rate_fetch_details
-                    or rate_import_details
-                    or {
-                        "type": type(error).__name__,
-                        "message": str(error),
-                    }
-                ]
-            )
-            _emit_json(
-                command,
-                "error",
-                data=error.data if isinstance(error, _ReviewBatchError) else None,
-                errors=error_items,
-            )
-            return 2
-        print(
-            identity_details["message"]
-            if identity_details is not None
-            else (
-                duplicate_details["message"]
-                if duplicate_details is not None
-                else (
-                    f"{source_data_review_details['code']}: "
-                    f"{source_data_review_details['message']}"
-                    if source_data_review_details is not None
-                    else (
-                        f"{rate_fetch_details['code']}: {rate_fetch_details['message']}"
-                        if rate_fetch_details is not None
-                        else str(error)
-                    )
-                )
-            ),
-            file=sys.stderr,
-        )
-        return 2
-
-
-def _identity_error_details(error: IdentityError) -> dict[str, Any]:
-    diagnostic = error.diagnostic
-    details: dict[str, Any] = {
-        "type": "IdentityError",
-        "code": error.code,
-        "message": error.code,
-    }
-    if diagnostic is not None:
-        count = getattr(diagnostic, "affected_count", None)
-        if count is None:
-            count = getattr(diagnostic, "candidate_count", 0)
-        details.update(
-            {
-                "display": diagnostic.source_display,
-                "action": diagnostic.action,
-                "count": count,
-                "remediation": diagnostic.remediation,
-                "message": _identity_diagnostic_warning(diagnostic),
-            }
-        )
-    return details
-
-
-def _json_error_command(argv: list[str]) -> str:
-    if len(argv) > 1 and argv[:2] == ["profile", "remove-pattern"]:
-        return "profile.remove-pattern"
-    if len(argv) > 1 and argv[:2] == ["profile", "replace-pattern"]:
-        return "profile.replace-pattern"
-    if len(argv) > 1 and argv[:2] == ["profile", "bind"]:
-        return "profile.bind"
-    if len(argv) > 1 and argv[:2] == ["profile", "bindings"]:
-        return "profile.bindings"
-    if len(argv) > 1 and argv[:2] == ["profile", "validate"]:
-        return "profile.validate"
-    if len(argv) > 1 and argv[:2] == ["duplicates", "resolve"]:
-        return "duplicates.resolve"
-    if len(argv) > 1 and argv[:2] == ["review", "pair"]:
-        return "review.pair"
-    if len(argv) > 1 and argv[:2] == ["valuation", "missing"]:
-        return "valuation.missing"
-    if len(argv) > 1 and argv[:2] == ["source-data", "inspect"]:
-        return "source-data.inspect"
-    if len(argv) > 1 and argv[:2] == ["source-data", "resolve"]:
-        return "source-data.resolve"
-    if len(argv) > 1 and argv[:2] == ["rates", "import"]:
-        return "rates.import"
-    if len(argv) > 1 and argv[:2] == ["rates", "fetch"]:
-        return "rates.fetch"
-    return argv[0] if argv and not argv[0].startswith("-") else "run"
-
-
-# Compatibility aliases keep existing private test seams while parsing lives in
-# its own module. Importer internals always resolve their own collaborators.
-_discover_input_files = importers._discover_input_files
-_import_transactions = importers._import_transactions
-_import_csv = importers._import_csv
-_import_pdf = importers._import_pdf
-_load_profiles = importers._load_profiles
-_load_profile_mappings = importers._load_profile_mappings
-_validate_profile = importers._validate_profile
-_normalized_row = normalization._normalized_row
-_append_flag = normalization._append_flag
-_append_reason = normalization._append_reason
-_remove_flag = normalization._remove_flag
-_parse_iso_date = normalization._parse_iso_date
 
 
 if __name__ == "__main__":

@@ -5,6 +5,11 @@
 - Issue: GitHub #32
 - Narrows: ADR 0001 for the public canonical ledger and ADR 0002 for canonical
   local-memory evidence
+- Partly superseded by: ADR 0008. The exact-overlap multiset, stable group and
+  slot identity, pooled multiplicity, membership-bound duplicate decisions,
+  correction rules, and privacy rules remain. ADR 0008 replaces the canonical
+  ledger, hidden source CSV, separate overlap-manifest authority, legacy
+  migration, ledger-last publication, and ledger-era public terms.
 - Amended: ADR 0004 adds valuation and review-reason fields; ADR 0005 adds rate
   metadata; GitHub #60 adds statement-section evidence; GitHub #88 adds hidden
   account-binding provenance

@@ -1,94 +1,35 @@
 # CSV compatibility
 
-Honeymoney keeps canonical transaction values in memory. Its public CSV
-artifacts—`categorized.csv`, `review_needed.csv`, and `corrections.csv`—apply a
-display-only safety encoding to text cells so spreadsheet applications do not
-interpret statement-controlled text as formulas.
+Honeymoney writes generated `transactions.csv` and `review_needed.csv` files in
+each view and keeps saved choices in `corrections.csv`. Public headers, column
+order, UTF-8 encoding, quoting, and row order are contracts.
 
-Artifacts retain their ordinary UTF-8 header bytes and use normal minimal CSV
-quoting, so existing `utf-8` CSV readers continue to see the same column names
-and numeric cells remain unquoted unless CSV syntax itself requires quoting.
-There is no file-level format marker: neither a BOM nor a quote style enables
-decoding.
+## Reversible text safety
 
-## Reversible text encoding
+Text cells use the product's v1 safety prefix when the first non-space
+character is `=`, `+`, `-`, or `@`, when a cell starts with a tab or carriage
+return, or when its value already starts with that prefix. A canonical value
+that already starts with the prefix gets two prefixes. Reading removes exactly
+one. Repeated writes therefore preserve the value and do not add prefixes.
 
-A text cell receives a product-specific v1 prefix when:
+The prefix is an apostrophe followed by the Unicode tag sequence for
+`honeymoney-csv-v1`. Files have no BOM or file-level marker. Ordinary leading
+apostrophes remain ordinary text.
 
-- its first non-whitespace character is `=`, `+`, `-`, or `@`;
-- it starts with a tab or carriage return, including after leading spaces; or
-- its canonical value already starts with that exact v1 prefix.
+Amount, balance, confidence, review-state, page, row, canonical slot, and count
+columns bypass text safety. A negative amount stays a numeric negative amount.
+New non-text columns must join the checked non-text set and have representation
+tests.
 
-The prefix is an apostrophe followed by the invisible Unicode tag sequence for
-`honeymoney-csv-v1`. The apostrophe neutralizes spreadsheet interpretation; the
-long, versioned tag makes an encoded cell self-identifying without relying on
-document metadata. The notation `<HMCSV-v1>` below represents that entire
-invisible prefix.
+## Deterministic generated files
 
-Examples:
+CSV output uses UTF-8 without a BOM, normal minimal quoting, LF endings, fixed
+headers, canonical numeric forms, and fixed row order. A selected empty view
+contains each exact header followed by one LF and no data row.
 
-| Canonical value | CSV cell |
-|---|---|
-| `=SUM(A1:A2)` | `<HMCSV-v1>=SUM(A1:A2)` |
-| `  @VALUE` | `<HMCSV-v1>  @VALUE` |
-| tab followed by `VALUE` | `<HMCSV-v1>`, tab, then `VALUE` |
-| a value beginning with `<HMCSV-v1>` | two consecutive `<HMCSV-v1>` prefixes |
-| `'=literal text` | `'=literal text` |
-| `Ordinary text` | `Ordinary text` |
+Honeymoney writes a complete view unit when any expected file changes. Direct
+edits to view CSVs never become durable input. A full rebuild restores expected
+bytes from import records, the workspace index, and user-owned inputs.
 
-When Honeymoney reads its ledger or corrections file, it removes exactly one
-v1 prefix from every text cell that starts with it. A canonical value already
-starting with the prefix is doubled on write, so the mapping is injective and
-repeated rewrites do not accumulate or lose prefixes. This decoding applies
-only at Honeymoney's own public-artifact read boundaries; statement input is
-never rewritten before normalization, transaction identity, matching, or
-accounting logic.
-
-Legacy artifacts are compatible regardless of whether they have a UTF-8 BOM or
-use minimal or quote-all CSV formatting. Ordinary leading-apostrophe values
-such as `'=LEGACY` and `''LEGACY` do not match the v1 prefix and therefore keep
-their apostrophes. Only the exact Honeymoney v1 tag sequence is reserved as an
-encoded-cell discriminator.
-
-Corrections retain legacy whitespace behavior per cell. Unencoded fields are
-trimmed, and a single-space notes cell remains the explicit empty-note sentinel.
-Encoded formula-like fields are decoded without trimming so their canonical
-leading whitespace survives. This avoids requiring a document marker even
-when an ordinary Honeymoney-authored corrections file contains no encoded
-cells.
-
-## Canonical non-text columns
-
-Amount, balance, confidence, review-state, page, and row columns bypass the
-text encoding. In particular, a legitimate amount such as `-12.34` remains
-`-12.34`, not `'-12.34`.
-
-ADR 0004 adds `valuation_source`, `valuation_status`, and `review_reasons`.
-Exact ADR 0003 headers remain migration input and gain the new columns on the
-next write. `review_needed.csv` also adds the display-only
-`review_reason_labels` column. JSON envelopes use schema version 2.
-Replacement and reset derive typed review reasons before they change legacy
-source rows, so an explicit `reconcile` upgrade is optional. Replacement,
-migration, and reconciliation then derive `source_data_issue` from current
-active parser, balance, and provenance evidence. They remove stale ledger and
-correction tokens, including balance-page detail flags, when no current
-evidence supports them.
-
-Statement-section balance scope adds the public text column
-`statement_section`. ADR 0004 headers remain migration input and gain the
-column on the next write.
-
-The local HKMA rate cache adds `valuation_rate_date` and
-`valuation_provider` after `valuation_status` in ledger, review, and hidden
-source CSVs. The prior statement-section headers remain migration input and
-gain these columns on the next write.
-
-Manual cash-movement pairing adds the text field `manual_pair_id` to
-`corrections.csv`. Older correction headers remain valid and gain the field on
-the next write. Only `review pair` creates this field; structured `correct`
-input cannot set it. Replaying an accepted pair through proven retired source
-IDs returns the current canonical IDs without rewriting the correction file.
-
-New public text columns are safe by default. A new numeric or other canonical
-non-text column must be added to `CANONICAL_CSV_COLUMNS` and covered by a
-negative-value or representation-preservation test.
+Version 0.2.0 accepts no old cumulative-ledger header as workspace state and
+runs no CSV migration. JSON moves from schema version 2 to 3.

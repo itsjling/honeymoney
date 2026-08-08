@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import hmac
 import json
 import math
 import re
@@ -565,6 +566,7 @@ def resolve_records(
     transaction_id_factory: Callable[[str, str], str] | None = None,
     allow_unmatched_reallocation: bool = False,
     allow_parser_upgrade_reallocation: bool = False,
+    evidence_key: bytes | None = None,
 ) -> RecordResolutionResult:
     """Resolve records for one already-resolved source without mutating inputs.
 
@@ -586,6 +588,7 @@ def resolve_records(
         raise IdentityError("identity_manifest_invalid")
     if not isinstance(allow_parser_upgrade_reallocation, bool):
         raise IdentityError("identity_manifest_invalid")
+    _validate_evidence_key(evidence_key)
 
     rows = tuple(prior_rows)
     if not all(isinstance(row, Mapping) for row in rows):
@@ -598,7 +601,10 @@ def resolve_records(
     active = tuple(record for record in records if record["state"] == "active")
     retired = tuple(record for record in records if record["state"] == "retired")
     _validate_ledger_manifest_agreement(rows, source, assignment, active)
-    fingerprints = tuple(record_fingerprint(item.row) for item in incoming)
+    fingerprints = tuple(
+        workspace_record_fingerprint(item.row, evidence_key=evidence_key)
+        for item in incoming
+    )
     parser_upgrade_is_proven = bool(
         allow_parser_upgrade_reallocation
         and source is not None
@@ -702,7 +708,8 @@ def resolve_records(
         if record not in proved_active.values() and record not in recurrence.values()
     )
     candidates.extend(
-        (record_fingerprint(row), index, row) for index, row in enumerate(legacy_rows)
+        (workspace_record_fingerprint(row, evidence_key=evidence_key), index, row)
+        for index, row in enumerate(legacy_rows)
     )
     matches, ambiguous = _unique_fingerprint_matches(
         candidates, remaining_indexes, fingerprints
@@ -815,6 +822,7 @@ def resolve_batch(
     intent: str,
     allow_unmatched_reallocation: bool = False,
     allow_parser_upgrade_reallocation: bool = False,
+    evidence_key: bytes | None = None,
 ) -> IdentityResolution:
     """Resolve an import batch without changing the ledger or manifest inputs."""
     action = _source_resolution_action(intent)
@@ -828,16 +836,24 @@ def resolve_batch(
         raise IdentityError("identity_manifest_invalid")
     if not isinstance(allow_parser_upgrade_reallocation, bool):
         raise IdentityError("identity_manifest_invalid")
+    _validate_evidence_key(evidence_key)
     for source in incoming_sources:
         if not isinstance(source.record_data, tuple) or not all(
             isinstance(record, IncomingRecordIdentity) for record in source.record_data
         ):
             raise IdentityError("identity_manifest_invalid")
+    if evidence_key is not None:
+        incoming_sources = tuple(
+            workspace_source_identity(source, evidence_key=evidence_key)
+            for source in incoming_sources
+        )
 
     prior_manifest = copy.deepcopy(dict(manifest))
     validate_manifest(prior_manifest, require_canonical_order=False)
     _validate_v2_row_states(rows)
-    _validate_global_ledger_manifest_agreement(rows, prior_manifest)
+    _validate_global_ledger_manifest_agreement(
+        rows, prior_manifest, evidence_key=evidence_key
+    )
 
     v2_rows_by_source: dict[str, list[Mapping[str, Any]]] = {}
     legacy_rows_by_display: dict[str, list[Mapping[str, Any]]] = {}
@@ -901,6 +917,7 @@ def resolve_batch(
                 intent,
                 allow_unmatched_reallocation=allow_unmatched_reallocation,
                 allow_parser_upgrade_reallocation=(allow_parser_upgrade_reallocation),
+                evidence_key=evidence_key,
             )
             protected_legacy[assignment.source_display] = tuple(
                 _protect_legacy_row(row) for row in legacy_group
@@ -922,6 +939,7 @@ def resolve_batch(
                 intent,
                 allow_unmatched_reallocation=allow_unmatched_reallocation,
                 allow_parser_upgrade_reallocation=(allow_parser_upgrade_reallocation),
+                evidence_key=evidence_key,
             )
             if result.retained_legacy_rows:
                 protected_legacy[assignment.source_display] = tuple(
@@ -1022,6 +1040,57 @@ def record_fingerprint(row: Mapping[str, Any]) -> str:
     )
 
 
+def workspace_source_identity(
+    source: IncomingSourceIdentity, *, evidence_key: bytes
+) -> IncomingSourceIdentity:
+    """Replace reusable source evidence with one workspace-keyed proof."""
+    return IncomingSourceIdentity(
+        stable_handle=source.stable_handle,
+        source_display=source.source_display,
+        namespace_id=source.namespace_id,
+        revision=workspace_source_revision(source.revision, evidence_key=evidence_key),
+        contract_id=source.contract_id,
+        record_data=source.record_data,
+    )
+
+
+def workspace_source_revision(revision: str, *, evidence_key: bytes) -> str:
+    """Return source-revision evidence scoped to one workspace."""
+    _require_match(SOURCE_REVISION_RE, revision)
+    return "rev_" + _workspace_evidence_digest(
+        evidence_key, "source-revision-v1", revision
+    )
+
+
+def workspace_record_fingerprint(
+    row: Mapping[str, Any], *, evidence_key: bytes | None
+) -> str:
+    """Return raw or workspace-scoped record evidence for identity matching."""
+    fingerprint = record_fingerprint(row)
+    if evidence_key is None:
+        return fingerprint
+    return "fp_" + _workspace_evidence_digest(
+        evidence_key, "record-fingerprint-v1", fingerprint
+    )
+
+
+def _workspace_evidence_digest(key: bytes, domain: str, value: str) -> str:
+    _validate_evidence_key(key)
+    domain_bytes = domain.encode("ascii")
+    value_bytes = value.encode("ascii")
+    framed = bytearray(b"honeymoney.workspace-evidence\x00")
+    framed.extend(struct.pack(">I", len(domain_bytes)))
+    framed.extend(domain_bytes)
+    framed.extend(struct.pack(">Q", len(value_bytes)))
+    framed.extend(value_bytes)
+    return hmac.new(key, bytes(framed), hashlib.sha256).hexdigest()
+
+
+def _validate_evidence_key(key: bytes | None) -> None:
+    if key is not None and (not isinstance(key, bytes) or len(key) != 32):
+        raise IdentityError("identity_manifest_invalid")
+
+
 def normalized_record_identity(row: Mapping[str, Any]) -> dict[str, str]:
     """Return the normalized values that define one record fingerprint."""
     return {
@@ -1094,7 +1163,10 @@ def _validate_v2_row_states(rows: tuple[Mapping[str, Any], ...]) -> None:
 
 
 def _validate_global_ledger_manifest_agreement(
-    rows: tuple[Mapping[str, Any], ...], manifest: Mapping[str, Any]
+    rows: tuple[Mapping[str, Any], ...],
+    manifest: Mapping[str, Any],
+    *,
+    evidence_key: bytes | None = None,
 ) -> None:
     """Require every active ownership record and v2 row to agree globally."""
     expected: dict[tuple[str, str], tuple[Mapping[str, Any], Mapping[str, Any]]] = {}
@@ -1117,7 +1189,8 @@ def _validate_global_ledger_manifest_agreement(
                 _text(row.get(field)) != source[field]
                 for field in ("source_id", "source_namespace_id", "source_revision")
             )
-            or record_fingerprint(row) != record["record_fingerprint"]
+            or workspace_record_fingerprint(row, evidence_key=evidence_key)
+            != record["record_fingerprint"]
         ):
             raise IdentityError("identity_manifest_invalid")
         actual.add(key)
@@ -1128,6 +1201,8 @@ def _validate_global_ledger_manifest_agreement(
 def validate_ledger_manifest_agreement(
     ledger_rows: list[Mapping[str, Any]] | tuple[Mapping[str, Any], ...],
     manifest: Mapping[str, Any],
+    *,
+    evidence_key: bytes | None = None,
 ) -> None:
     """Validate the complete authoritative ledger and manifest together."""
     rows = tuple(ledger_rows)
@@ -1141,7 +1216,10 @@ def validate_ledger_manifest_agreement(
         identifier = _text(row.get("transaction_id"))
         if identifier:
             _require_match(TRANSACTION_ID_LEGACY_RE, identifier)
-    _validate_global_ledger_manifest_agreement(rows, manifest)
+    _validate_evidence_key(evidence_key)
+    _validate_global_ledger_manifest_agreement(
+        rows, manifest, evidence_key=evidence_key
+    )
 
 
 def has_stable_v2_identity(row: Mapping[str, Any]) -> bool:
@@ -2363,4 +2441,7 @@ __all__ = [
     "transaction_id",
     "validate_manifest",
     "validate_ledger_manifest_agreement",
+    "workspace_record_fingerprint",
+    "workspace_source_identity",
+    "workspace_source_revision",
 ]

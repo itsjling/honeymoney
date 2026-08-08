@@ -1,8 +1,8 @@
 [project]
 name = "honeymoney"
-version = "0.1.0"
+version = "0.2.0"
 description = "Local private spending categorization for household transaction exports"
-requires-python = ">=3.11"
+requires-python = ">=3.14,<3.15"
 dependencies = [
   "certifi>=2026.7.22,<2027",
 ]
@@ -38,38 +38,50 @@ requires = ["setuptools>=83"]
 build-backend = "setuptools.build_meta"
 
 [tool.ruff]
-target-version = "py311"
+target-version = "py314"
 line-length = 88
 
 [tool.ruff.lint]
 select = ["E4", "E7", "E9", "F", "I"]
 
 [tool.mypy]
-python_version = "3.11"
+python_version = "3.14"
 files = [
   "honeymoney/account_bindings.py",
   "honeymoney/classification_policy.py",
+  "honeymoney/cli.py",
   "honeymoney/contracts.py",
   "honeymoney/corrections.py",
   "honeymoney/csv_artifacts.py",
+  "honeymoney/doctor.py",
   "honeymoney/duplicates.py",
   "honeymoney/identity.pyi",
   "honeymoney/identity_contracts.py",
   "honeymoney/identity_state.py",
   "honeymoney/importers.pyi",
+  "honeymoney/import_records.py",
   "honeymoney/learning.py",
   "honeymoney/normalization.py",
   "honeymoney/overlap.py",
   "honeymoney/overlap_contracts.py",
   "honeymoney/parser_contracts.py",
   "honeymoney/persistence.py",
+  "honeymoney/periods.py",
   "honeymoney/provenance.py",
   "honeymoney/reconciliation.py",
   "honeymoney/report.py",
+  "honeymoney/review_operations.py",
   "honeymoney/rules.pyi",
   "honeymoney/schema.py",
   "honeymoney/source_data_review.py",
-  "honeymoney/workspace_upgrade.py",
+  "honeymoney/workspace_commands.py",
+  "honeymoney/workspace_derivation.py",
+  "honeymoney/workspace_index.py",
+  "honeymoney/workspace_paths.py",
+  "honeymoney/workspace_publication.py",
+  "honeymoney/workspace_queries.py",
+  "honeymoney/workspace_setup.py",
+  "honeymoney/workspace_views.py",
 ]
 strict = true
 disallow_any_explicit = true

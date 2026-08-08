@@ -116,7 +116,7 @@ def validate_manual_pair_facts(
 def _posted_amount(row: Mapping[str, str]) -> Decimal | None:
     try:
         amount = Decimal(row.get("posted_amount", ""))
-    except (InvalidOperation, ValueError):
+    except InvalidOperation, ValueError:
         return None
     return amount if amount.is_finite() else None
 

@@ -6,6 +6,18 @@ reviewable by storing synthetic golden cases under `tests/fixtures`.
 Golden cases should describe behavior we want to preserve. They are not raw
 bank statements, model transcripts, or private financial data.
 
+Version 0.2.0 storage acceptance also uses small, manually reviewed synthetic
+workspaces. Cover one rule per fixture and one complete flow through setup,
+import, retry, replacement, reset, saved corrections, overlap, month and
+undated views, backup, doctor, repair, and repeat. Review expected bytes by hand;
+do not regenerate them blindly.
+
+Automatic refresh goldens must match a clean `views rebuild --all` byte for
+byte from the same durable state. Include header-only empty views, deterministic
+ordering, moved dates, cross-month links, direct input edits, and removed
+registered views. Journal fixtures must stop at each named write, sync,
+replacement, directory sync, and workspace-index-last boundary.
+
 ## Layout
 
 Import profile cases live here:
@@ -115,8 +127,8 @@ group. A mapping can target:
 The importer scans raw word or table lines for these patterns. It adds the
 opening value to the first transaction and the closing value to the last
 transaction for the same account and posted currency. Balance lines stay out
-of the ledger. Profiles without `balance_mappings` still work; their statement
-balance check stays unavailable.
+of the statement transaction set. Profiles without `balance_mappings` still
+work; their statement balance check stays unavailable.
 
 A mapping may set `closing_requires_opening` to `true`. The importer then
 accepts a closing value for an account and currency only after it has found
@@ -174,31 +186,26 @@ hashes, empty metadata, page counts, and prohibited PDF object markers. The
 older JSON layouts remain useful for isolated parser cases, but they do not
 replace this end-to-end extraction seam.
 
-Before adding or updating a CSV golden, validate the profile and preview the
-synthetic fixture through the public read-only command:
+Before adding or updating a CSV golden, validate the profile, then run its
+focused parser test with the committed synthetic fixture:
 
 ```bash
-honeymoney profile validate honeymoney/data/profiles/hsbc_hk_bank.json \
-  --input tests/fixtures/import_profiles/hsbc_hk_bank/debit_credit_and_previous_balance/input.csv \
-  --json
+honeymoney profile validate honeymoney/data/profiles/mox_credit_card.json --json
+python3 -m unittest tests.test_import_profiles.MoxCreditCardCsvProfileTest
 ```
 
-For PDF table and word-coordinate goldens, validate the profile without
-`--input`; the committed `tables.json` and `words.json` represent extracted
-parser data rather than standalone PDFs. The existing golden test then exercises
-those shapes without requiring a live statement:
+For PDF table and word-coordinate goldens, the committed `tables.json` and
+`words.json` represent extracted parser data rather than standalone PDFs. The
+golden test exercises those shapes without requiring a live statement:
 
 ```bash
 honeymoney profile validate honeymoney/data/profiles/mox_bank_pdf.json --json
 python3 -m unittest tests.test_import_profiles
 ```
 
-The preview is capped at 10 normalized rows and creates no artifacts. Its output
-contains local transaction data, so only committed synthetic fixtures belong in
-agent prompts, test logs, or issues. Pass `--config CONFIG` when a profile golden
-depends on custom owner/payment vocabularies or configured currency conversion;
-otherwise the command uses `config.json` from the current directory when it
-exists.
+Only `honeymoney import PATH` reads a statement. Pass `--config CONFIG` when
+profile validation depends on custom owner or payment names; otherwise the
+command uses `config.json` from the current directory when it exists.
 
 ## Adding a Categorization Golden
 

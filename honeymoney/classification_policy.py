@@ -271,7 +271,7 @@ def _amount(row: dict[str, str]) -> Decimal | None:
     for field in ("amount_hkd", "posted_amount"):
         try:
             amount = Decimal(row.get(field, ""))
-        except (InvalidOperation, ValueError):
+        except InvalidOperation, ValueError:
             continue
         if amount.is_finite():
             return amount

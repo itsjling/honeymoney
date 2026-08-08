@@ -15,10 +15,18 @@ OverlapProvenanceStatus: TypeAlias = Literal[
 ]
 
 
+class OverlapSupportPool(TypedDict):
+    """Exact active source-record support without a repeated-row pairing."""
+
+    source_id: str
+    source_record_ids: list[str]
+
+
 class OverlapSlot(TypedDict):
     slot: int
     transaction_id: str
     state: OverlapSlotState
+    supporting_source_ids: list[str]
 
 
 class OverlapMembership(TypedDict):
@@ -31,6 +39,7 @@ class OverlapMembership(TypedDict):
 class OverlapGroup(TypedDict):
     overlap_group_id: str
     record_fingerprint: str
+    support_pools: list[OverlapSupportPool]
     memberships: list[OverlapMembership]
     slots: list[OverlapSlot]
 
@@ -39,18 +48,6 @@ class OverlapManifest(TypedDict):
     schema_version: int
     namespace_key: str
     groups: list[OverlapGroup]
-
-
-class LegacyOverlapGroup(TypedDict):
-    group_id: str
-    record_fingerprint: str
-    slots: list[OverlapSlot]
-
-
-class LegacyOverlapManifest(TypedDict):
-    schema_version: int
-    namespace_key: str
-    groups: list[LegacyOverlapGroup]
 
 
 class OverlapGroupDiagnostic(TypedDict):
