@@ -2910,7 +2910,8 @@ def _profile_bind_command(argv: list[str]) -> int:
 
     accounts = [_parse_bound_account(value) for value in args.account]
     config, profiles, mappings, mapping_path = _load_account_binding_edit(
-        args.config_path
+        args.config_path,
+        validate_current_bindings=False,
     )
     if selected_profile_id not in {
         account_binding_profile_id(profile) for profile in profiles
@@ -2963,11 +2964,14 @@ def _parse_bound_account(value: str) -> dict[str, str]:
 
 def _load_account_binding_edit(
     config_path: str | None,
+    *,
+    validate_current_bindings: bool = True,
 ) -> tuple[dict[str, Any], list[dict[str, Any]], dict[str, Any], Path]:
     config = _load_config_read_only(config_path)
     profiles = importers._load_profiles(config)
     mappings = importers._load_profile_mappings(config)
-    validate_bindings_for_profiles(mappings, profiles)
+    if validate_current_bindings:
+        validate_bindings_for_profiles(mappings, profiles)
     mapping_value = config.get("profile_mappings")
     if not isinstance(mapping_value, str) or not mapping_value.strip():
         raise ValueError("Config must define a profile_mappings JSON path")

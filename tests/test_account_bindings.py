@@ -570,6 +570,140 @@ class AccountBindingWorkflowTest(unittest.TestCase):
             )
             self.assertEqual(mappings_path.read_bytes(), before)
 
+    def test_pattern_edit_receipts_are_kept_for_other_bindings(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_root:
+            root = self._setup_workspace(temporary_root)
+            bindings = (
+                ("justin-local", "justin", "Justin", "justin_local"),
+                (
+                    "franchesca-local",
+                    "franchesca",
+                    "Franchesca",
+                    "franchesca_local",
+                ),
+            )
+            for binding_id, prefix, owner, account_id in bindings:
+                bound = self._bind(
+                    root,
+                    binding_id,
+                    f"{prefix}-old-*.csv",
+                    owner,
+                    account_id,
+                    f"{owner} Local Account",
+                )
+                self.assertEqual(bound.returncode, 0, bound.stderr)
+                replaced = self._run_cli(
+                    [
+                        "profile",
+                        "replace-pattern",
+                        binding_id,
+                        "--old-pattern",
+                        f"{prefix}-old-*.csv",
+                        "--new-pattern",
+                        f"{prefix}-new-*.csv",
+                        "--json",
+                    ],
+                    cwd=root,
+                )
+                self.assertEqual(replaced.returncode, 0, replaced.stderr)
+
+            replacement_replay = self._run_cli(
+                [
+                    "profile",
+                    "replace-pattern",
+                    "justin-local",
+                    "--old-pattern",
+                    "justin-old-*.csv",
+                    "--new-pattern",
+                    "justin-new-*.csv",
+                    "--json",
+                ],
+                cwd=root,
+            )
+            self.assertEqual(
+                replacement_replay.returncode, 0, replacement_replay.stderr
+            )
+            self.assertFalse(json.loads(replacement_replay.stdout)["data"]["changed"])
+
+            for binding_id, prefix, owner, account_id in bindings:
+                extra = self._bind(
+                    root,
+                    binding_id,
+                    f"{prefix}-extra-*.csv",
+                    owner,
+                    account_id,
+                    f"{owner} Local Account",
+                )
+                self.assertEqual(extra.returncode, 0, extra.stderr)
+                removed = self._run_cli(
+                    [
+                        "profile",
+                        "remove-pattern",
+                        binding_id,
+                        "--pattern",
+                        f"{prefix}-extra-*.csv",
+                        "--json",
+                    ],
+                    cwd=root,
+                )
+                self.assertEqual(removed.returncode, 0, removed.stderr)
+
+            removal_replay = self._run_cli(
+                [
+                    "profile",
+                    "remove-pattern",
+                    "justin-local",
+                    "--pattern",
+                    "justin-extra-*.csv",
+                    "--json",
+                ],
+                cwd=root,
+            )
+            self.assertEqual(removal_replay.returncode, 0, removal_replay.stderr)
+            self.assertFalse(json.loads(removal_replay.stdout)["data"]["changed"])
+
+    def test_profile_bind_can_repair_a_binding_after_its_profile_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_root:
+            root = self._setup_workspace(temporary_root)
+            first = self._bind(
+                root,
+                "justin-local",
+                "justin-*.csv",
+                "Justin",
+                "justin_local",
+                "Justin Local Account",
+            )
+            self.assertEqual(first.returncode, 0, first.stderr)
+            profile_path = root / "profiles" / "starter_csv.json"
+            profile = json.loads(profile_path.read_text(encoding="utf-8"))
+            profile["account_id"] = "starter_csv_v2"
+            profile_path.write_text(json.dumps(profile), encoding="utf-8")
+
+            repaired = self._run_cli(
+                [
+                    "profile",
+                    "bind",
+                    "justin-local",
+                    "--pattern",
+                    "justin-*.csv",
+                    "--profile",
+                    "starter_csv",
+                    "--owner",
+                    "Justin",
+                    "--account",
+                    "starter_csv_v2=justin_local=Justin Local Account",
+                    "--json",
+                ],
+                cwd=root,
+            )
+
+            self.assertEqual(repaired.returncode, 0, repaired.stderr)
+            payload = json.loads(repaired.stdout)
+            self.assertEqual(
+                payload["data"]["binding"]["accounts"][0]["source_account_id"],
+                "starter_csv_v2",
+            )
+
     def test_pattern_edits_reject_missing_targets_and_conflicts_without_writing(
         self,
     ) -> None:

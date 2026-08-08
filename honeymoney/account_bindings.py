@@ -168,14 +168,16 @@ def replace_binding_pattern(
         }
     document["filename_patterns"] = patterns
     _clear_pattern_edit_receipts(document, binding_id)
-    document["replaced_filename_patterns"] = [
+    replacement_receipts = _mapping_list(document, "replaced_filename_patterns")
+    replacement_receipts.append(
         {
             "binding": binding_id,
             "old_pattern": old_pattern,
             "new_pattern": new_pattern,
             "profile": selected_profile,
         }
-    ]
+    )
+    document["replaced_filename_patterns"] = replacement_receipts
     return document, True
 
 
@@ -252,13 +254,15 @@ def remove_binding_pattern(
         del bindings[binding_index]
         document["account_bindings"] = bindings
     _clear_pattern_edit_receipts(document, binding_id)
-    document["removed_filename_patterns"] = [
+    removal_receipts = _mapping_list(document, "removed_filename_patterns")
+    removal_receipts.append(
         {
             "binding": binding_id,
             "pattern": pattern,
             "profile": selected_profile,
         }
-    ]
+    )
+    document["removed_filename_patterns"] = removal_receipts
     return document, True, removing_binding, selected_profile
 
 
