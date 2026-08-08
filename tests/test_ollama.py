@@ -320,12 +320,19 @@ class OllamaTest(unittest.TestCase):
                     event.batch_count,
                     event.start_index,
                     event.end_index,
+                    event.model,
                 )
             ),
             transport=FakeTransport(successful_handler),
         )
 
-        self.assertEqual(progress_calls, [(1, 2, 1, 1), (2, 2, 2, 2)])
+        self.assertEqual(
+            progress_calls,
+            [
+                (1, 2, 1, 1, "qwen2.5:7b-instruct"),
+                (2, 2, 2, 2, "qwen2.5:7b-instruct"),
+            ],
+        )
 
     def test_missing_ollama_ids_and_reasons_are_invalid_responses(self) -> None:
         transport = FakeTransport(

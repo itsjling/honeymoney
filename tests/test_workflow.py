@@ -26,7 +26,7 @@ from honeymoney.identity_state import (
     load_configured_identity_state,
     load_identity_state,
 )
-from honeymoney.ollama import OllamaHttpRequest, apply_ollama_fallback
+from honeymoney.ollama import OllamaHttpRequest, OllamaProgress, apply_ollama_fallback
 from honeymoney.persistence import GenerationConflictError
 from honeymoney.schema import (
     ALLOWED_CATEGORIES,
@@ -5249,6 +5249,88 @@ class StatusLineTest(unittest.TestCase):
 
         self.assertEqual(stream.getvalue(), "")
 
+    def test_text_that_fills_terminal_width_is_not_cut(self) -> None:
+        stream = io.StringIO()
+        status = _StatusLine(stream=stream, enabled=True)
+        with patch.object(
+            cli.shutil,
+            "get_terminal_size",
+            return_value=os.terminal_size((5, 24)),
+        ):
+            status.update("12345")
+
+        self.assertEqual(stream.getvalue(), "\r12345")
+
+    def test_long_status_can_preserve_its_suffix(self) -> None:
+        stream = io.StringIO()
+        status = _StatusLine(stream=stream, enabled=True)
+        with patch.object(
+            cli.shutil,
+            "get_terminal_size",
+            return_value=os.terminal_size((20, 24)),
+        ):
+            status.update("a long status prefix: batch 1/1", preserve_suffix=9)
+
+        self.assertEqual(stream.getvalue(), "\ra long st…batch 1/1")
+
+    def test_ollama_progress_keeps_batch_range_total_and_elapsed_time(self) -> None:
+        stream = io.StringIO()
+        with (
+            patch.object(cli, "_status", _StatusLine(stream=stream, enabled=True)),
+            patch.object(
+                cli.shutil,
+                "get_terminal_size",
+                return_value=os.terminal_size((200, 24)),
+            ),
+        ):
+            cli._ollama_progress(
+                OllamaProgress(2, 20, 6, 10, 98, 4.2, "qwen2.5:7b-instruct")
+            )
+
+        self.assertEqual(
+            stream.getvalue(),
+            "\rCategorizing via Ollama (qwen2.5:7b-instruct)... "
+            "batch 2/20 (transactions 6-10 of 98, 4s)",
+        )
+
+    def test_ollama_progress_preserves_details_on_standard_terminal(self) -> None:
+        stream = io.StringIO()
+        with (
+            patch.object(cli, "_status", _StatusLine(stream=stream, enabled=True)),
+            patch.object(
+                cli.shutil,
+                "get_terminal_size",
+                return_value=os.terminal_size((80, 24)),
+            ),
+        ):
+            cli._ollama_progress(
+                OllamaProgress(2, 20, 6, 10, 98, 4.2, "qwen2.5:7b-instruct")
+            )
+
+        rendered = stream.getvalue().removeprefix("\r")
+        self.assertEqual(
+            rendered,
+            "Ollama (qwen2.5:7b-instruct): batch 2/20 (tx 6-10/98, 4s)",
+        )
+
+    def test_ollama_progress_escapes_terminal_control_characters(self) -> None:
+        stream = io.StringIO()
+        with (
+            patch.object(cli, "_status", _StatusLine(stream=stream, enabled=True)),
+            patch.object(
+                cli.shutil,
+                "get_terminal_size",
+                return_value=os.terminal_size((200, 24)),
+            ),
+        ):
+            cli._ollama_progress(OllamaProgress(1, 1, 1, 1, 1, 0, "safe\n\x1b[31m"))
+
+        self.assertEqual(
+            stream.getvalue(),
+            "\rCategorizing via Ollama (safe\\n\\x1b[31m)... "
+            "batch 1/1 (transactions 1 of 1)",
+        )
+
 
 class StatusLineTtyTest(unittest.TestCase):
     def test_import_shows_status_line_with_ollama_progress_on_tty(self) -> None:
@@ -5307,7 +5389,7 @@ class StatusLineTtyTest(unittest.TestCase):
             config["ollama"] = {
                 "enabled": True,
                 "url": "http://localhost:11434/api/generate",
-                "model": "test",
+                "model": "synthetic-progress-model:latest",
                 "batch_size": 20,
             }
             config_path.write_text(json.dumps(config), encoding="utf-8")
@@ -5321,6 +5403,11 @@ class StatusLineTtyTest(unittest.TestCase):
                     patch.object(
                         cli, "_status", _StatusLine(status_output, enabled=True)
                     ),
+                    patch.object(
+                        cli.shutil,
+                        "get_terminal_size",
+                        return_value=os.terminal_size((200, 24)),
+                    ),
                     patch.object(cli, "apply_ollama_fallback", side_effect=fake_apply),
                     redirect_stdout(stdout),
                 ):
@@ -5333,7 +5420,9 @@ class StatusLineTtyTest(unittest.TestCase):
             self.assertIn("\r", text)
             self.assertIn("Importing statements... (1/1) may.csv", text)
             self.assertIn(
-                "Categorizing via Ollama... batch 1/1 (transactions 1 of 1)", text
+                "Categorizing via Ollama (synthetic-progress-model:latest)... "
+                "batch 1/1 (transactions 1 of 1)",
+                text,
             )
             self.assertIn("Import complete: 1 successful records", text)
 
