@@ -30,6 +30,7 @@ from honeymoney.schema import allowed_categories
 
 _TICK_INTERVAL_SECONDS = 1.0
 _DEFAULT_OLLAMA_URL = "http://localhost:11434/api/generate"
+_DEFAULT_OLLAMA_MODEL = "qwen2.5:7b-instruct"
 _REDIRECT_STATUSES = {301, 302, 303, 307, 308}
 _MAX_REDIRECTS = 5
 
@@ -327,6 +328,7 @@ class OllamaProgress(NamedTuple):
     end_index: int
     total: int
     elapsed_seconds: float
+    model: str
 
 
 def list_ollama_models(
@@ -419,6 +421,7 @@ def apply_ollama_fallback(
         }, []
 
     batch_size = _batch_size(ollama_config)
+    model = str(ollama_config.get("model", _DEFAULT_OLLAMA_MODEL))
     chunks = _chunks(unresolved, batch_size)
     batch_count = len(chunks)
     accepted = 0
@@ -450,6 +453,7 @@ def apply_ollama_fallback(
                         _end,
                         len(unresolved),
                         elapsed,
+                        model,
                     )
                 )
 
@@ -660,7 +664,7 @@ def _request_ollama(
     descriptions = model_category_descriptions(config)
     categories = sorted(descriptions)
     payload = {
-        "model": ollama_config.get("model", "qwen2.5:7b-instruct"),
+        "model": ollama_config.get("model", _DEFAULT_OLLAMA_MODEL),
         "stream": False,
         "think": bool(ollama_config.get("think", False)),
         "format": _response_format(categories),

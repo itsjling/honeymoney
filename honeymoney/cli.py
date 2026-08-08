@@ -309,12 +309,25 @@ class _StatusLine:
         self._enabled = self._stream.isatty() if enabled is None else enabled
         self._last_length = 0
 
-    def update(self, text: str) -> None:
+    def update(
+        self,
+        text: str,
+        *,
+        compact: str | None = None,
+        preserve_suffix: int = 0,
+    ) -> None:
         if not self._enabled:
             return
         width = shutil.get_terminal_size().columns
-        if width > 1 and len(text) >= width:
-            text = text[: width - 2] + "…"
+        if compact is not None and len(text) > width:
+            text = compact
+        if width > 1 and len(text) > width:
+            limit = width - 1
+            if 0 < preserve_suffix < limit - 1:
+                prefix_length = limit - preserve_suffix - 1
+                text = text[:prefix_length] + "…" + text[-preserve_suffix:]
+            else:
+                text = text[: limit - 1] + "…"
         padding = " " * max(0, self._last_length - len(text))
         self._stream.write(f"\r{text}{padding}")
         self._stream.flush()
@@ -338,10 +351,25 @@ def _ollama_progress(progress: OllamaProgress) -> None:
         else f"{progress.start_index}-{progress.end_index}"
     )
     elapsed = f", {progress.elapsed_seconds:.0f}s" if progress.elapsed_seconds else ""
-    _status.update(
-        "Categorizing via Ollama... "
+    model = "".join(
+        character
+        if character.isprintable()
+        else character.encode("unicode_escape").decode("ascii")
+        for character in progress.model
+    )
+    details = (
         f"batch {progress.batch_number}/{progress.batch_count} "
         f"(transactions {range_label} of {progress.total}{elapsed})"
+    )
+    compact_details = (
+        f"batch {progress.batch_number}/{progress.batch_count} "
+        f"(tx {range_label}/{progress.total}{elapsed})"
+    )
+    compact = f"Ollama ({model}): {compact_details}"
+    _status.update(
+        f"Categorizing via Ollama ({model})... {details}",
+        compact=compact,
+        preserve_suffix=len(compact_details),
     )
 
 
