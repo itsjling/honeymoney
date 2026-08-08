@@ -39,6 +39,309 @@ def _row(
 
 
 class ValuationImpactTest(unittest.TestCase):
+    def test_owner_filters_keep_status_report_and_html_on_the_same_rows(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            output = root / "output"
+            output.mkdir()
+            ledger_path = output / "categorized.csv"
+            rows = [
+                self._legacy_row("justin", "2026-07-01", "expense", "-40", "HKD"),
+                self._legacy_row("franchesca", "2026-07-02", "expense", "-10", "HKD"),
+                self._legacy_row("household", "2026-07-03", "income", "100", "HKD"),
+            ]
+            for row, owner in zip(
+                rows,
+                ("Justin", "Franchesca", "Household"),
+                strict=True,
+            ):
+                row["owner"] = owner
+                row["merchant"] = f"{owner.upper()} SYNTHETIC"
+            with ledger_path.open("w", newline="", encoding="utf-8") as handle:
+                writer = csv.DictWriter(handle, fieldnames=LEGACY_CATEGORIZED_COLUMNS)
+                writer.writeheader()
+                writer.writerows(rows)
+            (root / "config.json").write_text(
+                json.dumps(
+                    {
+                        "base_currency": "HKD",
+                        "paths": {"output": str(ledger_path)},
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            owner_args = [
+                "--owner",
+                "Justin",
+                "--owner",
+                "Franchesca",
+                "--owner",
+                "Justin",
+            ]
+            status = self._run_cli(
+                ["status", "--month", "2026-07", *owner_args, "--json"],
+                cwd=root,
+            )
+            report = self._run_cli(
+                [
+                    "report",
+                    "--month",
+                    "2026-07",
+                    *owner_args,
+                    "--no-open",
+                    "--json",
+                ],
+                cwd=root,
+            )
+
+            self.assertEqual(status.returncode, 0, status.stderr)
+            self.assertEqual(report.returncode, 0, report.stderr)
+            status_data = json.loads(status.stdout)["data"]
+            report_data = json.loads(report.stdout)["data"]
+            expected_filters = {"owners": ["Justin", "Franchesca"]}
+            self.assertEqual(status_data["filters"], expected_filters)
+            self.assertEqual(report_data["filters"], expected_filters)
+            self.assertEqual(status_data["records_processed"], 2)
+            self.assertEqual(report_data["transaction_count"], 2)
+            self.assertEqual(status_data["valuation"], report_data["valuation"])
+            self.assertEqual(
+                status_data["valuation"]["cash_flow"]["combined_estimate"][
+                    "net_cash_flow"
+                ],
+                "-50.00",
+            )
+
+            report_html = (output / "report.html").read_text(encoding="utf-8")
+            self.assertIn("JUSTIN SYNTHETIC", report_html)
+            self.assertIn("FRANCHESCA SYNTHETIC", report_html)
+            self.assertNotIn("HOUSEHOLD SYNTHETIC", report_html)
+            self.assertIn('id="owner-filter"', report_html)
+            self.assertIn('id="owner-select-all"', report_html)
+            self.assertIn('id="valuation-warning"', report_html)
+            self.assertIn('id="missing-total"', report_html)
+            self.assertIn("function applyOwnerFilter()", report_html)
+
+            combined = self._run_cli(
+                ["status", "--month", "2026-07", "--json"],
+                cwd=root,
+            )
+            combined_report = self._run_cli(
+                ["report", "--month", "2026-07", "--no-open", "--json"],
+                cwd=root,
+            )
+            self.assertEqual(combined.returncode, 0, combined.stderr)
+            self.assertEqual(combined_report.returncode, 0, combined_report.stderr)
+            combined_data = json.loads(combined.stdout)["data"]
+            combined_report_data = json.loads(combined_report.stdout)["data"]
+            self.assertEqual(combined_data["filters"], {"owners": []})
+            self.assertEqual(combined_report_data["filters"], {"owners": []})
+            self.assertEqual(combined_data["records_processed"], 3)
+            self.assertEqual(combined_report_data["transaction_count"], 3)
+            self.assertEqual(
+                combined_data["valuation"]["cash_flow"]["combined_estimate"][
+                    "net_cash_flow"
+                ],
+                "50.00",
+            )
+
+            single_status = self._run_cli(
+                ["status", "--month", "2026-07", "--owner", "Justin", "--json"],
+                cwd=root,
+            )
+            single_report = self._run_cli(
+                [
+                    "report",
+                    "--month",
+                    "2026-07",
+                    "--owner",
+                    "Justin",
+                    "--no-open",
+                    "--json",
+                ],
+                cwd=root,
+            )
+            self.assertEqual(single_status.returncode, 0, single_status.stderr)
+            self.assertEqual(single_report.returncode, 0, single_report.stderr)
+            single_status_data = json.loads(single_status.stdout)["data"]
+            single_report_data = json.loads(single_report.stdout)["data"]
+            self.assertEqual(single_status_data["records_processed"], 1)
+            self.assertEqual(single_report_data["transaction_count"], 1)
+            self.assertEqual(
+                single_status_data["valuation"], single_report_data["valuation"]
+            )
+            self.assertEqual(
+                single_report_data["valuation"]["cash_flow"]["combined_estimate"][
+                    "net_cash_flow"
+                ],
+                "-40.00",
+            )
+            single_html = (output / "report.html").read_text(encoding="utf-8")
+            self.assertIn("JUSTIN SYNTHETIC", single_html)
+            self.assertNotIn("FRANCHESCA SYNTHETIC", single_html)
+            self.assertNotIn("HOUSEHOLD SYNTHETIC", single_html)
+            self.assertIn('data-account-id="account_justin"', single_html)
+            self.assertIn("renderBalanceCoverage();", single_html)
+
+    def test_corrected_owner_keeps_its_canonical_source_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "money"
+            setup = self._run_cli(
+                ["setup", "--root", str(root), "--json"],
+                cwd=REPO_ROOT,
+            )
+            self.assertEqual(setup.returncode, 0, setup.stderr)
+            statement = root / "synthetic.csv"
+            statement.write_text(
+                "Date,Description,Amount,Currency\n"
+                "2026-07-01,SYNTHETIC OWNER CHANGE,-25.00,HKD\n",
+                encoding="utf-8",
+            )
+            imported = self._run_cli(
+                [
+                    "import",
+                    str(statement),
+                    "--config",
+                    str(root / "config.json"),
+                    "--no-interactive",
+                    "--json",
+                ],
+                cwd=root,
+            )
+            self.assertEqual(imported.returncode, 0, imported.stderr)
+            with (root / "output" / "categorized.csv").open(
+                newline="", encoding="utf-8"
+            ) as handle:
+                [ledger_row] = list(csv.DictReader(handle))
+            corrected = self._run_cli(
+                [
+                    "correct",
+                    "--config",
+                    str(root / "config.json"),
+                    "--file",
+                    "-",
+                    "--json",
+                ],
+                cwd=root,
+                input_text=json.dumps(
+                    [
+                        {
+                            "transaction_id": ledger_row["transaction_id"],
+                            "owner": "Justin",
+                        }
+                    ]
+                ),
+            )
+            self.assertEqual(corrected.returncode, 0, corrected.stderr)
+
+            for command in ("status", "report"):
+                with self.subTest(command=command):
+                    args = [
+                        command,
+                        "--month",
+                        "2026-07",
+                        "--owner",
+                        "Justin",
+                        "--config",
+                        str(root / "config.json"),
+                        "--json",
+                    ]
+                    if command == "report":
+                        args.append("--no-open")
+                    result = self._run_cli(args, cwd=root)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    data = json.loads(result.stdout)["data"]
+                    count_field = (
+                        "records_processed"
+                        if command == "status"
+                        else "transaction_count"
+                    )
+                    self.assertEqual(data[count_field], 1)
+                    self.assertEqual(data["overlap"]["source_occurrence_count"], 1)
+                    self.assertEqual(
+                        data["overlap"]["consolidated_occurrence_count"], 0
+                    )
+
+    def test_unknown_owner_filters_fail_before_workspace_files_change(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            output = root / "output"
+            output.mkdir()
+            ledger_path = output / "categorized.csv"
+            row = self._legacy_row("known", "2026-07-01", "expense", "-40", "HKD")
+            row["owner"] = "Justin"
+            with ledger_path.open("w", newline="", encoding="utf-8") as handle:
+                writer = csv.DictWriter(handle, fieldnames=LEGACY_CATEGORIZED_COLUMNS)
+                writer.writeheader()
+                writer.writerow(row)
+            (root / "config.json").write_text(
+                json.dumps({"paths": {"output": str(ledger_path)}}),
+                encoding="utf-8",
+            )
+            before = {
+                str(path.relative_to(root)): path.read_bytes()
+                for path in sorted(root.rglob("*"))
+                if path.is_file()
+            }
+
+            for command in ("status", "report"):
+                with self.subTest(command=command):
+                    result = self._run_cli(
+                        [command, "--owner", "Not configured", "--json"],
+                        cwd=root,
+                    )
+                    self.assertEqual(result.returncode, 2, result.stderr)
+                    error = json.loads(result.stdout)["errors"][0]
+                    self.assertIn(
+                        "Unsupported owner filter: Not configured", error["message"]
+                    )
+                    after = {
+                        str(path.relative_to(root)): path.read_bytes()
+                        for path in sorted(root.rglob("*"))
+                        if path.is_file()
+                    }
+                    self.assertEqual(after, before)
+
+    def test_status_and_report_help_describe_repeatable_owner_filter(self) -> None:
+        for command in ("status", "report"):
+            with self.subTest(command=command):
+                result = self._run_cli([command, "--help"], cwd=REPO_ROOT)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("--owner OWNER", result.stdout)
+                self.assertIn(
+                    "Filter by owner. Repeat to include more than one", result.stdout
+                )
+
+    def test_html_combined_view_keeps_unassigned_owner_rows_selectable(self) -> None:
+        unassigned = _row(
+            "unassigned",
+            "expense",
+            amount_hkd="-5",
+            posted_amount="-5",
+            valuation_source="statement_posted",
+            valuation_status="actual",
+        )
+        unassigned["owner"] = ""
+        assigned = _row(
+            "assigned",
+            "expense",
+            amount_hkd="-7",
+            posted_amount="-7",
+            valuation_source="statement_posted",
+            valuation_status="actual",
+        )
+        assigned["owner"] = "Justin"
+
+        report_html = build_report_html([unassigned, assigned], "Synthetic period")
+
+        self.assertIn('"owner": ""', report_html)
+        self.assertIn('name.textContent = owner || "Unassigned";', report_html)
+        self.assertIn("return owners.indexOf(owner) === index;", report_html)
+        self.assertIn("function applyOwnerFilter()", report_html)
+        self.assertIn("input.checked = true;", report_html)
+
     def test_summary_splits_completeness_and_cash_flow_by_valuation_status(
         self,
     ) -> None:
@@ -345,6 +648,7 @@ class ValuationImpactTest(unittest.TestCase):
         args: list[str],
         *,
         cwd: Path,
+        input_text: str | None = None,
     ) -> subprocess.CompletedProcess[str]:
         env = dict(os.environ)
         env["PYTHONPATH"] = str(REPO_ROOT)
@@ -352,6 +656,7 @@ class ValuationImpactTest(unittest.TestCase):
             [sys.executable, "-m", "honeymoney.cli", *args],
             cwd=cwd,
             env=env,
+            input=input_text,
             text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,

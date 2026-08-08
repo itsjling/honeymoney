@@ -459,9 +459,14 @@ honeymoney status
 honeymoney status june
 honeymoney status --month 2026-05
 honeymoney status --start 2026-05-01 --end 2026-06-15
+honeymoney status --owner Justin --owner Franchesca
 ```
 
 Shows how many statements and records have been processed for the period (default: the current calendar month), plus how many records are categorized, uncategorized, and needing review. Accepts a month name (`june`), `YYYY-MM`, or explicit `--start`/`--end` dates.
+
+Repeat `--owner` to include the union of several configured owners. The names
+must match the config exactly. With no owner filter, status keeps the combined
+household view. Status JSON records the selected names under `filters.owners`.
 
 Status also splits missing HKD values by accounting impact. Missing `income`,
 `expense`, or `refund` values block cash-flow totals. Missing internal
@@ -473,6 +478,7 @@ flow use the same period and canonical rows.
 ```bash
 honeymoney report
 honeymoney report june --no-open
+honeymoney report 2026-05 --owner Justin --no-open
 ```
 
 Writes a self-contained `output/report.html` with transactions for the selected
@@ -483,6 +489,14 @@ Rows without HKD valuation stay out of totals and trigger a visible warning.
 Each row shows the original amount and currency, HKD reporting value, valuation
 source, rate date and provider when present, and actual, estimated, or missing
 status. The page loads nothing from the network.
+
+Report owner filters use the same rules and transaction set as status. The
+HTML lists each owner in the generated report. Its checkboxes can show one
+owner, any selected set, or the combined view without writing a new report.
+The owner choice updates the headline totals, valuation counts and totals,
+category chart, transaction counts, and transaction rows together. Report JSON
+records the command-line selection under `filters.owners`; an empty list means
+the combined household view.
 
 The HTML and report JSON show total missing values, cash-flow blockers,
 excluded-flow gaps, unresolved-flow gaps, and zero cash-flow rows. They also

@@ -184,6 +184,12 @@ estimates, imported HKMA reference estimates, and missing values.
 valued row. See
 [`ADR 0004`](adr/0004-review-state-and-hkd-valuation.md).
 
+Status and report owner filters validate exact names against the configured
+owner vocabulary, remove repeated filter values, and select the same union of
+canonical rows. No filter keeps the full household set. The self-contained
+HTML embeds only the command-selected rows, then applies its local owner
+selection to every transaction-based count, total, chart, and table row.
+
 `category` is the merchant/budget classification. `flow_type` is the accounting
 treatment used by cash-flow totals. Ollama is limited to configured spending
 categories and cannot set an owner or protected accounting treatment. Protected

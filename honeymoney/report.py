@@ -116,6 +116,37 @@ _PAGE_TEMPLATE = """<!doctype html>
   #theme-toggle:active { transform: translateY(1px); }
   :focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; border-radius: 6px; }
 
+  .owner-controls {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    padding: 0.85rem 1rem;
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    background: var(--surface);
+    box-shadow: var(--shadow);
+    margin-bottom: 1.25rem;
+  }
+  .owner-controls .owner-heading { flex: none; }
+  .owner-controls h2 { font-size: 0.78rem; margin: 0; }
+  .owner-controls .hint { color: var(--ink-faint); font-size: 0.75rem; }
+  .owner-filter { display: flex; flex-wrap: wrap; gap: 0.45rem 0.9rem; flex: 1; }
+  .owner-option { display: inline-flex; align-items: center; gap: 0.35rem; font-size: 0.85rem; }
+  .owner-option input { accent-color: var(--ink); }
+  .owner-actions { display: flex; gap: 0.45rem; }
+  .owner-actions button {
+    font: inherit;
+    font-size: 0.75rem;
+    color: var(--ink-muted);
+    background: var(--surface);
+    border: 1px solid var(--line-strong);
+    border-radius: 7px;
+    padding: 0.35rem 0.6rem;
+    cursor: pointer;
+  }
+  .owner-actions button:hover { background: var(--surface-hover); color: var(--ink); }
+
   .stats {
     display: grid;
     grid-template-columns: repeat(3, 1fr);
@@ -308,6 +339,7 @@ _PAGE_TEMPLATE = """<!doctype html>
     .completeness-grid { grid-template-columns: repeat(2, 1fr); }
   }
   @media (max-width: 720px) {
+    .owner-controls { align-items: flex-start; flex-direction: column; }
     .chart-row { grid-template-columns: 1fr; }
     table.txns col.c-account, table.txns col.c-owner { width: 0; }
     table.txns .col-account, table.txns .col-owner { display: none; }
@@ -329,10 +361,22 @@ _PAGE_TEMPLATE = """<!doctype html>
   <header class="report-head rise">
     <div>
       <h1>Honeymoney Report</h1>
-      <div class="meta">__PERIOD__ <span class="count">&middot; __SOURCE_COUNT__ source occurrences &middot; <span id="txn-count">__CANONICAL_COUNT__</span> canonical transactions</span></div>
+      <div class="meta">__PERIOD__ <span class="count">&middot; <span id="source-count">__SOURCE_COUNT__ source occurrences</span> &middot; <span id="txn-count">__CANONICAL_COUNT__</span> canonical transactions</span></div>
     </div>
     <button id="theme-toggle" type="button" aria-label="Switch color theme">Auto</button>
   </header>
+
+  <section class="owner-controls rise d1" aria-label="Owner view">
+    <div class="owner-heading">
+      <h2>Owners</h2>
+      <div class="hint" id="owner-view-label">Combined view</div>
+    </div>
+    <div class="owner-filter" id="owner-filter"></div>
+    <div class="owner-actions">
+      <button id="owner-select-all" type="button">Combined</button>
+      <button id="owner-clear" type="button">Clear</button>
+    </div>
+  </section>
 
   <section class="stats rise d1" aria-label="Summary">
     <div class="stat"><div class="label">Spending, net of refunds · combined estimate</div><div class="value neg num" id="tile-spending">__SPENDING__</div></div>
@@ -348,12 +392,12 @@ _PAGE_TEMPLATE = """<!doctype html>
   <section class="panel rise d2" aria-label="Valuation completeness">
     <div class="panel-head"><h2>Valuation completeness</h2><span class="hint">Canonical transactions in this period</span></div>
     <div class="panel-body completeness-grid">
-      <div class="completeness-item"><div class="label">Total missing</div><div class="value num">__MISSING_TOTAL__</div></div>
-      <div class="completeness-item"><div class="label">Cash-flow blockers</div><div class="value num">__MISSING_BLOCKING__</div></div>
-      <div class="completeness-item"><div class="label">Excluded flows</div><div class="value num">__MISSING_EXCLUDED__</div></div>
-      <div class="completeness-item"><div class="label">Unresolved flows</div><div class="value num">__MISSING_UNRESOLVED__</div></div>
-      <div class="completeness-item"><div class="label">Zero cash-flow rows</div><div class="value num">__MISSING_ZERO__</div></div>
-      <div class="completeness-item"><div class="label">Other flows</div><div class="value num">__MISSING_OTHER__</div></div>
+      <div class="completeness-item" id="missing-total"><div class="label">Total missing</div><div class="value num">__MISSING_TOTAL__</div></div>
+      <div class="completeness-item" id="missing-blocking"><div class="label">Cash-flow blockers</div><div class="value num">__MISSING_BLOCKING__</div></div>
+      <div class="completeness-item" id="missing-excluded"><div class="label">Excluded flows</div><div class="value num">__MISSING_EXCLUDED__</div></div>
+      <div class="completeness-item" id="missing-unresolved"><div class="label">Unresolved flows</div><div class="value num">__MISSING_UNRESOLVED__</div></div>
+      <div class="completeness-item" id="missing-zero"><div class="label">Zero cash-flow rows</div><div class="value num">__MISSING_ZERO__</div></div>
+      <div class="completeness-item" id="missing-other"><div class="label">Other flows</div><div class="value num">__MISSING_OTHER__</div></div>
     </div>
   </section>
 
@@ -363,10 +407,10 @@ _PAGE_TEMPLATE = """<!doctype html>
       <table class="valuation-table">
         <thead><tr><th>Flow</th><th>Actual</th><th>Estimated</th><th>Combined estimate</th></tr></thead>
         <tbody>
-          <tr><td>Income</td><td class="num">__ACTUAL_INCOME__</td><td class="num">__ESTIMATED_INCOME__</td><td class="num">__COMBINED_INCOME__</td></tr>
-          <tr><td>Spending</td><td class="num">__ACTUAL_SPENDING__</td><td class="num">__ESTIMATED_SPENDING__</td><td class="num">__COMBINED_SPENDING__</td></tr>
-          <tr><td>Refunds</td><td class="num">__ACTUAL_REFUNDS__</td><td class="num">__ESTIMATED_REFUNDS__</td><td class="num">__COMBINED_REFUNDS__</td></tr>
-          <tr><td>Net cash flow</td><td class="num">__ACTUAL_NET__</td><td class="num">__ESTIMATED_NET__</td><td class="num">__COMBINED_NET__</td></tr>
+          <tr id="cash-flow-income"><td>Income</td><td class="num">__ACTUAL_INCOME__</td><td class="num">__ESTIMATED_INCOME__</td><td class="num">__COMBINED_INCOME__</td></tr>
+          <tr id="cash-flow-spending"><td>Spending</td><td class="num">__ACTUAL_SPENDING__</td><td class="num">__ESTIMATED_SPENDING__</td><td class="num">__COMBINED_SPENDING__</td></tr>
+          <tr id="cash-flow-refunds"><td>Refunds</td><td class="num">__ACTUAL_REFUNDS__</td><td class="num">__ESTIMATED_REFUNDS__</td><td class="num">__COMBINED_REFUNDS__</td></tr>
+          <tr id="cash-flow-net"><td>Net cash flow</td><td class="num">__ACTUAL_NET__</td><td class="num">__ESTIMATED_NET__</td><td class="num">__COMBINED_NET__</td></tr>
         </tbody>
       </table>
       <p class="valuation-note">Combined estimates include statement and matched actual values plus configured or provider reference estimates. They are not exact bank conversion costs or tax valuations.</p>
@@ -416,8 +460,17 @@ _PAGE_TEMPLATE = """<!doctype html>
 <script id="data" type="application/json">__DATA__</script>
 <script>
 (function () {
-  var rows = JSON.parse(document.getElementById("data").textContent);
+  var allRows = JSON.parse(document.getElementById("data").textContent);
+  var rows = allRows.slice();
   var CONFIRMED = { "income": true, "expense": true, "refund": true };
+  var CASH_FLOW_FIELD = {
+    "income": "income", "expense": "spending", "refund": "refunds"
+  };
+  var EXCLUDED_FLOW = {
+    "internal_transfer": true,
+    "credit_card_payment": true,
+    "investment_transfer": true
+  };
   var PALETTE = [
     "#4c9a8f", "#d98b3f", "#b7554b", "#7c9a5a", "#5a7fa6", "#9a6f9c",
     "#c9a24b", "#8a8f4f", "#b06a8a", "#5f8a6b", "#a1725a", "#6b7f8f"
@@ -449,7 +502,7 @@ _PAGE_TEMPLATE = """<!doctype html>
   function signClass(v) { return v !== null && v < 0 ? "neg" : "pos"; }
 
   var catMagnitude = {};
-  rows.forEach(function (row) {
+  allRows.forEach(function (row) {
     if (row.amount === null) { return; }
     var category = row.category || "Unknown";
     catMagnitude[category] = (catMagnitude[category] || 0) + Math.abs(row.amount);
@@ -460,12 +513,195 @@ _PAGE_TEMPLATE = """<!doctype html>
     .forEach(function (category, index) { COLOR[category] = PALETTE[index % PALETTE.length]; });
   function colorFor(category) { return COLOR[category] || "var(--ink-faint)"; }
 
+  var availableOwners = allRows
+    .map(function (row) { return row.owner; })
+    .filter(function (owner, index, owners) {
+      return owners.indexOf(owner) === index;
+    })
+    .sort();
+
+  function renderOwnerControls() {
+    var container = document.getElementById("owner-filter");
+    if (!availableOwners.length) {
+      container.textContent = "No owners in this report.";
+      document.getElementById("owner-select-all").disabled = true;
+      document.getElementById("owner-clear").disabled = true;
+      return;
+    }
+    availableOwners.forEach(function (owner, index) {
+      var label = document.createElement("label");
+      label.className = "owner-option";
+      var input = document.createElement("input");
+      input.type = "checkbox";
+      input.value = owner;
+      input.id = "owner-" + index;
+      input.checked = true;
+      var name = document.createElement("span");
+      name.textContent = owner || "Unassigned";
+      label.appendChild(input);
+      label.appendChild(name);
+      container.appendChild(label);
+    });
+  }
+
+  function selectedOwners() {
+    return Array.prototype.slice.call(
+      document.querySelectorAll("#owner-filter input:checked")
+    ).map(function (input) { return input.value; });
+  }
+
+  function applyOwnerFilter() {
+    var selected = selectedOwners();
+    rows = allRows.filter(function (row) { return selected.indexOf(row.owner) >= 0; });
+    var label = document.getElementById("owner-view-label");
+    if (selected.length === availableOwners.length) { label.textContent = "Combined view"; }
+    else if (!selected.length) { label.textContent = "No owners selected"; }
+    else { label.textContent = selected.join(", "); }
+    renderAll();
+  }
+
+  function flowSummary() {
+    var result = {
+      spending: 0, income: 0, net: 0,
+      unresolved_inflow: 0, unresolved_outflow: 0, uncategorized: 0
+    };
+    rows.forEach(function (row) {
+      if (!row.category || row.category === "Unknown") { result.uncategorized += 1; }
+      if (row.amount === null) { return; }
+      var field = CASH_FLOW_FIELD[row.flow_type];
+      if (field === "income") {
+        result.income += row.amount;
+      } else if (field) {
+        result.spending += row.amount;
+      } else if (row.flow_type === "unresolved" && row.amount > 0) {
+        result.unresolved_inflow += row.amount;
+      } else if (row.flow_type === "unresolved" && row.amount < 0) {
+        result.unresolved_outflow += row.amount;
+      }
+    });
+    result.net = result.spending + result.income;
+    return result;
+  }
+
+  function emptyCashFlow() {
+    return { income: 0, spending: 0, refunds: 0, net_cash_flow: 0 };
+  }
+
+  function addCashFlow(target, row) {
+    if (row.amount === null) { return; }
+    var field = CASH_FLOW_FIELD[row.flow_type];
+    if (!field) { return; }
+    target[field] += row.amount;
+    target.net_cash_flow += row.amount;
+  }
+
+  function valuationSummary() {
+    var actual = emptyCashFlow();
+    var estimated = emptyCashFlow();
+    var result = {
+      missing: 0, blocking: 0, excluded: 0, unresolved: 0, zero: 0, other: 0,
+      actual: actual, estimated: estimated, combined: emptyCashFlow()
+    };
+    rows.forEach(function (row) {
+      if (row.valuation_status === "actual") { addCashFlow(actual, row); }
+      else if (row.valuation_status === "estimated") { addCashFlow(estimated, row); }
+      if (row.valuation_status !== "missing") { return; }
+      result.missing += 1;
+      if (EXCLUDED_FLOW[row.flow_type]) {
+        result.excluded += 1;
+      } else if (row.flow_type === "unresolved") {
+        result.unresolved += 1;
+      } else if (CASH_FLOW_FIELD[row.flow_type]) {
+        if (row.posted_amount === 0) { result.zero += 1; }
+        else { result.blocking += 1; }
+      } else {
+        result.other += 1;
+      }
+    });
+    ["income", "spending", "refunds", "net_cash_flow"].forEach(function (field) {
+      result.combined[field] = actual[field] + estimated[field];
+    });
+    return result;
+  }
+
+  function setCompleteness(id, value) {
+    document.getElementById(id).querySelector(".value").textContent = value;
+  }
+
+  function setCashFlowRow(id, actual, estimated, combined) {
+    var cells = document.getElementById(id).querySelectorAll("td");
+    cells[1].textContent = fmt(actual);
+    cells[2].textContent = fmt(estimated);
+    cells[3].textContent = fmt(combined);
+  }
+
+  function sourceOccurrenceCount() {
+    var seenGroups = {};
+    return rows.reduce(function (total, row) {
+      if (row.canonical_group_id) {
+        if (seenGroups[row.canonical_group_id]) { return total; }
+        seenGroups[row.canonical_group_id] = true;
+      }
+      var count = parseInt(row.source_occurrence_count, 10);
+      return total + (count > 0 ? count : 1);
+    }, 0);
+  }
+
   function renderTiles() {
+    var summary = flowSummary();
+    var valuation = valuationSummary();
+    document.getElementById("source-count").textContent =
+      sourceOccurrenceCount() + " source occurrences";
     document.getElementById("txn-count").textContent = rows.length;
+    document.getElementById("tile-spending").textContent = fmt(summary.spending);
+    document.getElementById("tile-income").textContent = fmt(summary.income);
+    document.getElementById("tile-net").textContent = fmt(summary.net);
+    document.getElementById("tile-unresolved-inflow").textContent =
+      fmt(summary.unresolved_inflow);
+    document.getElementById("tile-unresolved-outflow").textContent =
+      fmt(summary.unresolved_outflow);
+    document.getElementById("tile-uncategorized").textContent = summary.uncategorized;
     var netEl = document.getElementById("tile-net");
-    var net = Number(netEl.textContent.replace(/,/g, ""));
-    netEl.classList.toggle("pos", net >= 0);
-    netEl.classList.toggle("neg", net < 0);
+    netEl.classList.toggle("pos", summary.net >= 0);
+    netEl.classList.toggle("neg", summary.net < 0);
+
+    setCompleteness("missing-total", valuation.missing);
+    setCompleteness("missing-blocking", valuation.blocking);
+    setCompleteness("missing-excluded", valuation.excluded);
+    setCompleteness("missing-unresolved", valuation.unresolved);
+    setCompleteness("missing-zero", valuation.zero);
+    setCompleteness("missing-other", valuation.other);
+    setCashFlowRow(
+      "cash-flow-income",
+      valuation.actual.income,
+      valuation.estimated.income,
+      valuation.combined.income
+    );
+    setCashFlowRow(
+      "cash-flow-spending",
+      valuation.actual.spending,
+      valuation.estimated.spending,
+      valuation.combined.spending
+    );
+    setCashFlowRow(
+      "cash-flow-refunds",
+      valuation.actual.refunds,
+      valuation.estimated.refunds,
+      valuation.combined.refunds
+    );
+    setCashFlowRow(
+      "cash-flow-net",
+      valuation.actual.net_cash_flow,
+      valuation.estimated.net_cash_flow,
+      valuation.combined.net_cash_flow
+    );
+    var warning = document.getElementById("valuation-warning");
+    warning.hidden = valuation.missing === 0;
+    warning.textContent = valuation.missing +
+      (valuation.missing === 1 ? " row has" : " rows have") +
+      " no HKD valuation. " + valuation.blocking +
+      (valuation.blocking === 1 ? " row blocks" : " rows block") +
+      " confirmed cash-flow totals.";
   }
 
   function chartData(excludeTransfers) {
@@ -660,6 +896,22 @@ _PAGE_TEMPLATE = """<!doctype html>
       });
   }
 
+  function renderBalanceCoverage() {
+    var selectedAccounts = {};
+    rows.forEach(function (row) { selectedAccounts[row.account_id || ""] = true; });
+    var visible = 0;
+    Array.prototype.forEach.call(
+      document.querySelectorAll("#balance-coverage tr[data-account-id]"),
+      function (row) {
+        row.hidden = !selectedAccounts[row.getAttribute("data-account-id")];
+        if (!row.hidden) { visible += 1; }
+      }
+    );
+    var empty = document.getElementById("balance-coverage-empty");
+    empty.hidden = visible > 0;
+    if (!visible) { empty.textContent = "No statement sections match this owner view."; }
+  }
+
   function cell(tr, className, text, title) {
     var td = tr.insertCell();
     td.className = className;
@@ -668,10 +920,31 @@ _PAGE_TEMPLATE = """<!doctype html>
     return td;
   }
 
+  function renderAll() {
+    renderTiles();
+    renderChart();
+    renderTransactions();
+    renderBalanceCoverage();
+  }
+
+  renderOwnerControls();
+  document.getElementById("owner-filter").addEventListener("change", applyOwnerFilter);
+  document.getElementById("owner-select-all").addEventListener("click", function () {
+    Array.prototype.forEach.call(
+      document.querySelectorAll("#owner-filter input"),
+      function (input) { input.checked = true; }
+    );
+    applyOwnerFilter();
+  });
+  document.getElementById("owner-clear").addEventListener("click", function () {
+    Array.prototype.forEach.call(
+      document.querySelectorAll("#owner-filter input"),
+      function (input) { input.checked = false; }
+    );
+    applyOwnerFilter();
+  });
   document.getElementById("exclude-transfers").addEventListener("change", renderChart);
-  renderTiles();
-  renderChart();
-  renderTransactions();
+  renderAll();
 })();
 </script>
 </body>
@@ -696,14 +969,13 @@ def build_report_html(
     missing_count = valuation["missing_count"]
     blocking_count = valuation["cash_flow_blocking_missing_count"]
     warning = (
-        '<p class="warning" role="alert">'
+        '<p class="warning" id="valuation-warning" role="alert"'
+        f"{' hidden' if not missing_count else ''}>"
         f"{missing_count} "
         f"{'row has' if missing_count == 1 else 'rows have'} no HKD valuation. "
         f"{blocking_count} "
         f"{'row blocks' if blocking_count == 1 else 'rows block'} confirmed "
         "cash-flow totals.</p>"
-        if missing_count
-        else ""
     )
     cash_flow = valuation["cash_flow"]
     actual = cash_flow["actual"]
@@ -772,15 +1044,21 @@ def _balance_coverage_html(
             outcome = html.escape(statement["result"])
             reason = html.escape(statement.get("reason", ""))
             body.append(
-                f'<tr>{cells}<td class="outcome">{outcome}</td><td>{reason}</td></tr>'
+                f'<tr data-account-id="{html.escape(account_id, quote=True)}">'
+                f'{cells}<td class="outcome">{outcome}</td><td>{reason}</td></tr>'
             )
-    rows = (
-        "".join(body)
+    empty_state = (
+        '<tr id="balance-coverage-empty" hidden>'
+        '<td colspan="8" class="empty">'
+        "No statement sections match this owner view.</td></tr>"
         if body
-        else '<tr><td colspan="8" class="empty">No statement sections found.</td></tr>'
+        else '<tr id="balance-coverage-empty">'
+        '<td colspan="8" class="empty">No statement sections found.</td></tr>'
     )
+    rows = "".join(body) + empty_state
     return (
-        '<section class="panel rise d2" aria-label="Statement balance coverage">'
+        '<section class="panel rise d2" id="balance-coverage" '
+        'aria-label="Statement balance coverage">'
         '<div class="panel-head"><h2>Statement balance coverage</h2>'
         '<span class="hint">Evidence only; unavailable values stay hidden</span></div>'
         '<div class="panel-body table-wrap"><table class="coverage-table">'
@@ -791,22 +1069,30 @@ def _balance_coverage_html(
 
 
 def _report_row(row: dict[str, str]) -> dict[str, object]:
+    amount = _amount_value(row.get("amount_hkd", ""))
+    valuation_source = row.get("valuation_source", "")
     return {
         "date": row.get("date", ""),
         "merchant": row.get("merchant", ""),
         "category": row.get("category", ""),
         "flow_type": row.get("flow_type", "unresolved"),
-        "amount": _amount_value(row.get("amount_hkd", "")),
+        "amount": amount,
+        "posted_amount": _amount_value(row.get("posted_amount", "")),
         "original_amount": row.get("original_amount", "")
         or row.get("posted_amount", ""),
         "original_currency": row.get("original_currency", "")
         or row.get("posted_currency", ""),
-        "valuation_source": row.get("valuation_source", ""),
-        "valuation_status": row.get("valuation_status", ""),
+        "valuation_source": valuation_source,
+        "valuation_status": _report_valuation_status(
+            row.get("valuation_status", ""),
+            valuation_source,
+            amount,
+        ),
         "valuation_rate_date": row.get("valuation_rate_date", ""),
         "valuation_provider": row.get("valuation_provider", ""),
         "valuation_label": _valuation_label(row),
         "account": row.get("account", ""),
+        "account_id": row.get("account_id", ""),
         "owner": row.get("owner", ""),
         "needs_review": row.get("needs_review") == "true",
         "review_reasons": [
@@ -819,6 +1105,24 @@ def _report_row(row: dict[str, str]) -> dict[str, object]:
         "provenance_status": row.get("provenance_status", ""),
         "source_occurrence_count": row.get("source_occurrence_count", ""),
     }
+
+
+def _report_valuation_status(
+    status: str,
+    source: str,
+    amount: float | None,
+) -> str:
+    if status:
+        return status
+    if amount is None:
+        return "missing"
+    if source in {
+        "configured_dated_rate",
+        "hkma_daily_reference_rate",
+        "configured_fixed_rate",
+    }:
+        return "estimated"
+    return "actual"
 
 
 def _valuation_label(row: dict[str, str]) -> str:
