@@ -117,6 +117,42 @@ replaces existing starter files and cannot be combined with `--upgrade`.
 
 When a statement matches more than one profile (or none, as with PDFs), the import prompts you to pick the profile and offers to remember the choice in `profile_mappings.json` so future imports of similarly named files select it automatically.
 
+One parser profile can also serve several owned accounts. Save a binding for
+each filename pattern instead of copying the profile:
+
+```bash
+honeymoney profile bind justin-local \
+  --pattern 'justin-*.csv' \
+  --profile starter_csv \
+  --owner Justin \
+  --account 'starter_csv=justin_local=Justin Local Account'
+
+honeymoney profile bind franchesca-local \
+  --pattern 'franchesca-*.csv' \
+  --profile starter_csv \
+  --owner Franchesca \
+  --account 'starter_csv=franchesca_local=Franchesca Local Account'
+
+honeymoney profile bindings
+honeymoney profile bindings --json
+```
+
+Each `--account` value has the form
+`PROFILE_ACCOUNT_ID=BOUND_ACCOUNT_ID=READABLE_ACCOUNT_NAME`. Repeat it for a
+sectioned profile. For `hsbc_one_pdf`, bind `hsbc_one_hkd_savings`,
+`hsbc_one_hkd_current`, and `hsbc_one_fcy_savings` in one command. Honeymoney
+requires the full set before it saves the binding. A profile that reads account
+IDs from statement rows checks every emitted ID during import.
+
+Bindings and filename rules stay in the user-owned `profile_mappings.json`.
+The filename match selects the parser profile and binding in both prompted and
+non-prompted imports. A replacement under a new binding moves rows to the new
+owner and account identity while keeping review state and corrections when the
+source rows prove the match. During import, the bound owner takes priority over
+an owner stored in a rule or carried correction. Conflicting filename rules,
+missing account maps, and account IDs shared by two bindings fail before the
+ledger changes.
+
 ```bash
 honeymoney run
 ```
@@ -368,6 +404,7 @@ Prints or edits the active `config.json`; pass `--config PATH` to target another
 ## Structured agent commands
 
 `setup`, `run`, `import`, `status`, `report`, `config`, `profile validate`,
+`profile bind`, `profile bindings`,
 `evaluate`, `learn`, `valuation missing`, `source-data inspect`, `source-data
 resolve`, `rates import`, `rates fetch`, and fully specified one-shot `review`
 accept `--json`. JSON mode prints exactly one versioned document to stdout,
@@ -639,7 +676,8 @@ Common edits:
 - Set `categorization_memory.enabled` to `true` to reuse a conservative local
   category match from two agreeing reviewed rows. It is off by default.
 - Set `ollama.enabled` to `true` only when you want local Ollama fallback.
-- Add filename mappings in `profile_mappings.json` when automatic detection is ambiguous.
+- Use `honeymoney profile bind` to add filename mappings and owned account
+  identities without copying a parser profile or editing JSON.
 
 Profiles may set `account_type` to `bank`, `credit_card`, `investment`, or `unknown`; omission remains compatible and common payment methods are inferred. CSV/PDF column mappings may optionally expose `statement_opening_balance`, `statement_closing_balance`, and `statement_section`. Reconciliation reports whether each endpoint was found. A missing or unsafe endpoint keeps the balance status `unavailable` and produces no calculated balance or difference.
 

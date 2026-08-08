@@ -21,6 +21,17 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from honeymoney import importers, normalization
+from honeymoney.account_bindings import (
+    binding_views,
+    canonical_bound_owners,
+    enforce_bound_owners,
+    upsert_binding,
+    validate_bindings_for_profiles,
+    validate_profile_mappings,
+)
+from honeymoney.account_bindings import (
+    profile_id as account_binding_profile_id,
+)
 from honeymoney.categorization_memory import (
     apply_local_categorization_memory,
     build_local_categorization_memory,
@@ -413,6 +424,7 @@ def _run_pipeline(
     input_files = importers._discover_input_files(input_path)
     profiles = importers._load_profiles(config)
     profile_mappings = importers._load_profile_mappings(config)
+    validate_bindings_for_profiles(profile_mappings, profiles)
     expected_generation, identity_state = _load_configured_identity_generation(
         categorized_path,
         config,
@@ -584,6 +596,11 @@ def _run_pipeline(
             prior_overlap_manifest,
         )
         ledger_rows = overlap_result.rows
+    bound_owner_updates = canonical_bound_owners(
+        source_rows,
+        overlap_result.diagnostic["groups"],
+        profile_mappings,
+    )
     if not has_processed_source:
         ledger_rows = [dict(row) for row in identity_state.rows]
     incoming_occurrence_ids = {row["transaction_id"] for row in source_transactions}
@@ -680,6 +697,14 @@ def _run_pipeline(
             print(f"Warning: {warning}", file=sys.stderr)
     _status.update("Applying corrections...")
     apply_corrections(transactions, canonical_corrections)
+    enforce_bound_owners(transactions, bound_owner_updates)
+    for transaction_id, owner in bound_owner_updates.items():
+        correction = canonical_corrections.get(transaction_id)
+        if correction is None or "owner" not in correction:
+            continue
+        correction["owner"] = owner
+        corrections.setdefault(transaction_id, {})["owner"] = owner
+        migration_correction_updates.setdefault(transaction_id, {})["owner"] = owner
     apply_history_ambiguity(
         ledger_rows,
         tuple(
@@ -985,6 +1010,8 @@ Commands:
   honeymoney review pair ID ID --yes
                                    Confirm one same-account cash-movement pair
   honeymoney profile validate ... Validate a profile and optionally preview input
+  honeymoney profile bind ID ... Save a filename-to-account binding
+  honeymoney profile bindings    List saved account bindings
   honeymoney evaluate LEDGER --reference CORRECTIONS
                                    Report category coverage and exact accuracy
   honeymoney learn [--yes]          Build exact rules from active reviews
@@ -2739,6 +2766,10 @@ def _import_command(argv: list[str]) -> int:
 
 
 def _profile_command(argv: list[str]) -> int:
+    if argv and argv[0] == "bind":
+        return _profile_bind_command(argv[1:])
+    if argv and argv[0] == "bindings":
+        return _profile_bindings_command(argv[1:])
     parser = _command_parser(
         argv,
         prog="honeymoney profile",
@@ -2830,6 +2861,136 @@ def _profile_command(argv: list[str]) -> int:
             )
         for warning in warnings:
             print(f"Warning: {warning}", file=sys.stderr)
+    return 0
+
+
+def _profile_bind_command(argv: list[str]) -> int:
+    parser = _command_parser(
+        argv,
+        prog="honeymoney profile bind",
+        description="Bind matching statement files to owned account identities.",
+    )
+    parser.add_argument("binding_id", metavar="ID")
+    parser.add_argument("--pattern", required=True)
+    parser.add_argument("--profile", required=True, dest="profile_id")
+    parser.add_argument("--owner", required=True)
+    parser.add_argument(
+        "--account",
+        action="append",
+        required=True,
+        metavar="SOURCE_ID=ACCOUNT_ID=ACCOUNT_NAME",
+    )
+    parser.add_argument("--config", dest="config_path")
+    parser.add_argument("--json", action="store_true")
+    args = parser.parse_args(argv)
+
+    for field, value in (
+        ("binding id", args.binding_id),
+        ("filename pattern", args.pattern),
+        ("profile id", args.profile_id),
+        ("owner", args.owner),
+    ):
+        if not value.strip():
+            raise ValueError(f"Account {field} must be a non-empty string")
+
+    binding_id = args.binding_id.strip()
+    pattern = args.pattern.strip()
+    selected_profile_id = args.profile_id.strip()
+    owner = args.owner.strip()
+
+    accounts = [_parse_bound_account(value) for value in args.account]
+    config = _load_config_read_only(args.config_path)
+    profiles = importers._load_profiles(config)
+    if selected_profile_id not in {
+        account_binding_profile_id(profile) for profile in profiles
+    }:
+        raise ValueError(f"Unknown profile for account binding: {selected_profile_id}")
+    mappings = importers._load_profile_mappings(config)
+    binding = {
+        "id": binding_id,
+        "profile": selected_profile_id,
+        "owner": owner,
+        "accounts": accounts,
+    }
+    next_mappings = upsert_binding(mappings, binding, pattern)
+    validate_profile_mappings(next_mappings, config)
+    validate_bindings_for_profiles(next_mappings, profiles)
+
+    mapping_value = config.get("profile_mappings")
+    if not isinstance(mapping_value, str) or not mapping_value.strip():
+        raise ValueError("Config must define a profile_mappings JSON path")
+    mapping_path = Path(mapping_value)
+    ensure_private_directory(mapping_path.parent)
+    private_atomic_write_text(
+        mapping_path,
+        json.dumps(next_mappings, indent=2, sort_keys=True) + "\n",
+    )
+    view = next(
+        item for item in binding_views(next_mappings) if item.get("id") == binding_id
+    )
+    if args.json:
+        _emit_json(
+            "profile.bind",
+            "success",
+            data={"binding": view},
+            artifacts={"profile_mappings_json": str(mapping_path)},
+        )
+    else:
+        print(
+            f"Saved account binding {binding_id} for {pattern} "
+            f"using profile {selected_profile_id}."
+        )
+    return 0
+
+
+def _parse_bound_account(value: str) -> dict[str, str]:
+    parts = value.split("=", 2)
+    if len(parts) != 3 or any(not part.strip() for part in parts):
+        raise ValueError(
+            "--account must use SOURCE_ID=ACCOUNT_ID=ACCOUNT_NAME with no empty field"
+        )
+    return {
+        "source_account_id": parts[0].strip(),
+        "account_id": parts[1].strip(),
+        "account": parts[2].strip(),
+    }
+
+
+def _profile_bindings_command(argv: list[str]) -> int:
+    parser = _command_parser(
+        argv,
+        prog="honeymoney profile bindings",
+        description="List saved statement account bindings.",
+    )
+    parser.add_argument("--config", dest="config_path")
+    parser.add_argument("--json", action="store_true")
+    args = parser.parse_args(argv)
+    config = _load_config_read_only(args.config_path)
+    profiles = importers._load_profiles(config)
+    mappings = importers._load_profile_mappings(config)
+    validate_bindings_for_profiles(mappings, profiles)
+    views = binding_views(mappings)
+    if args.json:
+        _emit_json(
+            "profile.bindings",
+            "success",
+            data={"binding_count": len(views), "bindings": views},
+        )
+        return 0
+    if not views:
+        print("No account bindings are saved.")
+        return 0
+    for binding in views:
+        patterns = ", ".join(str(item) for item in binding["patterns"])
+        print(
+            f"{binding['id']}: profile={binding['profile']} owner={binding['owner']} "
+            f"patterns={patterns}"
+        )
+        for account in binding["accounts"]:
+            print(
+                f"  {account['source_account_id']} -> {account['account_id']} "
+                f"({account['account']})"
+            )
     return 0
 
 
@@ -5308,7 +5469,11 @@ def _write_starter_workspace(root: Path, force: bool) -> None:
 
     for path, content in profile_documents.items():
         _write_text_file(path, content, force)
-    _write_json_file(profile_mappings_path, {"filename_patterns": []}, force)
+    _write_json_file(
+        profile_mappings_path,
+        {"account_bindings": [], "filename_patterns": []},
+        force,
+    )
     _write_json_file(rules_path, _starter_rules(), force)
     _write_text_file(
         corrections_path,
@@ -5773,6 +5938,10 @@ def _identity_error_details(error: IdentityError) -> dict[str, Any]:
 
 
 def _json_error_command(argv: list[str]) -> str:
+    if len(argv) > 1 and argv[:2] == ["profile", "bind"]:
+        return "profile.bind"
+    if len(argv) > 1 and argv[:2] == ["profile", "bindings"]:
+        return "profile.bindings"
     if len(argv) > 1 and argv[:2] == ["profile", "validate"]:
         return "profile.validate"
     if len(argv) > 1 and argv[:2] == ["duplicates", "resolve"]:

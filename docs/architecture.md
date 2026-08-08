@@ -91,6 +91,15 @@ the cache and revalued ledger through that boundary.
 Before the first ledger exists, a rate-only import uses the future ledger path
 as its coordination lock. Rate-cache and ledger recovery share that lock.
 
+Bundled profiles define statement parsing. User-owned account bindings in
+`profile_mappings.json` map each filename pattern and emitted profile account
+ID to an owner, unique account ID, and display name. A filename match selects
+the profile and binding together. Sectioned profiles require a map for every
+declared account; profiles with row-supplied account IDs check every emitted
+ID. Binding validation rejects incomplete maps, conflicting filename matches,
+and target account IDs shared by distinct bindings before a ledger write. The
+pipeline restores the bound owner after rules and corrections run.
+
 Each operation writes and flushes complete staged files and prior-file backups
 before replacing any public path. Non-ledger artifacts are replaced first and
 `categorized.csv` last; that final ledger replacement is the generation commit
@@ -358,6 +367,8 @@ changing it.
   JSON output.
 - `honeymoney/importers.py`: input discovery, profile validation and selection,
   CSV/PDF parsing, parser locators, and private source identity inputs.
+- `honeymoney/account_bindings.py`: user-owned filename bindings, complete
+  emitted-account maps, owner/account overrides, and collision checks.
 - `honeymoney/normalization.py`: pure row/date/amount/text normalization and
   compatibility helpers.
 - `honeymoney/overlap.py`: canonical multiset slots, membership-bound duplicate
