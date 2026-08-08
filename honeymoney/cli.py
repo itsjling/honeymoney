@@ -2909,13 +2909,13 @@ def _profile_bind_command(argv: list[str]) -> int:
     owner = args.owner.strip()
 
     accounts = [_parse_bound_account(value) for value in args.account]
-    config = _load_config_read_only(args.config_path)
-    profiles = importers._load_profiles(config)
+    config, profiles, mappings, mapping_path = _load_account_binding_edit(
+        args.config_path
+    )
     if selected_profile_id not in {
         account_binding_profile_id(profile) for profile in profiles
     }:
         raise ValueError(f"Unknown profile for account binding: {selected_profile_id}")
-    mappings = importers._load_profile_mappings(config)
     binding = {
         "id": binding_id,
         "profile": selected_profile_id,
@@ -2923,17 +2923,12 @@ def _profile_bind_command(argv: list[str]) -> int:
         "accounts": accounts,
     }
     next_mappings = upsert_binding(mappings, binding, pattern)
-    validate_profile_mappings(next_mappings, config)
-    validate_bindings_for_profiles(next_mappings, profiles)
-
-    mapping_value = config.get("profile_mappings")
-    if not isinstance(mapping_value, str) or not mapping_value.strip():
-        raise ValueError("Config must define a profile_mappings JSON path")
-    mapping_path = Path(mapping_value)
-    ensure_private_directory(mapping_path.parent)
-    private_atomic_write_text(
-        mapping_path,
-        json.dumps(next_mappings, indent=2, sort_keys=True) + "\n",
+    _publish_account_binding_edit(
+        next_mappings,
+        config=config,
+        profiles=profiles,
+        mapping_path=mapping_path,
+        changed=True,
     )
     view = next(
         item for item in binding_views(next_mappings) if item.get("id") == binding_id
@@ -2966,6 +2961,38 @@ def _parse_bound_account(value: str) -> dict[str, str]:
     }
 
 
+def _load_account_binding_edit(
+    config_path: str | None,
+) -> tuple[dict[str, Any], list[dict[str, Any]], dict[str, Any], Path]:
+    config = _load_config_read_only(config_path)
+    profiles = importers._load_profiles(config)
+    mappings = importers._load_profile_mappings(config)
+    validate_bindings_for_profiles(mappings, profiles)
+    mapping_value = config.get("profile_mappings")
+    if not isinstance(mapping_value, str) or not mapping_value.strip():
+        raise ValueError("Config must define a profile_mappings JSON path")
+    return config, profiles, mappings, Path(mapping_value)
+
+
+def _publish_account_binding_edit(
+    mappings: dict[str, Any],
+    *,
+    config: dict[str, Any],
+    profiles: list[dict[str, Any]],
+    mapping_path: Path,
+    changed: bool,
+) -> None:
+    validate_profile_mappings(mappings, config)
+    validate_bindings_for_profiles(mappings, profiles)
+    if not changed:
+        return
+    ensure_private_directory(mapping_path.parent)
+    private_atomic_write_text(
+        mapping_path,
+        json.dumps(mappings, indent=2, sort_keys=True) + "\n",
+    )
+
+
 def _profile_replace_pattern_command(argv: list[str]) -> int:
     parser = _command_parser(
         argv,
@@ -2989,31 +3016,25 @@ def _profile_replace_pattern_command(argv: list[str]) -> int:
     binding_id = args.binding_id.strip()
     old_pattern = args.old_pattern.strip()
     new_pattern = args.new_pattern.strip()
-    config = _load_config_read_only(args.config_path)
-    profiles = importers._load_profiles(config)
-    mappings = importers._load_profile_mappings(config)
-    validate_bindings_for_profiles(mappings, profiles)
+    config, profiles, mappings, mapping_path = _load_account_binding_edit(
+        args.config_path
+    )
     next_mappings, changed = replace_binding_pattern(
         mappings,
         binding_id,
         old_pattern,
         new_pattern,
     )
-    validate_profile_mappings(next_mappings, config)
-    validate_bindings_for_profiles(next_mappings, profiles)
+    _publish_account_binding_edit(
+        next_mappings,
+        config=config,
+        profiles=profiles,
+        mapping_path=mapping_path,
+        changed=changed,
+    )
     binding = next(
         item for item in binding_views(next_mappings) if item.get("id") == binding_id
     )
-    mapping_value = config.get("profile_mappings")
-    if not isinstance(mapping_value, str) or not mapping_value.strip():
-        raise ValueError("Config must define a profile_mappings JSON path")
-    mapping_path = Path(mapping_value)
-    if changed:
-        ensure_private_directory(mapping_path.parent)
-        private_atomic_write_text(
-            mapping_path,
-            json.dumps(next_mappings, indent=2, sort_keys=True) + "\n",
-        )
     data = {
         "binding_id": binding_id,
         "changed": changed,
@@ -3063,28 +3084,22 @@ def _profile_remove_pattern_command(argv: list[str]) -> int:
 
     binding_id = args.binding_id.strip()
     pattern = args.pattern.strip()
-    config = _load_config_read_only(args.config_path)
-    profiles = importers._load_profiles(config)
-    mappings = importers._load_profile_mappings(config)
-    validate_bindings_for_profiles(mappings, profiles)
+    config, profiles, mappings, mapping_path = _load_account_binding_edit(
+        args.config_path
+    )
     next_mappings, changed, binding_removed, selected_profile = remove_binding_pattern(
         mappings,
         binding_id,
         pattern,
         confirm_final=args.yes,
     )
-    validate_profile_mappings(next_mappings, config)
-    validate_bindings_for_profiles(next_mappings, profiles)
-    mapping_value = config.get("profile_mappings")
-    if not isinstance(mapping_value, str) or not mapping_value.strip():
-        raise ValueError("Config must define a profile_mappings JSON path")
-    mapping_path = Path(mapping_value)
-    if changed:
-        ensure_private_directory(mapping_path.parent)
-        private_atomic_write_text(
-            mapping_path,
-            json.dumps(next_mappings, indent=2, sort_keys=True) + "\n",
-        )
+    _publish_account_binding_edit(
+        next_mappings,
+        config=config,
+        profiles=profiles,
+        mapping_path=mapping_path,
+        changed=changed,
+    )
     data = {
         "binding_id": binding_id,
         "binding_removed": binding_removed,

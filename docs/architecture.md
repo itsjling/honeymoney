@@ -101,7 +101,7 @@ and target account IDs shared by distinct bindings before a ledger write. The
 pipeline restores the bound owner after rules and corrections run.
 Pattern replacement and removal validate the full mapping and profile set
 before one atomic mapping-file write. Removing a binding's final pattern also
-removes that binding. Small value-free removal receipts make exact command
+removes that binding. Small value-free edit receipts make exact command
 retries idempotent without retaining owner or account maps.
 
 Each operation writes and flushes complete staged files and prior-file backups

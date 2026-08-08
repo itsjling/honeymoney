@@ -355,6 +355,17 @@ class AccountBindingWorkflowTest(unittest.TestCase):
                     }
                 ],
             )
+            self.assertEqual(
+                after["replaced_filename_patterns"],
+                [
+                    {
+                        "binding": "justin-local",
+                        "new_pattern": "justin-new-*.csv",
+                        "old_pattern": "justin-old-*.csv",
+                        "profile": "starter_csv",
+                    }
+                ],
+            )
 
             written_inode = mappings_path.stat().st_ino
             written_bytes = mappings_path.read_bytes()
@@ -501,6 +512,64 @@ class AccountBindingWorkflowTest(unittest.TestCase):
             self.assertEqual(mappings_path.stat().st_ino, written_inode)
             self.assertEqual(mappings_path.read_bytes(), written_bytes)
 
+    def test_recreating_a_binding_invalidates_its_removal_replay_receipt(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_root:
+            root = self._setup_workspace(temporary_root)
+            removed_pattern = "justin-old-*.csv"
+            first = self._bind(
+                root,
+                "justin-local",
+                removed_pattern,
+                "Justin",
+                "justin_local",
+                "Justin Local Account",
+            )
+            self.assertEqual(first.returncode, 0, first.stderr)
+            removed = self._run_cli(
+                [
+                    "profile",
+                    "remove-pattern",
+                    "justin-local",
+                    "--pattern",
+                    removed_pattern,
+                    "--yes",
+                    "--json",
+                ],
+                cwd=root,
+            )
+            self.assertEqual(removed.returncode, 0, removed.stderr)
+            recreated = self._bind(
+                root,
+                "justin-local",
+                "justin-new-*.csv",
+                "Justin",
+                "justin_local",
+                "Justin Local Account",
+            )
+            self.assertEqual(recreated.returncode, 0, recreated.stderr)
+            mappings_path = root / "profile_mappings.json"
+            before = mappings_path.read_bytes()
+
+            stale_replay = self._run_cli(
+                [
+                    "profile",
+                    "remove-pattern",
+                    "justin-local",
+                    "--pattern",
+                    removed_pattern,
+                    "--json",
+                ],
+                cwd=root,
+            )
+
+            self.assertEqual(stale_replay.returncode, 2, stale_replay.stderr)
+            self.assertEqual(
+                json.loads(stale_replay.stdout)["errors"][0]["message"],
+                "Account binding justin-local does not use filename pattern "
+                f"{removed_pattern}",
+            )
+            self.assertEqual(mappings_path.read_bytes(), before)
+
     def test_pattern_edits_reject_missing_targets_and_conflicts_without_writing(
         self,
     ) -> None:
@@ -546,6 +615,27 @@ class AccountBindingWorkflowTest(unittest.TestCase):
             self.assertEqual(
                 missing_binding_payload["errors"][0]["message"],
                 "Unknown account binding: missing-binding",
+            )
+            self.assertEqual(mappings_path.read_bytes(), before)
+
+            unproved_replay = self._run_cli(
+                [
+                    "profile",
+                    "replace-pattern",
+                    "justin-local",
+                    "--old-pattern",
+                    "never-used-*.csv",
+                    "--new-pattern",
+                    "justin-*.csv",
+                    "--json",
+                ],
+                cwd=root,
+            )
+            self.assertEqual(unproved_replay.returncode, 2, unproved_replay.stderr)
+            self.assertEqual(
+                json.loads(unproved_replay.stdout)["errors"][0]["message"],
+                "Account binding justin-local does not use filename pattern "
+                "never-used-*.csv",
             )
             self.assertEqual(mappings_path.read_bytes(), before)
 
