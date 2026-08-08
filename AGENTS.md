@@ -56,6 +56,22 @@ during implementation, followed by `./scripts/check.sh` once at the end.
 - A change is done when focused tests and `./scripts/check.sh` pass, relevant
   docs are updated, and the diff contains no private data.
 
+## Agent skills
+
+### Issue tracker
+
+Issues and specs live in GitHub for `itsjling/honeymoney`. See
+`docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+The repo uses the five default triage labels. See
+`docs/agents/triage-labels.md`.
+
+### Domain docs
+
+This repo uses a single-context layout. See `docs/agents/domain.md`.
+
 ## Issue-to-PR workflow
 
 Issues and PRDs live in GitHub for `itsjling/honeymoney`; see
