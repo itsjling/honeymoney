@@ -22,7 +22,6 @@ from honeymoney.identity import (
 from honeymoney.overlap_contracts import (
     DuplicateGroupListing,
     DuplicateOccurrenceEvidence,
-    LegacyOverlapManifest,
     OverlapDecision,
     OverlapDiagnostic,
     OverlapGroup,
@@ -31,6 +30,7 @@ from honeymoney.overlap_contracts import (
     OverlapMembership,
     OverlapProvenanceStatus,
     OverlapSlot,
+    OverlapSupportPool,
     OverlapWarning,
 )
 from honeymoney.reconciliation import derive_flow_type
@@ -44,7 +44,7 @@ from honeymoney.review_state import (
 from honeymoney.schema import CATEGORIZED_COLUMNS
 from honeymoney.valuation import VALUATION_SOURCE_MATCHED_EXCHANGE
 
-OVERLAP_MANIFEST_SCHEMA_VERSION = 2
+OVERLAP_MANIFEST_SCHEMA_VERSION = 3
 OVERLAP_MANIFEST_NAME = ".honeymoney-overlap-manifest.json"
 SOURCE_OCCURRENCES_NAME = ".honeymoney-source-occurrences.csv"
 
@@ -75,6 +75,8 @@ _REVIEW_GROUP_RE = re.compile(r"^ovr_[0-9a-f]{64}$")
 _MEMBERSHIP_RE = re.compile(r"^ovm_[0-9a-f]{64}$")
 _TRANSACTION_RE = re.compile(r"^txn_[0-9a-f]{32}$")
 _FINGERPRINT_RE = re.compile(r"^fp_[0-9a-f]{64}$")
+_SOURCE_ID_RE = re.compile(r"^src_[0-9a-f]{64}$")
+_SOURCE_RECORD_ID_RE = re.compile(r"^rec_[0-9a-f]{64}$")
 
 _SOURCE_ID_FIELDS = (
     "source_id",
@@ -211,30 +213,18 @@ def overlap_manifest_document(manifest: Mapping[str, object]) -> str:
     )
 
 
-def parse_overlap_manifest(document: str) -> OverlapManifest | LegacyOverlapManifest:
+def parse_overlap_manifest(document: str) -> OverlapManifest:
     try:
         value = json.loads(document)
     except (TypeError, json.JSONDecodeError) as error:
         raise ValueError("overlap_manifest_invalid") from error
     if not isinstance(value, dict):
         raise ValueError("overlap_manifest_invalid")
-    if value.get("schema_version") == 1:
-        _validate_v1_manifest(value)
-        canonical = (
-            json.dumps(
-                value,
-                ensure_ascii=False,
-                separators=(",", ":"),
-                sort_keys=True,
-            )
-            + "\n"
-        )
-    else:
-        _validate_manifest(value)
-        canonical = overlap_manifest_document(value)
+    _validate_manifest(value)
+    canonical = overlap_manifest_document(value)
     if canonical != document:
         raise ValueError("overlap_manifest_invalid")
-    return cast(OverlapManifest | LegacyOverlapManifest, value)
+    return cast(OverlapManifest, value)
 
 
 def validate_overlap_agreement(
@@ -244,6 +234,7 @@ def validate_overlap_agreement(
 ) -> None:
     """Require canonical rows to equal the manifest's active multiset slots."""
     expected = canonicalize_overlaps(source_occurrences, canonical_rows, manifest)
+    namespace_key = expected.manifest["namespace_key"]
     if expected.manifest != manifest:
         raise ValueError("overlap_manifest_invalid")
     expected_by_id = {row["transaction_id"]: row for row in expected.rows}
@@ -293,9 +284,11 @@ def validate_overlap_agreement(
             for group in manifest["groups"]
             if group["overlap_group_id"] == actual["canonical_group_id"]
         )
-        if record_fingerprint(actual) != group_fingerprint:
+        if overlap_record_fingerprint(namespace_key, actual) != group_fingerprint:
             raise ValueError("overlap_manifest_invalid")
-        _validate_canonical_amount_hkd(actual, source_occurrences, group_fingerprint)
+        _validate_canonical_amount_hkd(
+            actual, source_occurrences, group_fingerprint, namespace_key
+        )
 
 
 def project_corrections(
@@ -746,6 +739,13 @@ def resolve_duplicate_group(
         item for item in group["memberships"] if item["group_id"] == review_group_id
     )
     membership["resolution"] = decision
+    active_count = (
+        diagnostic["same_event_count"]
+        if decision == "same-event"
+        else diagnostic["keep_all_count"]
+    )
+    for slot in group["slots"]:
+        slot["state"] = "active" if slot["slot"] <= active_count else "retired"
     resolved = canonicalize_overlaps(source_occurrences, current.rows, manifest)
     for row in resolved.rows:
         correction = corrections.get(row["transaction_id"])
@@ -787,7 +787,7 @@ def canonicalize_overlaps(
                 }
             )
             continue
-        fingerprint = record_fingerprint(occurrence)
+        fingerprint = overlap_record_fingerprint(namespace_key, occurrence)
         buckets.setdefault(fingerprint, []).append(occurrence)
 
     prior_groups = {
@@ -822,7 +822,8 @@ def canonicalize_overlaps(
     for fingerprint in fingerprints:
         bucket = buckets.get(fingerprint, [])
         source_pools = _source_pools(bucket)
-        source_counts = sorted(len(pool) for pool in source_pools)
+        support_pools = _support_pools(source_pools)
+        source_counts = sorted(len(pool["source_record_ids"]) for pool in support_pools)
         keep_all_count = max(source_counts, default=0)
         same_event_count = (
             source_counts[-2] if len(source_counts) >= 2 else keep_all_count
@@ -848,8 +849,7 @@ def canonicalize_overlaps(
         ]
         membership_digest = _membership_digest(
             namespace_key,
-            bucket,
-            source_pools,
+            support_pools,
             slot_identifiers[:keep_all_count],
             slot_identifiers[same_event_count:keep_all_count],
         )
@@ -903,12 +903,18 @@ def canonicalize_overlaps(
                     "slot": slot_number,
                     "transaction_id": identifier,
                     "state": "active" if slot_number <= active_count else "retired",
+                    "supporting_source_ids": [
+                        pool["source_id"]
+                        for pool in support_pools
+                        if len(pool["source_record_ids"]) >= slot_number
+                    ],
                 }
             )
         next_groups.append(
             {
                 "overlap_group_id": group_id,
                 "record_fingerprint": fingerprint,
+                "support_pools": support_pools,
                 "memberships": memberships,
                 "slots": slots,
             }
@@ -1035,8 +1041,28 @@ def _source_pools(
         sorted(rows, key=lambda row: str(row["transaction_id"]))
         for rows in by_source.values()
     ]
-    pools.sort(key=lambda pool: str(pool[0]["transaction_id"]))
+    pools.sort(key=lambda pool: str(pool[0]["source_id"]))
     return pools
+
+
+def _support_pools(
+    source_pools: Sequence[Sequence[Mapping[str, object]]],
+) -> list[OverlapSupportPool]:
+    """Return exact active source-record pools without matching repeats to slots."""
+    support_pools: list[OverlapSupportPool] = []
+    for source_pool in source_pools:
+        if not source_pool:
+            continue
+        support_pools.append(
+            {
+                "source_id": str(source_pool[0]["source_id"]),
+                "source_record_ids": sorted(
+                    str(row["source_record_id"]) for row in source_pool
+                ),
+            }
+        )
+    support_pools.sort(key=lambda pool: pool["source_id"])
+    return support_pools
 
 
 def _prior_group_has_resolved_review(
@@ -1239,6 +1265,7 @@ def _validate_canonical_amount_hkd(
     canonical_row: Mapping[str, object],
     source_occurrences: Sequence[Mapping[str, object]],
     group_fingerprint: str,
+    namespace_key: str | None = None,
 ) -> None:
     """Require each canonical total to match its active source evidence."""
     try:
@@ -1246,7 +1273,12 @@ def _validate_canonical_amount_hkd(
             normalized_decimal(row.get("amount_hkd", ""))
             for row in source_occurrences
             if has_stable_v2_identity(row)
-            and record_fingerprint(row) == group_fingerprint
+            and (
+                overlap_record_fingerprint(namespace_key, row)
+                if namespace_key is not None
+                else record_fingerprint(row)
+            )
+            == group_fingerprint
         }
         canonical_amount = normalized_decimal(canonical_row.get("amount_hkd", ""))
     except IdentityError as error:
@@ -1265,7 +1297,12 @@ def _validate_canonical_amount_hkd(
             }
             for row in source_occurrences
             if has_stable_v2_identity(row)
-            and record_fingerprint(row) == group_fingerprint
+            and (
+                overlap_record_fingerprint(namespace_key, row)
+                if namespace_key is not None
+                else record_fingerprint(row)
+            )
+            == group_fingerprint
         )
     )
     if not matched_exchange and (
@@ -1277,6 +1314,16 @@ def _validate_canonical_amount_hkd(
 def _group_id(namespace_key: str, fingerprint: str) -> str:
     return "ovg_" + _keyed_digest(
         namespace_key, "canonical-overlap-group-v1", fingerprint.encode("ascii")
+    )
+
+
+def overlap_record_fingerprint(namespace_key: str, row: Mapping[str, object]) -> str:
+    """Return overlap evidence scoped to one workspace namespace."""
+    raw = record_fingerprint(row)
+    return "fp_" + _keyed_digest(
+        namespace_key,
+        "record-fingerprint-evidence-v1",
+        raw.encode("ascii"),
     )
 
 
@@ -1294,20 +1341,24 @@ def _canonical_transaction_id(namespace_key: str, group_id: str, slot: int) -> s
 
 def _membership_digest(
     namespace_key: str,
-    bucket: list[Mapping[str, object]],
-    source_pools: list[list[Mapping[str, object]]],
+    support_pools: Sequence[Mapping[str, object]],
     canonical_slot_ids: list[str],
     ambiguous_tail_ids: list[str],
 ) -> str:
     members = sorted(
         (
-            str(row["source_id"]),
-            str(row["source_record_id"]),
+            str(pool["source_id"]),
+            str(source_record_id),
         )
-        for row in bucket
+        for pool in support_pools
+        for source_record_id in cast(Sequence[object], pool["source_record_ids"])
     )
     source_counts = sorted(
-        (str(pool[0]["source_id"]), len(pool)) for pool in source_pools if pool
+        (
+            str(pool["source_id"]),
+            len(cast(Sequence[object], pool["source_record_ids"])),
+        )
+        for pool in support_pools
     )
     components = [
         b"active-source-record-membership-v1",
@@ -1361,22 +1412,6 @@ def _keyed_digest(namespace_key: str, domain: str, *components: bytes) -> str:
 
 def _validated_manifest_copy(manifest: Mapping[str, object]) -> OverlapManifest:
     copied = copy.deepcopy(dict(manifest))
-    if copied.get("schema_version") == 1:
-        _validate_v1_manifest(copied)
-        legacy = cast(LegacyOverlapManifest, copied)
-        return {
-            "schema_version": OVERLAP_MANIFEST_SCHEMA_VERSION,
-            "namespace_key": legacy["namespace_key"],
-            "groups": [
-                {
-                    "overlap_group_id": group["group_id"],
-                    "record_fingerprint": group["record_fingerprint"],
-                    "memberships": [],
-                    "slots": group["slots"],
-                }
-                for group in legacy["groups"]
-            ],
-        }
     _validate_manifest(copied)
     return cast(OverlapManifest, copied)
 
@@ -1399,10 +1434,12 @@ def _validate_manifest(manifest: Mapping[str, object]) -> None:
     seen_transactions: set[str] = set()
     seen_fingerprints: set[str] = set()
     seen_review_groups: set[str] = set()
+    seen_source_record_ids: set[str] = set()
     for group in groups:
         if not isinstance(group, dict) or set(group) != {
             "overlap_group_id",
             "record_fingerprint",
+            "support_pools",
             "memberships",
             "slots",
         }:
@@ -1421,6 +1458,33 @@ def _validate_manifest(manifest: Mapping[str, object]) -> None:
             raise ValueError("overlap_manifest_invalid")
         prior_group = overlap_group_id
         seen_fingerprints.add(fingerprint)
+        support_pools = group.get("support_pools")
+        if not isinstance(support_pools, list):
+            raise ValueError("overlap_manifest_invalid")
+        prior_source_id = ""
+        for support_pool in support_pools:
+            if (
+                not isinstance(support_pool, dict)
+                or set(support_pool) != {"source_id", "source_record_ids"}
+                or not isinstance(support_pool.get("source_id"), str)
+                or _SOURCE_ID_RE.fullmatch(support_pool["source_id"]) is None
+                or support_pool["source_id"] <= prior_source_id
+                or not isinstance(support_pool.get("source_record_ids"), list)
+                or not support_pool["source_record_ids"]
+            ):
+                raise ValueError("overlap_manifest_invalid")
+            prior_source_id = support_pool["source_id"]
+            prior_source_record_id = ""
+            for source_record_id in support_pool["source_record_ids"]:
+                if (
+                    not isinstance(source_record_id, str)
+                    or _SOURCE_RECORD_ID_RE.fullmatch(source_record_id) is None
+                    or source_record_id <= prior_source_record_id
+                    or source_record_id in seen_source_record_ids
+                ):
+                    raise ValueError("overlap_manifest_invalid")
+                prior_source_record_id = source_record_id
+                seen_source_record_ids.add(source_record_id)
         memberships = group.get("memberships")
         if not isinstance(memberships, list):
             raise ValueError("overlap_manifest_invalid")
@@ -1457,12 +1521,55 @@ def _validate_manifest(manifest: Mapping[str, object]) -> None:
         slots = group.get("slots")
         if not isinstance(slots, list):
             raise ValueError("overlap_manifest_invalid")
+        max_support_count = max(
+            (len(pool["source_record_ids"]) for pool in support_pools), default=0
+        )
+        if len(slots) < max_support_count:
+            raise ValueError("overlap_manifest_invalid")
+        current_membership: OverlapMembership | None = None
+        source_counts = sorted(len(pool["source_record_ids"]) for pool in support_pools)
+        keep_all_count = max(source_counts, default=0)
+        same_event_count = (
+            source_counts[-2] if len(source_counts) >= 2 else keep_all_count
+        )
+        if (
+            source_counts
+            and _provenance_status(source_counts) == AMBIGUOUS_COUNT_STATUS
+        ):
+            slot_ids = [
+                _canonical_transaction_id(namespace_key, overlap_group_id, slot)
+                for slot in range(1, keep_all_count + 1)
+            ]
+            digest = _membership_digest(
+                namespace_key,
+                support_pools,
+                slot_ids,
+                slot_ids[same_event_count:keep_all_count],
+            )
+            current_membership = next(
+                (
+                    cast(OverlapMembership, membership)
+                    for membership in memberships
+                    if membership["membership_digest"] == digest
+                ),
+                None,
+            )
+            if current_membership is None:
+                raise ValueError("overlap_manifest_invalid")
+        active_count = (
+            same_event_count
+            if current_membership is not None
+            and current_membership["resolution"] == "same-event"
+            else keep_all_count
+        )
         for expected_slot, slot in enumerate(slots, start=1):
             if (
                 not isinstance(slot, dict)
-                or set(slot) != {"slot", "transaction_id", "state"}
+                or set(slot)
+                != {"slot", "transaction_id", "state", "supporting_source_ids"}
                 or slot.get("slot") != expected_slot
-                or slot.get("state") not in {"active", "retired"}
+                or slot.get("state")
+                != ("active" if expected_slot <= active_count else "retired")
             ):
                 raise ValueError("overlap_manifest_invalid")
             identifier = slot.get("transaction_id")
@@ -1477,65 +1584,13 @@ def _validate_manifest(manifest: Mapping[str, object]) -> None:
             ):
                 raise ValueError("overlap_manifest_invalid")
             seen_transactions.add(identifier)
-
-
-def _validate_v1_manifest(manifest: Mapping[str, object]) -> None:
-    if set(manifest) != {"schema_version", "namespace_key", "groups"}:
-        raise ValueError("overlap_manifest_invalid")
-    namespace_key = manifest.get("namespace_key")
-    groups = manifest.get("groups")
-    if (
-        manifest.get("schema_version") != 1
-        or not isinstance(namespace_key, str)
-        or _NAMESPACE_RE.fullmatch(namespace_key) is None
-        or not isinstance(groups, list)
-    ):
-        raise ValueError("overlap_manifest_invalid")
-    prior_group = ""
-    seen_transactions: set[str] = set()
-    seen_fingerprints: set[str] = set()
-    for group in groups:
-        if not isinstance(group, dict) or set(group) != {
-            "group_id",
-            "record_fingerprint",
-            "slots",
-        }:
-            raise ValueError("overlap_manifest_invalid")
-        group_id = group.get("group_id")
-        fingerprint = group.get("record_fingerprint")
-        if (
-            not isinstance(group_id, str)
-            or _GROUP_RE.fullmatch(group_id) is None
-            or not isinstance(fingerprint, str)
-            or _FINGERPRINT_RE.fullmatch(fingerprint) is None
-            or group_id != _group_id(namespace_key, fingerprint)
-            or group_id <= prior_group
-            or fingerprint in seen_fingerprints
-        ):
-            raise ValueError("overlap_manifest_invalid")
-        prior_group = group_id
-        seen_fingerprints.add(fingerprint)
-        slots = group.get("slots")
-        if not isinstance(slots, list):
-            raise ValueError("overlap_manifest_invalid")
-        for expected_slot, slot in enumerate(slots, start=1):
-            if (
-                not isinstance(slot, dict)
-                or set(slot) != {"slot", "transaction_id", "state"}
-                or slot.get("slot") != expected_slot
-                or slot.get("state") not in {"active", "retired"}
-            ):
+            expected_supporting_source_ids = [
+                pool["source_id"]
+                for pool in support_pools
+                if len(pool["source_record_ids"]) >= expected_slot
+            ]
+            if slot.get("supporting_source_ids") != expected_supporting_source_ids:
                 raise ValueError("overlap_manifest_invalid")
-            identifier = slot.get("transaction_id")
-            if (
-                not isinstance(identifier, str)
-                or _TRANSACTION_RE.fullmatch(identifier) is None
-                or identifier
-                != _canonical_transaction_id(namespace_key, group_id, expected_slot)
-                or identifier in seen_transactions
-            ):
-                raise ValueError("overlap_manifest_invalid")
-            seen_transactions.add(identifier)
 
 
 def _safe_tail_corrections(

@@ -1,182 +1,59 @@
 # Codex setup
 
-## Local Codex
+## Environment
 
-Open the repository root so Codex loads `AGENTS.md`. Use an activated virtual
-environment when desired, then run:
+Use Python 3.14.6 in a virtual environment, then run:
 
 ```bash
 ./scripts/bootstrap.sh
 ./scripts/check.sh
 ```
 
-Set `PYTHON=/path/to/python` when Codex should use a specific interpreter.
-Bootstrap resolves the reviewed direct and transitive versions from
-`constraints/dev.txt`; CI proves that resolution on Python 3.11 and 3.13.
-Run either offline gate alone when a focused check is useful:
+The package contract is `>=3.14,<3.15`. Default tests block live non-local
+network use. Run live Ollama or HKMA checks only when the user asks.
+
+Cloud tasks may use only committed synthetic fixtures. Do not open real files
+under `samples/`, `private_samples/`, `money/`, or another local workspace in a
+cloud task. Do not put financial rows, generated views, reports, corrections,
+or live model output in prompts or logs.
+
+## Local operation
 
 ```bash
-python3 -m mypy
-./scripts/check_coverage.sh
+cd ./money
+honeymoney setup
+honeymoney import ../synthetic/may.csv
+honeymoney imports list --json
+honeymoney imports show IMPORT_ID --json
+honeymoney views rebuild --all
+honeymoney status --month 2026-05 --json
+honeymoney doctor
 ```
 
-Mypy checks the named zero-error scope in `pyproject.toml`. Never remove a
-checked file or weaken a type rule to make a change pass. New financial-core
-modules enter the scope when added. A change to an excluded module must add
-that module to the checked scope, or state why the same change cannot finish
-the conversion and file the next bounded step.
+The config directory is the workspace root. Import takes a required path; do
+not use removed `run`, `--input`, or cumulative-ledger output forms. Use a saved
+binding only for one file.
 
-The current excluded implementation modules are
-`categorization_memory.py`, `cli.py`, `identity.py`, `importers.py`,
-`ollama.py`, and `rules.py`. Their public identity and parser boundaries use
-the checked contracts in `contracts.py`,
-`identity_contracts.py`, `overlap_contracts.py`, and `parser_contracts.py`,
-plus checked stubs for the exact callable surface of `identity.py`,
-`importers.py`, and `rules.py`. The overlap planner and its duplicate decisions
-are in the strict checked scope. See `docs/quality-gates.md` for the baseline
-and seam map.
+All period-aware commands share month, range, undated, and all selectors. No
+selector means the current month. Schema version 3 uses import record,
+statement transaction, view transaction, view, and `report_html` terms.
 
-## Codex cloud
+If a command reports `full_rebuild_required`, run
+`honeymoney views rebuild --all`. If a publication journal remains, stop normal
+work, run doctor, then use `doctor --fix` only when its plan is safe. Do not
+delete hidden state by hand.
 
-Connect `itsjling/honeymoney` in Codex settings and configure an environment
-with:
+For backup, copy one complete idle workspace. Restore it into an empty path.
+For 0.2.0 cutover, keep the old package and old full workspace together and
+create a fresh workspace. See the linked storage, doctor, backup, and cutover
+docs in the README.
 
-- Python 3.11 or newer;
-- setup script: `./scripts/bootstrap.sh`;
-- maintenance script: `./scripts/bootstrap.sh`;
-- no secrets;
-- agent-phase internet access disabled.
+## Public command rules
 
-Run `./scripts/bootstrap.sh` during environment setup while package-index access
-is available. The required editable-install extras are `pdf` and `dev`
-(`.[pdf,dev]`); the bootstrap script installs both under the reviewed
-constraints. The subsequent `./scripts/check.sh` agent phase is offline: it
-uses the installed environment for Ruff, mypy, branch-covered tests,
-`pip check`, package builds, and distribution-metadata verification. Its
-default test runner rejects socket creation and non-local DNS lookup in the
-test process and child Python processes. Ollama tests inject fake transports
-rather than starting listeners. It does not perform advisory lookup.
+JSON writes one document to stdout and progress to stderr. Exit 0 means
+success, 1 means strict partial success or doctor warnings, and 2 means usage,
+validation, or blocking workspace failure.
 
-Maintainers can run `./scripts/dependency-health.sh` separately when network
-access is allowed. That command audits package names and versions only; it does
-not open statement files. CI keeps this online audit in its own job after the
-offline-compatible Python-version matrix succeeds.
-
-Launch cloud work manually from a decision-complete GitHub issue carrying the
-`ready-for-agent` label. Cloud tasks must use only committed synthetic fixtures;
-they must not receive real statements or live Ollama access.
-
-Live Ollama smoke and benchmark scripts remain explicit local-only commands in
-`docs/golden-datasets.md`; they are never run by test discovery or CI.
-
-## Operating Honeymoney locally
-
-JSON mode never prompts or opens a browser:
-
-```bash
-honeymoney setup --upgrade --root ./money --dry-run --json
-honeymoney setup --upgrade --root ./money --yes --json
-honeymoney import /path/to/statement.csv --config ./money/config.json --json
-honeymoney import /path/to/statement.csv --config ./money/config.json \
-  --binding SAVED_BINDING_ID --json
-honeymoney status 2026-05 --config ./money/config.json --json
-honeymoney pending 2026-05 --config ./money/config.json --json
-honeymoney report 2026-05 --config ./money/config.json --json
-honeymoney config --config ./money/config.json --json
-honeymoney config edit ollama --config ./money/config.json --model qwen3.5:4b --json
-honeymoney review --transaction TRANSACTION_ID --as income --config ./money/config.json --json
-honeymoney duplicates --config ./money/config.json --json
-honeymoney duplicates resolve GROUP_ID --as same-event \
-  --config ./money/config.json --json
-honeymoney profile validate ./money/profiles/starter_csv.json \
-  --config ./money/config.json --json
-```
-
-Every response is one JSON object with `schema_version`, `command`, `status`,
-`data`, `artifacts`, `warnings`, and `errors`. Progress and diagnostics remain
-on stderr so stdout can be parsed directly.
-
-Workspace upgrade JSON includes a privacy-safe plan. Its results are `create`,
-`update`, `unchanged`, `conflict`, or `preserved`; it never includes file
-contents or financial rows. Dry runs need no approval. A non-interactive write
-needs `--yes`. The command updates only unchanged profiles whose managed origin
-and prior digest are recorded.
-
-Schema version 2 adds typed review reasons and HKD valuation source and status.
-`pending` includes stable reason tokens and plain labels. Valuation gaps appear
-in completeness counts and do not enter the transaction-review queue by
-themselves.
-
-Import and ledger-reading commands report parsed source occurrences separately
-from canonical ledger occurrences. Read `source_occurrence_count`,
-`canonical_occurrence_count`, and `consolidated_occurrence_count`, then inspect
-`overlap.provenance_counts`, `overlap.ambiguous_group_count`, and
-`overlap.groups`. Group diagnostics contain only canonical IDs, opaque source
-occurrence ID pools, and structural counts. The old `duplicate_count`,
-`duplicate_group_count`, and `duplicate_candidates` keys remain for clients
-that have not moved to `overlap`.
-
-`honeymoney duplicates` lists only unresolved exact-overlap count mismatches.
-Its evidence stays local, bounded, and pooled. Resolve the current
-membership-bound group ID as `same-event` or `keep-all`. Repeating the same
-choice changes no files. A changed membership makes the old ID stale and puts
-the new group back in review.
-
-Validate a profile and preview one synthetic fixture without mutating the
-workspace:
-
-```bash
-honeymoney profile validate ./money/profiles/starter_csv.json \
-  --config ./money/config.json \
-  --input ./tests/fixtures/import_profiles/starter_csv/balances_ignored/input.csv \
-  --json
-```
-
-The response uses command `profile.validate`, reports `validation` or `preview`
-mode, and bounds preview rows to 10. `artifacts` is always empty. Preview output
-contains normalized local statement data. Cloud Codex tasks must use committed
-synthetic fixtures only; run previews of private statements solely in a local
-task and do not copy their rows into prompts or logs. The command is diagnostic:
-it never writes ledgers, corrections, mappings, import reports, or HTML.
-Without `--config`, validation uses `config.json` in the current directory when
-present, matching normal imports. The same loaded configuration supplies custom
-profile vocabularies, base currency, and exchange rates during preview.
-
-Apply a reviewed batch from a file:
-
-```bash
-honeymoney correct --config ./money/config.json --file corrections.json --json
-```
-
-The input is a JSON array. `transaction_id` is required; all other fields are
-optional, but each item must set at least one correction:
-
-```json
-[
-  {
-    "transaction_id": "example-id",
-    "category": "Groceries",
-    "owner": "Household",
-    "confidence": 1,
-    "reason": "Reviewed locally",
-    "needs_review": false
-  }
-]
-```
-
-Use `--file -` to read the array from stdin. The entire batch is rejected before
-any files change if an ID, field, or value is invalid. Corrections are field-wise
-patches: omitted fields keep their saved values, and omitting `needs_review`
-preserves the transaction's current review state. An explicit `"notes": ""`
-clears notes and remains a clear operation after correction reload and later
-imports. Empty or whitespace-only `category`, `flow_type`, `owner`,
-`payment_method`, `confidence`, `reason`, and `needs_review` values are invalid.
-An empty or `Unknown` category may be marked resolved only when an explicit
-accounting flow decision already exists or is included in the patch.
-
-Human one-shot review uses the same validated correction merge and atomic
-ledger/review rewrite as `correct`. `--remember --yes` is valid for safe income
-decisions and atomically adds a local exact-match rule constrained by
-institution, account identity, normalized description, and inflow direction.
-Interactive review does not support JSON because prompting and a single JSON
-stdout document are incompatible.
+Treat help text, JSON schema 3, exit codes, config fields, correction columns,
+view CSV columns, profiles, and stable finding codes as public contracts. Use
+the CLI and temporary synthetic workspaces as the main acceptance seam.

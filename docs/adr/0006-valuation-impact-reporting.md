@@ -3,6 +3,8 @@
 - Status: Accepted by the implementation request
 - Date: 2026-07-27
 - Extends: ADR 0004 and ADR 0005 valuation reporting
+- Narrowed by: ADR 0008. Summary rules remain, but they apply to selected
+  generated views after whole-workspace derivation and use JSON schema 3.
 
 ## Context
 

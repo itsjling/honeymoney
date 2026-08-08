@@ -3,6 +3,9 @@
 - Status: Accepted for an opt-in prototype
 - Date: 2026-07-13
 - Default-enable verdict: Deferred
+- Narrowed by: ADR 0008. Memory now rebuilds from ready import records, saved
+  corrections, and checked workspace-index identity, not an authoritative
+  cumulative ledger. Its evidence, matching, order, and privacy rules remain.
 
 ## Context
 

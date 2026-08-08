@@ -3,6 +3,9 @@
 - Status: Accepted by the implementation request
 - Date: 2026-07-27
 - Extends: ADR 0004 valuation order and public CSV fields
+- Narrowed by: ADR 0008. Rate validation and valuation order remain. Cache
+  changes now derive the whole workspace and publish affected views in a
+  workspace generation; the old ledger-header migration no longer applies.
 
 ## Context
 

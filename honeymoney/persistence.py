@@ -12,6 +12,7 @@ from typing import Literal, Mapping, TypedDict, TypeGuard
 from honeymoney.contracts import Config, GenerationDocuments
 from honeymoney.identity import IDENTITY_MANIFEST_NAME
 from honeymoney.overlap import OVERLAP_MANIFEST_NAME, SOURCE_OCCURRENCES_NAME
+from honeymoney.workspace_paths import existing_path_components
 
 STATE_SCHEMA_VERSION = 1
 PRIVATE_FILE_MODE = 0o600
@@ -615,15 +616,33 @@ def _private_file_mode(mode: int) -> int:
 
 
 def _resolved_write_target(path: Path) -> Path:
-    target = Path(path)
-    if target.is_symlink():
-        raise OSError(f"Refusing symbolic-link output target: {target}")
-    return target.parent.resolve() / target.name
+    target = Path(path).expanduser()
+    _reject_symlink_components(target)
+    try:
+        return target.parent.resolve() / target.name
+    except OSError as error:
+        raise OSError("Output path is unsafe.") from error
 
 
-def ensure_private_directory(path: Path) -> None:
-    """Create missing directory components with owner-only access."""
-    target = Path(path)
+def _reject_symlink_components(path: Path) -> None:
+    try:
+        unsafe = next(
+            (
+                component
+                for component in existing_path_components(path)
+                if component.is_symlink()
+            ),
+            None,
+        )
+    except OSError as error:
+        raise OSError("Output path is unsafe.") from error
+    if unsafe is not None:
+        raise OSError("Output path is unsafe.")
+
+
+def ensure_private_directory(path: Path, *, enforce_existing: bool = False) -> None:
+    """Create a safe private directory and optionally harden an existing one."""
+    target = _resolved_write_target(path)
     missing: list[Path] = []
     current = target
     while not current.exists():
@@ -636,9 +655,19 @@ def ensure_private_directory(path: Path) -> None:
             directory.mkdir(mode=PRIVATE_DIRECTORY_MODE)
         except FileExistsError:
             if directory.is_symlink() or not directory.is_dir():
-                raise OSError(f"Unsafe directory target: {directory}") from None
+                raise OSError("Directory target is unsafe.") from None
         else:
             os.chmod(directory, PRIVATE_DIRECTORY_MODE)
+    if enforce_existing:
+        os.chmod(target, PRIVATE_DIRECTORY_MODE)
+
+
+def ensure_private_file(path: Path) -> None:
+    """Set one existing regular file to owner-only access without changing bytes."""
+    target = _resolved_write_target(path)
+    if not target.exists() or not target.is_file():
+        raise OSError("File target is unsafe.")
+    _set_file_mode(target, PRIVATE_FILE_MODE)
 
 
 def private_atomic_write_text(
@@ -651,7 +680,7 @@ def private_atomic_write_text(
     target = _resolved_write_target(path)
     ensure_private_directory(target.parent)
     if target.exists() and not target.is_file():
-        raise OSError(f"Output target is not a regular file: {target}")
+        raise OSError("Output target is not a regular file.")
     if target.exists() and not overwrite:
         raise FileExistsError(target)
     mode = (
@@ -705,7 +734,7 @@ def _release_lock(path: Path) -> None:
 def _lock_owner_is_active(path: Path) -> bool:
     try:
         owner = int(path.read_text(encoding="utf-8").strip())
-    except (OSError, ValueError):
+    except OSError, ValueError:
         return False
     if owner == os.getpid():
         return True

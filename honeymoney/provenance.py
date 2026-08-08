@@ -9,10 +9,10 @@ from typing import Mapping
 from honeymoney.identity import (
     IdentityError,
     logical_locator,
-    record_fingerprint,
     source_namespace_id,
 )
 from honeymoney.identity_state import IdentityState
+from honeymoney.overlap import overlap_record_fingerprint
 from honeymoney.overlap_contracts import OverlapManifest
 
 
@@ -62,9 +62,11 @@ def build_active_provenance_index(
         }
     source_by_fingerprint: dict[str, list[dict[str, str]]] = {}
     source_by_transaction_id: dict[str, list[dict[str, str]]] = {}
+    namespace_key = manifest["namespace_key"]
     try:
         for row in source_rows:
-            source_by_fingerprint.setdefault(record_fingerprint(row), []).append(row)
+            fingerprint = overlap_record_fingerprint(namespace_key, row)
+            source_by_fingerprint.setdefault(fingerprint, []).append(row)
             source_by_transaction_id.setdefault(
                 row.get("transaction_id", ""),
                 [],

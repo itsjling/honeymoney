@@ -57,7 +57,7 @@ def _occurrence(
 
 
 class CanonicalOverlapTest(unittest.TestCase):
-    def test_v1_migration_rejects_unsorted_and_reused_manifest_entries(self) -> None:
+    def test_clean_start_rejects_prior_overlap_schemas(self) -> None:
         result = canonicalize_overlaps(
             [
                 _occurrence("1", "a", merchant="SYNTHETIC FIRST"),
@@ -66,36 +66,27 @@ class CanonicalOverlapTest(unittest.TestCase):
             [],
             empty_overlap_manifest(_NAMESPACE_KEY),
         )
-        v1 = {
-            "schema_version": 1,
+        prior = {
+            "schema_version": 2,
             "namespace_key": result.manifest["namespace_key"],
             "groups": [
                 {
-                    "group_id": group["overlap_group_id"],
+                    "overlap_group_id": group["overlap_group_id"],
                     "record_fingerprint": group["record_fingerprint"],
+                    "memberships": group["memberships"],
                     "slots": group["slots"],
                 }
                 for group in result.manifest["groups"]
             ],
         }
 
-        malformed = []
-        unsorted = copy.deepcopy(v1)
-        unsorted["groups"].reverse()
-        malformed.append(unsorted)
-        reused_fingerprint = copy.deepcopy(v1)
-        reused_fingerprint["groups"].append(
-            copy.deepcopy(reused_fingerprint["groups"][-1])
-        )
-        malformed.append(reused_fingerprint)
-        reused_transaction = copy.deepcopy(v1)
-        reused_transaction["groups"][1]["slots"][0]["transaction_id"] = (
-            reused_transaction["groups"][0]["slots"][0]["transaction_id"]
-        )
-        malformed.append(reused_transaction)
-
-        for document in malformed:
-            with self.subTest(document=document), self.assertRaises(ValueError):
+        for schema_version in (1, 2):
+            document = copy.deepcopy(prior)
+            document["schema_version"] = schema_version
+            with (
+                self.subTest(schema_version=schema_version),
+                self.assertRaises(ValueError),
+            ):
                 parse_overlap_manifest(
                     json.dumps(
                         document,
@@ -134,10 +125,10 @@ class CanonicalOverlapTest(unittest.TestCase):
         )
         self.assertEqual(
             result.manifest["groups"][0]["overlap_group_id"],
-            "ovg_5f5f4ebc1ea6bfdbfd6850cd67789f01d75526dda3adadaa5be4f7a8ccdf7eb5",
+            "ovg_234112e2a1b86c13b975d6a1d9aa34807ac8a096f2b43f8c2347de4aa04bbbde",
         )
         self.assertEqual(
-            canonical["transaction_id"], "txn_625c12709363b08f99b2645cb612fc91"
+            canonical["transaction_id"], "txn_ffad7cdc36ffffa640e27253e6987f7e"
         )
 
     def test_equal_repeated_sources_preserve_supported_multiplicity(self) -> None:
@@ -169,6 +160,58 @@ class CanonicalOverlapTest(unittest.TestCase):
         self.assertEqual(group["source_counts"], [3, 3])
         self.assertNotIn("source_id", str(result.diagnostic))
         self.assertNotIn("record_fingerprint", str(result.diagnostic))
+
+    def test_manifest_keeps_exact_unpaired_active_support(self) -> None:
+        """The index records source-record pools without choosing row pairs."""
+        occurrences = [
+            *[
+                _occurrence(str(index), "a", merchant="SYNTHETIC SUPPORT")
+                for index in range(1, 4)
+            ],
+            *[
+                _occurrence(str(index), "b", merchant="SYNTHETIC SUPPORT")
+                for index in range(4, 6)
+            ],
+            _occurrence("6", "c", merchant="SYNTHETIC SUPPORT"),
+        ]
+
+        result = canonicalize_overlaps(
+            occurrences, [], empty_overlap_manifest(_NAMESPACE_KEY)
+        )
+
+        [group] = result.manifest["groups"]
+        source_a = "src_" + "a" * 64
+        source_b = "src_" + "b" * 64
+        source_c = "src_" + "c" * 64
+        self.assertEqual(
+            group["support_pools"],
+            [
+                {
+                    "source_id": source_a,
+                    "source_record_ids": [
+                        "rec_" + character * 64 for character in "123"
+                    ],
+                },
+                {
+                    "source_id": source_b,
+                    "source_record_ids": [
+                        "rec_" + character * 64 for character in "45"
+                    ],
+                },
+                {
+                    "source_id": source_c,
+                    "source_record_ids": ["rec_" + "6" * 64],
+                },
+            ],
+        )
+        self.assertEqual(
+            [slot["supporting_source_ids"] for slot in group["slots"]],
+            [
+                [source_a, source_b, source_c],
+                [source_a, source_b],
+                [source_a],
+            ],
+        )
 
     def test_count_mismatch_keeps_maximum_and_marks_ambiguity(self) -> None:
         occurrences = [
@@ -292,6 +335,11 @@ class CanonicalOverlapTest(unittest.TestCase):
         )
         self.assertEqual(membership["resolution"], "same-event")
         self.assertRegex(membership["membership_digest"], r"^ovm_[0-9a-f]{64}$")
+        self.assertEqual(manifest_group["slots"][-1]["state"], "retired")
+        self.assertEqual(
+            manifest_group["slots"][-1]["supporting_source_ids"],
+            ["src_" + "a" * 64],
+        )
 
     def test_same_resolution_is_byte_idempotent_and_conflict_fails(self) -> None:
         occurrences = [
@@ -531,12 +579,33 @@ class CanonicalOverlapTest(unittest.TestCase):
         self.assertNotEqual(changed_group["group_id"], first_group["group_id"])
         self.assertEqual(
             first_membership["membership_digest"],
-            "ovm_714ca8c7e9462c590f454d32ccd434805c82f84f66e5caab900325dd3c3822a9",
+            "ovm_895cdb080df75667d355ff538c964572b55c203480861b53e7a6a2ba22df8591",
         )
         self.assertEqual(
             first_group["group_id"],
-            "ovr_b7c20c5ed9091bea3b85c91b57935a7fac92e5ba73b3ae24fcb92d32a3524596",
+            "ovr_b7864bcce6f6d56e600d28d27ff383fa5433c3f7fe88d13dfbb71b3d7a990240",
         )
+
+    def test_manifest_rejects_support_that_breaks_current_membership(self) -> None:
+        occurrences = [
+            *[_occurrence(str(index), "a") for index in range(1, 4)],
+            *[_occurrence(str(index), "b") for index in range(4, 6)],
+        ]
+        result = canonicalize_overlaps(
+            occurrences, [], empty_overlap_manifest(_NAMESPACE_KEY)
+        )
+        mismatched_pool = copy.deepcopy(result.manifest)
+        mismatched_pool["groups"][0]["support_pools"][0]["source_record_ids"][0] = (
+            "rec_" + "f" * 64
+        )
+        mismatched_slot = copy.deepcopy(result.manifest)
+        mismatched_slot["groups"][0]["slots"][1]["supporting_source_ids"] = [
+            "src_" + "a" * 64
+        ]
+
+        for manifest in (mismatched_pool, mismatched_slot):
+            with self.subTest(manifest=manifest), self.assertRaises(ValueError):
+                overlap_manifest_document(manifest)
 
     def test_duplicate_evidence_uses_one_amount_currency_basis(self) -> None:
         occurrences = [

@@ -8,6 +8,11 @@
   corrections
 - Related plans: 008 (stable transaction identity), 009 (stable source
   namespace)
+- Partly superseded by: ADR 0008. Digest framing, logical-source resolution,
+  record fingerprints, extractor contracts, conservative matching,
+  allocation-origin recurrence, collision checks, and privacy rules remain.
+  ADR 0008 replaces public identity columns, cumulative-ledger authority, the
+  standalone manifest, legacy migration, and ledger-last publication.
 
 ## Approval
 

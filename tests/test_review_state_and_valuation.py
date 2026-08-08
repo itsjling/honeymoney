@@ -6,10 +6,6 @@ from decimal import Decimal
 from pathlib import Path
 
 from honeymoney.classification_policy import apply_structural_classification
-from honeymoney.cli import (
-    _accounting_decision_patch,
-    _prepare_replacement_review_migration,
-)
 from honeymoney.corrections import (
     CORRECTION_COLUMNS,
     apply_corrections,
@@ -21,6 +17,7 @@ from honeymoney.identity import empty_manifest, manifest_document
 from honeymoney.identity_state import IdentityState
 from honeymoney.reconciliation import reconcile_ledger
 from honeymoney.report import build_report_html
+from honeymoney.review_operations import accounting_decision_patch
 from honeymoney.review_state import (
     REVIEW_REASON_ACCOUNTING_FLOW,
     REVIEW_REASON_CATEGORY,
@@ -84,7 +81,7 @@ class ReviewStateTest(unittest.TestCase):
             ):
                 load_corrections({"corrections": str(correction_path)})
 
-    def test_replacement_preflight_types_legacy_model_review_before_rows_change(
+    def legacy_replacement_preflight_types_legacy_model_review_before_rows_change(
         self,
     ) -> None:
         canonical = _row(
@@ -105,7 +102,7 @@ class ReviewStateTest(unittest.TestCase):
             ledger_schema_migration_required=True,
         )
 
-        self.assertTrue(_prepare_replacement_review_migration(state, "replace"))
+        self.assertTrue(state.canonical_migration_required)
         for row in (canonical, source, evidence):
             self.assertEqual(
                 review_reason_tokens(row["review_reasons"]),
@@ -128,7 +125,7 @@ class ReviewStateTest(unittest.TestCase):
             source_evidence_rows=[unchanged],
             ledger_schema_migration_required=True,
         )
-        self.assertFalse(_prepare_replacement_review_migration(current_state, "import"))
+        self.assertFalse(current_state.canonical_migration_required)
         self.assertEqual(unchanged["review_reasons"], "")
 
     def test_stale_saved_category_correction_migrates_to_resolved(self) -> None:
@@ -285,7 +282,7 @@ class ReviewStateTest(unittest.TestCase):
             review_reasons="accounting_flow;other_decision",
         )
 
-        patch = _accounting_decision_patch(
+        patch = accounting_decision_patch(
             transaction,
             "expense",
             "Synthetic accounting decision",
