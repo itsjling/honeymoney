@@ -337,11 +337,12 @@ def apply_binding(
 def canonical_bound_owners(
     source_rows: Sequence[dict[str, str]],
     groups: Sequence[Mapping[str, object]],
+    mappings: Mapping[str, object],
 ) -> dict[str, str]:
     """Project source-selected binding owners onto canonical transaction IDs."""
     occurrence_owners: dict[str, str] = {}
     for row in source_rows:
-        owner = row.pop(_BOUND_OWNER_FIELD, None)
+        owner = row.pop(_BOUND_OWNER_FIELD, None) or _saved_binding_owner(row, mappings)
         transaction_id = row.get("transaction_id", "")
         if owner is not None and transaction_id:
             occurrence_owners[transaction_id] = owner
@@ -367,6 +368,37 @@ def canonical_bound_owners(
             owner = next(iter(owners))
             updates.update({str(identifier): owner for identifier in canonical_ids})
     return updates
+
+
+def _saved_binding_owner(
+    row: Mapping[str, str], mappings: Mapping[str, object]
+) -> str | None:
+    source_file = row.get("source_file", "")
+    if not source_file:
+        return None
+    mapping = matching_filename_mapping(Path(source_file), mappings)
+    if mapping is None or not mapping.get("binding"):
+        return None
+    binding_id = str(mapping["binding"])
+    account_identity = normalized_account_id(row.get("account_id", ""))
+    for raw_binding in _mapping_list(mappings, "account_bindings"):
+        if not isinstance(raw_binding, Mapping) or raw_binding.get("id") != binding_id:
+            continue
+        accounts = raw_binding.get("accounts", [])
+        if not isinstance(accounts, list):
+            return None
+        target_identities = {
+            normalized_account_id(raw_account.get("account_id", ""))
+            for raw_account in accounts
+            if isinstance(raw_account, Mapping)
+        }
+        owner = raw_binding.get("owner")
+        return (
+            owner
+            if account_identity in target_identities and isinstance(owner, str)
+            else None
+        )
+    return None
 
 
 def enforce_bound_owners(

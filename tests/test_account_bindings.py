@@ -82,7 +82,7 @@ class AccountBindingWorkflowTest(unittest.TestCase):
                 root,
                 "justin-local",
                 "justin-*.csv",
-                "Justin",
+                " Justin ",
                 "justin_local",
                 "Justin Local Account",
             )
@@ -463,6 +463,52 @@ class AccountBindingWorkflowTest(unittest.TestCase):
                     "SYNTHETIC UNBOUND": "Household",
                 },
             )
+
+            bound_row = next(
+                row for row in rows if row["original_description"] == "SYNTHETIC BOUND"
+            )
+            correction_path = root / "retained-owner-correction.json"
+            correction_path.write_text(
+                json.dumps(
+                    [
+                        {
+                            "transaction_id": bound_row["transaction_id"],
+                            "owner": "Franchesca",
+                        }
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            corrected = self._run_cli(
+                ["correct", "--file", str(correction_path), "--json"],
+                cwd=root,
+            )
+            self.assertEqual(corrected.returncode, 0, corrected.stderr)
+            (statements / "plain-duplicate.csv").write_text(
+                "Date,Description,Amount,Currency\n"
+                "2026-05-05,SYNTHETIC BOUND,-10.00,HKD\n",
+                encoding="utf-8",
+            )
+            duplicate_import = self._run_cli(
+                [
+                    "import",
+                    str(statements / "plain-duplicate.csv"),
+                    "--no-interactive",
+                    "--json",
+                ],
+                cwd=root,
+            )
+            self.assertEqual(duplicate_import.returncode, 0, duplicate_import.stderr)
+            with (root / "output" / "categorized.csv").open(
+                newline="", encoding="utf-8"
+            ) as handle:
+                rows_after_duplicate = list(csv.DictReader(handle))
+            retained_bound_row = next(
+                row
+                for row in rows_after_duplicate
+                if row["original_description"] == "SYNTHETIC BOUND"
+            )
+            self.assertEqual(retained_bound_row["owner"], "Justin")
 
     def test_import_rejects_uncovered_dynamic_account_and_conflicting_matches(
         self,

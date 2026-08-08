@@ -598,6 +598,7 @@ def _run_pipeline(
     bound_owner_updates = canonical_bound_owners(
         source_rows,
         overlap_result.diagnostic["groups"],
+        profile_mappings,
     )
     if not has_processed_source:
         ledger_rows = [dict(row) for row in identity_state.rows]
@@ -2890,21 +2891,26 @@ def _profile_bind_command(argv: list[str]) -> int:
         if not value.strip():
             raise ValueError(f"Account {field} must be a non-empty string")
 
+    binding_id = args.binding_id.strip()
+    pattern = args.pattern.strip()
+    selected_profile_id = args.profile_id.strip()
+    owner = args.owner.strip()
+
     accounts = [_parse_bound_account(value) for value in args.account]
     config = _load_config_read_only(args.config_path)
     profiles = importers._load_profiles(config)
-    if args.profile_id not in {
+    if selected_profile_id not in {
         account_binding_profile_id(profile) for profile in profiles
     }:
-        raise ValueError(f"Unknown profile for account binding: {args.profile_id}")
+        raise ValueError(f"Unknown profile for account binding: {selected_profile_id}")
     mappings = importers._load_profile_mappings(config)
     binding = {
-        "id": args.binding_id,
-        "profile": args.profile_id,
-        "owner": args.owner,
+        "id": binding_id,
+        "profile": selected_profile_id,
+        "owner": owner,
         "accounts": accounts,
     }
-    next_mappings = upsert_binding(mappings, binding, args.pattern)
+    next_mappings = upsert_binding(mappings, binding, pattern)
     validate_profile_mappings(next_mappings, config)
     validate_bindings_for_profiles(next_mappings, profiles)
 
@@ -2918,9 +2924,7 @@ def _profile_bind_command(argv: list[str]) -> int:
         json.dumps(next_mappings, indent=2, sort_keys=True) + "\n",
     )
     view = next(
-        item
-        for item in binding_views(next_mappings)
-        if item.get("id") == args.binding_id
+        item for item in binding_views(next_mappings) if item.get("id") == binding_id
     )
     if args.json:
         _emit_json(
@@ -2931,8 +2935,8 @@ def _profile_bind_command(argv: list[str]) -> int:
         )
     else:
         print(
-            f"Saved account binding {args.binding_id} for {args.pattern} "
-            f"using profile {args.profile_id}."
+            f"Saved account binding {binding_id} for {pattern} "
+            f"using profile {selected_profile_id}."
         )
     return 0
 
