@@ -42,6 +42,7 @@ def upsert_binding(
 ) -> dict[str, object]:
     """Return a copied mapping document with one binding and filename rule."""
     document = copy.deepcopy(dict(mappings))
+    _clear_pattern_edit_receipts(document, binding["id"])
     next_bindings = [
         item
         for item in _mapping_list(document, "account_bindings")
@@ -81,6 +82,188 @@ def upsert_binding(
         )
     document["filename_patterns"] = next_patterns
     return document
+
+
+def replace_binding_pattern(
+    mappings: Mapping[str, object],
+    binding_id: str,
+    old_pattern: str,
+    new_pattern: str,
+) -> tuple[dict[str, object], bool]:
+    """Return mappings with one binding pattern replaced and whether they changed."""
+    document = copy.deepcopy(dict(mappings))
+    binding = next(
+        (
+            item
+            for item in _mapping_list(document, "account_bindings")
+            if isinstance(item, Mapping) and item.get("id") == binding_id
+        ),
+        None,
+    )
+    if binding is None:
+        raise AccountBindingError(f"Unknown account binding: {binding_id}")
+    selected_profile = str(binding.get("profile", ""))
+    patterns = _mapping_list(document, "filename_patterns")
+    receipts = _mapping_list(document, "replaced_filename_patterns")
+    receipt = next(
+        (
+            item
+            for item in receipts
+            if isinstance(item, Mapping)
+            and item.get("binding") == binding_id
+            and item.get("old_pattern") == old_pattern
+            and item.get("new_pattern") == new_pattern
+        ),
+        None,
+    )
+    old_index = next(
+        (
+            index
+            for index, item in enumerate(patterns)
+            if isinstance(item, Mapping)
+            and item.get("pattern") == old_pattern
+            and item.get("binding") == binding_id
+        ),
+        None,
+    )
+    new_index = next(
+        (
+            index
+            for index, item in enumerate(patterns)
+            if isinstance(item, Mapping) and item.get("pattern") == new_pattern
+        ),
+        None,
+    )
+    if old_index is None:
+        if receipt is not None and new_index is not None:
+            selected = patterns[new_index]
+            if (
+                isinstance(selected, Mapping)
+                and selected.get("profile") == selected_profile
+                and selected.get("binding") == binding_id
+            ):
+                return document, False
+        raise AccountBindingError(
+            f"Account binding {binding_id} does not use filename pattern {old_pattern}"
+        )
+    if old_pattern == new_pattern:
+        return document, False
+    if new_index is not None:
+        selected = patterns[new_index]
+        if (
+            not isinstance(selected, Mapping)
+            or selected.get("profile") != selected_profile
+            or selected.get("binding") != binding_id
+        ):
+            raise AccountBindingError(
+                f"Filename pattern {new_pattern} already selects another "
+                "profile or binding"
+            )
+        del patterns[old_index]
+    else:
+        patterns[old_index] = {
+            "pattern": new_pattern,
+            "profile": selected_profile,
+            "binding": binding_id,
+        }
+    document["filename_patterns"] = patterns
+    _clear_pattern_edit_receipts(document, binding_id)
+    replacement_receipts = _mapping_list(document, "replaced_filename_patterns")
+    replacement_receipts.append(
+        {
+            "binding": binding_id,
+            "old_pattern": old_pattern,
+            "new_pattern": new_pattern,
+            "profile": selected_profile,
+        }
+    )
+    document["replaced_filename_patterns"] = replacement_receipts
+    return document, True
+
+
+def remove_binding_pattern(
+    mappings: Mapping[str, object],
+    binding_id: str,
+    pattern: str,
+    *,
+    confirm_final: bool,
+) -> tuple[dict[str, object], bool, bool, str]:
+    """Remove one pattern and its binding when no other pattern uses it."""
+    document = copy.deepcopy(dict(mappings))
+    receipts = _mapping_list(document, "removed_filename_patterns")
+    receipt = next(
+        (
+            item
+            for item in receipts
+            if isinstance(item, Mapping)
+            and item.get("binding") == binding_id
+            and item.get("pattern") == pattern
+        ),
+        None,
+    )
+    bindings = _mapping_list(document, "account_bindings")
+    binding_index = next(
+        (
+            index
+            for index, item in enumerate(bindings)
+            if isinstance(item, Mapping) and item.get("id") == binding_id
+        ),
+        None,
+    )
+    if binding_index is None:
+        if receipt is not None:
+            return document, False, True, str(receipt.get("profile", ""))
+        raise AccountBindingError(f"Unknown account binding: {binding_id}")
+    binding = bindings[binding_index]
+    if not isinstance(binding, Mapping):
+        raise AccountBindingError(f"Unknown account binding: {binding_id}")
+    selected_profile = str(binding.get("profile", ""))
+    patterns = _mapping_list(document, "filename_patterns")
+    pattern_index = next(
+        (
+            index
+            for index, item in enumerate(patterns)
+            if isinstance(item, Mapping)
+            and item.get("pattern") == pattern
+            and item.get("binding") == binding_id
+        ),
+        None,
+    )
+    if pattern_index is None:
+        if receipt is not None:
+            return document, False, False, selected_profile
+        raise AccountBindingError(
+            f"Account binding {binding_id} does not use filename pattern {pattern}"
+        )
+    remaining_pattern_count = sum(
+        1
+        for index, item in enumerate(patterns)
+        if index != pattern_index
+        and isinstance(item, Mapping)
+        and item.get("binding") == binding_id
+    )
+    removing_binding = remaining_pattern_count == 0
+    if removing_binding and not confirm_final:
+        raise AccountBindingError(
+            f"Removing the final pattern from account binding {binding_id} also "
+            "removes the binding; pass --yes to confirm"
+        )
+    del patterns[pattern_index]
+    document["filename_patterns"] = patterns
+    if removing_binding:
+        del bindings[binding_index]
+        document["account_bindings"] = bindings
+    _clear_pattern_edit_receipts(document, binding_id)
+    removal_receipts = _mapping_list(document, "removed_filename_patterns")
+    removal_receipts.append(
+        {
+            "binding": binding_id,
+            "pattern": pattern,
+            "profile": selected_profile,
+        }
+    )
+    document["removed_filename_patterns"] = removal_receipts
+    return document, True, removing_binding, selected_profile
 
 
 def validate_profile_mappings(
@@ -172,6 +355,62 @@ def validate_profile_mappings(
             "accounts": accounts,
         }
         bindings[binding_id] = binding
+
+    raw_removed_patterns = document.get("removed_filename_patterns", [])
+    if not isinstance(raw_removed_patterns, list):
+        raise ValueError(
+            "Profile mappings field removed_filename_patterns must be a JSON array"
+        )
+    removed_patterns: set[tuple[str, str]] = set()
+    for index, raw_removed_pattern in enumerate(raw_removed_patterns):
+        field = f"removed_filename_patterns[{index}]"
+        if not isinstance(raw_removed_pattern, dict):
+            raise ValueError(f"Profile mappings field {field} must be a JSON object")
+        removed_values: list[str] = []
+        for name in ("binding", "pattern", "profile"):
+            value = raw_removed_pattern.get(name)
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(
+                    f"Profile mappings field {field}.{name} must be a non-empty string"
+                )
+            removed_values.append(value.strip())
+        receipt_key = (removed_values[0], removed_values[1])
+        if receipt_key in removed_patterns:
+            raise ValueError(
+                "Duplicate removed filename pattern receipt: "
+                f"{removed_values[0]} {removed_values[1]}"
+            )
+        removed_patterns.add(receipt_key)
+
+    raw_replaced_patterns = document.get("replaced_filename_patterns", [])
+    if not isinstance(raw_replaced_patterns, list):
+        raise ValueError(
+            "Profile mappings field replaced_filename_patterns must be a JSON array"
+        )
+    replaced_patterns: set[tuple[str, str, str]] = set()
+    for index, raw_replaced_pattern in enumerate(raw_replaced_patterns):
+        field = f"replaced_filename_patterns[{index}]"
+        if not isinstance(raw_replaced_pattern, dict):
+            raise ValueError(f"Profile mappings field {field} must be a JSON object")
+        replaced_values: list[str] = []
+        for name in ("binding", "old_pattern", "new_pattern", "profile"):
+            value = raw_replaced_pattern.get(name)
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(
+                    f"Profile mappings field {field}.{name} must be a non-empty string"
+                )
+            replaced_values.append(value.strip())
+        replaced_receipt_key = (
+            replaced_values[0],
+            replaced_values[1],
+            replaced_values[2],
+        )
+        if replaced_receipt_key in replaced_patterns:
+            raise ValueError(
+                "Duplicate replaced filename pattern receipt: "
+                f"{replaced_values[0]} {replaced_values[1]} {replaced_values[2]}"
+            )
+        replaced_patterns.add(replaced_receipt_key)
 
     seen_patterns: set[str] = set()
     for index, mapping in enumerate(patterns):
@@ -435,3 +674,16 @@ def binding_views(mappings: Mapping[str, object]) -> list[dict[str, object]]:
 def _mapping_list(mappings: Mapping[str, object], field: str) -> list[object]:
     value = mappings.get(field, [])
     return value if isinstance(value, list) else []
+
+
+def _clear_pattern_edit_receipts(mappings: dict[str, object], binding_id: str) -> None:
+    for field in ("removed_filename_patterns", "replaced_filename_patterns"):
+        retained = [
+            item
+            for item in _mapping_list(mappings, field)
+            if not isinstance(item, Mapping) or item.get("binding") != binding_id
+        ]
+        if retained:
+            mappings[field] = retained
+        else:
+            mappings.pop(field, None)
