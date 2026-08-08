@@ -359,14 +359,15 @@ def _ollama_progress(progress: OllamaProgress) -> None:
         f"batch {progress.batch_number}/{progress.batch_count} "
         f"(transactions {range_label} of {progress.total}{elapsed})"
     )
-    compact = (
-        f"Ollama ({model}): batch {progress.batch_number}/{progress.batch_count} "
+    compact_details = (
+        f"batch {progress.batch_number}/{progress.batch_count} "
         f"(tx {range_label}/{progress.total}{elapsed})"
     )
+    compact = f"Ollama ({model}): {compact_details}"
     _status.update(
         f"Categorizing via Ollama ({model})... {details}",
         compact=compact,
-        preserve_suffix=len(details),
+        preserve_suffix=len(compact_details),
     )
 
 

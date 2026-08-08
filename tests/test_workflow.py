@@ -5313,6 +5313,24 @@ class StatusLineTest(unittest.TestCase):
             "Ollama (qwen2.5:7b-instruct): batch 2/20 (tx 6-10/98, 4s)",
         )
 
+    def test_ollama_progress_preserves_details_on_narrow_terminal(self) -> None:
+        stream = io.StringIO()
+        with (
+            patch.object(cli, "_status", _StatusLine(stream=stream, enabled=True)),
+            patch.object(
+                cli.shutil,
+                "get_terminal_size",
+                return_value=os.terminal_size((40, 24)),
+            ),
+        ):
+            cli._ollama_progress(
+                OllamaProgress(2, 20, 6, 10, 98, 4.2, "qwen2.5:7b-instruct")
+            )
+
+        rendered = stream.getvalue().removeprefix("\r")
+        self.assertEqual(len(rendered), 39)
+        self.assertTrue(rendered.endswith("batch 2/20 (tx 6-10/98, 4s)"))
+
     def test_ollama_progress_escapes_terminal_control_characters(self) -> None:
         stream = io.StringIO()
         with (
