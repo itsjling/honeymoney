@@ -47,6 +47,7 @@ select = ["E4", "E7", "E9", "F", "I"]
 [tool.mypy]
 python_version = "3.11"
 files = [
+  "honeymoney/account_bindings.py",
   "honeymoney/classification_policy.py",
   "honeymoney/contracts.py",
   "honeymoney/corrections.py",

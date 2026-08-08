@@ -12,10 +12,16 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
-from fnmatch import fnmatch
 from pathlib import Path
 from typing import Any, Callable, TypeAlias
 
+from honeymoney.account_bindings import (
+    AccountBindingError,
+    apply_binding,
+    binding_for_source,
+    matching_filename_mapping,
+    validate_profile_mappings,
+)
 from honeymoney.identity import (
     AllocationLocator,
     IncomingRecordIdentity,
@@ -833,24 +839,7 @@ def _load_profile_mappings(config: dict[str, Any]) -> dict[str, Any]:
         return {}
     with Path(mapping_path).open(encoding="utf-8") as fh:
         mappings = json.load(fh)
-    if not isinstance(mappings, dict):
-        raise ValueError("Profile mappings document must be a JSON object")
-    patterns = mappings.get("filename_patterns", [])
-    if not isinstance(patterns, list):
-        raise ValueError(
-            "Profile mappings field filename_patterns must be a JSON array"
-        )
-    for index, mapping in enumerate(patterns):
-        if not isinstance(mapping, dict):
-            raise ValueError(
-                f"Profile mappings field filename_patterns[{index}] must be a JSON object"
-            )
-        for field in ("pattern", "profile"):
-            if not isinstance(mapping.get(field), str) or not mapping[field].strip():
-                raise ValueError(
-                    f"Profile mappings field filename_patterns[{index}].{field} must be a non-empty string"
-                )
-    return mappings
+    return validate_profile_mappings(mappings, config)
 
 
 def _discover_input_files(input_path: Path) -> list[Path]:
@@ -863,6 +852,17 @@ def _discover_input_files(input_path: Path) -> list[Path]:
             if path.is_file() and path.suffix.lower() in {".csv", ".pdf"}
         )
     return []
+
+
+def _apply_source_account_binding(
+    input_file: Path,
+    profile: dict[str, Any],
+    profile_mappings: dict[str, Any],
+    imported: list[dict[str, str]],
+) -> dict[str, str]:
+    binding = binding_for_source(input_file, profile, profile_mappings)
+    apply_binding(imported, binding)
+    return {"binding_id": binding["id"]} if binding else {}
 
 
 def _import_transactions(
@@ -944,7 +944,12 @@ def _import_transactions(
                     imported, pdf_warnings = _import_pdf(
                         input_file, profile, config, input_root
                     )
+                binding_fields = _apply_source_account_binding(
+                    input_file, profile, profile_mappings, imported
+                )
                 warnings.extend(pdf_warnings)
+            except AccountBindingError:
+                raise
             except ImportError:
                 warning = (
                     "PDF parsing requires pdfplumber; skipped "
@@ -993,6 +998,7 @@ def _import_transactions(
                         profile.get("id") or profile.get("account_id") or "default"
                     ),
                     "parser": "pdfplumber",
+                    **binding_fields,
                 }
             )
             continue
@@ -1026,6 +1032,9 @@ def _import_transactions(
             )
         else:
             imported = _import_csv(input_file, profile, config, input_root)
+        binding_fields = _apply_source_account_binding(
+            input_file, profile, profile_mappings, imported
+        )
         if prompted_for_profile:
             _maybe_save_profile_mapping(input_file, profile, profile_mappings_path)
         transactions.extend(imported)
@@ -1049,6 +1058,7 @@ def _import_transactions(
                 "profile_id": str(
                     profile.get("id") or profile.get("account_id") or "default"
                 ),
+                **binding_fields,
             }
         )
     if include_identity_sources:
@@ -1194,10 +1204,10 @@ def _mapped_profile(
         str(profile.get("id") or profile.get("account_id")): profile
         for profile in profiles
     }
-    for mapping in mappings.get("filename_patterns", []):
-        if fnmatch(source_path.name, str(mapping.get("pattern", ""))):
-            return profiles_by_id.get(str(mapping.get("profile", "")))
-    return None
+    mapping = matching_filename_mapping(source_path, mappings)
+    if mapping is None:
+        return None
+    return profiles_by_id.get(str(mapping.get("profile", "")))
 
 
 def _prompt_for_profile(
