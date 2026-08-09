@@ -212,7 +212,7 @@ def _import_command(argv: list[str]) -> int:
             f"Imported {result.data['statement_transaction_count']} statement "
             f"transactions into {result.data['view_transaction_count']} view rows."
         )
-    return 1 if args.strict and result.warnings else 0
+    return 1 if args.strict and result.strict_warnings else 0
 
 
 def _imports_command(argv: list[str]) -> int:

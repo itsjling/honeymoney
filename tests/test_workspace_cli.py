@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import io
 import json
 import os
 import stat
@@ -8,10 +9,11 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
-from honeymoney import workspace_setup
+from honeymoney import cli, workspace_setup
 from honeymoney.identity import record_fingerprint, source_revision
 from honeymoney.workspace_commands import SNAPSHOT_COLUMNS
 from honeymoney.workspace_publication import WorkspaceBusyError
@@ -299,6 +301,60 @@ class ImportLifecycleAcceptanceTest(unittest.TestCase):
                 if path.is_file()
             }
             self.assertEqual(after, before)
+
+    def test_strict_import_ignores_an_optional_ollama_warning(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "money"
+            config_path = self._setup(root)
+            config = json.loads(config_path.read_text(encoding="utf-8"))
+            config["ollama"] = {
+                "enabled": True,
+                "url": "http://127.0.0.1:9/api/generate",
+                "model": "synthetic-local-model",
+                "timeout_seconds": 0.1,
+            }
+            config_path.write_text(
+                json.dumps(config, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            source = root / "synthetic.csv"
+            source.write_text(
+                "Date,Description,Amount,Currency\n"
+                "2026-08-08,Synthetic Grocer,-12.00,HKD\n",
+                encoding="utf-8",
+            )
+            output = io.StringIO()
+
+            with (
+                patch(
+                    "honeymoney.ollama._request_ollama",
+                    side_effect=OSError("synthetic Ollama unavailable"),
+                ),
+                redirect_stdout(output),
+            ):
+                exit_code = cli.main(
+                    [
+                        "import",
+                        str(source),
+                        "--config",
+                        str(config_path),
+                        "--no-interactive",
+                        "--strict",
+                        "--json",
+                    ]
+                )
+
+            self.assertEqual(exit_code, 0)
+            payload = json.loads(output.getvalue())
+            self.assertTrue(
+                any(
+                    warning.startswith("Ollama unavailable:")
+                    for warning in payload["warnings"]
+                )
+            )
+            records = list((root / ".honeymoney" / "import-records").iterdir())
+            self.assertEqual(len(records), 1)
+            self.assertTrue((records[0] / "attempts" / "00000001.json").is_file())
 
     def test_all_rebuild_adopts_missing_optional_workspace_inputs(self) -> None:
         for filename in (

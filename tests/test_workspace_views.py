@@ -115,6 +115,46 @@ class WorkspaceViewsTest(unittest.TestCase):
             (",".join(CATEGORIZED_COLUMNS) + "\r\n").encode(),
         )
 
+    def test_automatic_refresh_compares_next_model_output_to_registered_proof(
+        self,
+    ) -> None:
+        key = b"p" * 32
+        published_row = self._row("txn-model", "2026-05-10")
+        published_row["category"] = "Other"
+        published = plan_workspace_views(
+            [published_row],
+            resolve_period_selection(all_periods=True),
+            (),
+            content_proof_key=key,
+        )
+        installed_files = {
+            file.path: file.content for unit in published.units for file in unit.files()
+        }
+        recovered_model_row = dict(published_row)
+        recovered_model_row["category"] = "Groceries"
+
+        plan = plan_automatic_view_refresh(
+            [recovered_model_row],
+            [recovered_model_row],
+            published.next_registered_views,
+            content_proof_key=key,
+            installed_files=installed_files,
+        )
+
+        self.assertEqual(tuple(unit.period for unit in plan.writes), ("2026-05",))
+        self.assertNotEqual(
+            published.next_registered_views,
+            plan.next_registered_views,
+        )
+        self.assertEqual(
+            tuple(file.path for file in plan.publication_files()),
+            (
+                "views/2026-05/transactions.csv",
+                "views/2026-05/review_needed.csv",
+                "views/2026-05/report.html",
+            ),
+        )
+
     def test_selected_rebuild_repairs_an_edited_view_unit(self) -> None:
         key = b"p" * 32
         rows = [self._row("txn-may", "2026-05-10")]

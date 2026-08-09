@@ -156,14 +156,13 @@ def plan_automatic_view_refresh(
     *,
     content_proof_key: bytes,
     installed_files: Mapping[str, bytes | None],
-    previous_report_inputs: Mapping[str, ViewReportInputs] | None = None,
     next_report_inputs: Mapping[str, ViewReportInputs] | None = None,
 ) -> WorkspaceViewPlan:
     """Plan an automatic refresh without repairing unrelated generated output.
 
-    Every prior, next, and registered view is compared in memory.  A period whose
-    expected bytes changed remains selected even when its next view is empty.
-    This automatic path never removes a registered view.
+    The registered proof records the prior published unit.  A period whose next
+    proof differs remains selected even when its next view is empty.  This
+    automatic path never removes a registered view.
     """
     registered = _registered_view_proofs(registered_views)
     previous_by_period = _rows_by_period(previous_rows)
@@ -175,30 +174,18 @@ def plan_automatic_view_refresh(
     writes: list[ViewUnit] = []
     unchanged: list[str] = []
     for period in considered:
-        previous_unit = build_view_unit(
-            period,
-            previous_by_period.get(period, ()),
-            content_proof_key=content_proof_key,
-            report_inputs=(previous_report_inputs or {}).get(period),
-        )
         next_unit = build_view_unit(
             period,
             next_by_period.get(period, ()),
             content_proof_key=content_proof_key,
             report_inputs=(next_report_inputs or {}).get(period),
         )
-        affected = (
-            previous_unit.content_proof != next_unit.content_proof
-            or period not in registered
-        )
+        affected = registered.get(period) != next_unit.content_proof
         if not affected:
             unchanged.append(period)
             continue
         units.append(next_unit)
-        if (
-            previous_unit.content_proof != next_unit.content_proof
-            or not _unit_matches_installed(next_unit, installed_files)
-        ):
+        if not _unit_matches_installed(next_unit, installed_files):
             writes.append(next_unit)
         else:
             unchanged.append(period)

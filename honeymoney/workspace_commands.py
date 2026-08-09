@@ -238,6 +238,7 @@ class CommandResult:
     data: dict[str, object]
     artifacts: dict[str, object]
     warnings: tuple[str, ...] = ()
+    strict_warnings: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -650,11 +651,10 @@ def import_workspace(
         except PublicationError:
             raise
 
-    warnings = (
-        tuple(warning for item in parsed for warning in item.warnings)
-        + derivation.warnings
-        + tuple("source_import_failed" for _item in failed_attempts)
-    )
+    strict_warnings = tuple(
+        warning for item in parsed for warning in item.warnings
+    ) + tuple("source_import_failed" for _item in failed_attempts)
+    warnings = strict_warnings + derivation.warnings
     return CommandResult(
         data={
             "import_count": len(parsed),
@@ -672,6 +672,7 @@ def import_workspace(
             ],
         },
         warnings=warnings,
+        strict_warnings=strict_warnings,
     )
 
 
@@ -2932,7 +2933,6 @@ def _plan_views(
         registered_views=context.index["registered_views"],
         content_proof_key=key,
         installed_files=_installed_view_files(context.paths),
-        previous_report_inputs=_view_report_inputs_by_period(previous),
         next_report_inputs=_view_report_inputs_by_period(next_derivation),
     )
     targets = [
