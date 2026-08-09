@@ -285,6 +285,38 @@ class ProfileCliTest(unittest.TestCase):
                 [row] = csv.DictReader(handle)
             self.assertEqual(row["owner"], "Justin")
             self.assertEqual(row["account_id"], "justin_account")
+            self.assertEqual(row["payment_method"], "Bank Account")
+
+            rebuilt = self._run("views", "rebuild", "--all", *common)
+
+            self.assertEqual(rebuilt.returncode, 0, rebuilt.stderr)
+            with (paths.views / "2026-08" / "transactions.csv").open(
+                encoding="utf-8", newline=""
+            ) as handle:
+                [rebuilt_row] = csv.DictReader(handle)
+            self.assertEqual(rebuilt_row["owner"], "Justin")
+            self.assertEqual(rebuilt_row["account_id"], "justin_account")
+            self.assertEqual(rebuilt_row["payment_method"], "Bank Account")
+
+    def test_json_errors_use_nested_command_names(self) -> None:
+        cases = (
+            (("profile", "validate", "--json"), "profile.validate"),
+            (("profile", "bind", "--json"), "profile.bind"),
+            (("profile", "bindings", "--unknown", "--json"), "profile.bindings"),
+            (
+                ("profile", "replace-pattern", "--json"),
+                "profile.replace-pattern",
+            ),
+            (("profile", "remove-pattern", "--json"), "profile.remove-pattern"),
+            (("source-data", "inspect", "--json"), "source-data.inspect"),
+            (("source-data", "resolve", "--json"), "source-data.resolve"),
+            (("review", "pair", "--json"), "review.pair"),
+        )
+        for arguments, command in cases:
+            with self.subTest(command=command):
+                result = self._run(*arguments)
+                self.assertEqual(result.returncode, 2)
+                self.assertEqual(json.loads(result.stdout)["command"], command)
 
 
 if __name__ == "__main__":

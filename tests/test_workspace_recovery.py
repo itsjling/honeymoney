@@ -168,6 +168,43 @@ class WorkspaceAttemptRecoveryTest(unittest.TestCase):
             self.assertRegex(attempt["parser_contract"], r"^ext_[0-9a-f]{64}$")
             self.assertNotEqual(attempt["parser_contract"], "ext_" + "0" * 64)
 
+    def test_attempt_source_revision_is_keyed_to_its_workspace(self) -> None:
+        attempt_revisions: list[str] = []
+        for name in ("first", "second"):
+            with self.subTest(workspace=name):
+                with tempfile.TemporaryDirectory() as temporary:
+                    root = Path(temporary) / "money"
+                    paths = setup_workspace(root)
+                    source = self._source(root)
+
+                    import_workspace(
+                        source,
+                        config_path=paths.config,
+                        interactive=False,
+                    )
+
+                    record = next(paths.import_records.iterdir())
+                    attempt = json.loads(
+                        (record / "attempts/00000001.json").read_text(encoding="utf-8")
+                    )
+                    index = json.loads(
+                        paths.workspace_index.read_text(encoding="utf-8")
+                    )
+                    [identity_source] = index["identity_manifest"]["sources"]
+                    self.assertEqual(
+                        attempt["source_revision"],
+                        identity_source["source_revision"],
+                    )
+                    shown = show_import(record.name, config_path=paths.config)
+                    [shown_attempt] = shown.data["attempts"]  # type: ignore[index]
+                    self.assertEqual(
+                        shown_attempt["source_revision"],
+                        identity_source["source_revision"],
+                    )
+                    attempt_revisions.append(attempt["source_revision"])
+
+        self.assertNotEqual(attempt_revisions[0], attempt_revisions[1])
+
     def test_postcommit_stop_becomes_success(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary) / "money"

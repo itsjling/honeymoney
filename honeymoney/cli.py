@@ -1273,13 +1273,17 @@ def _emit_json(
 
 
 def _error_command(argv: Sequence[str]) -> str:
-    if len(argv) > 1 and argv[0] in {
+    nested_commands = {
         "duplicates",
         "imports",
+        "profile",
         "rates",
+        "review",
+        "source-data",
         "valuation",
         "views",
-    }:
+    }
+    if len(argv) > 1 and argv[0] in nested_commands and not argv[1].startswith("-"):
         return f"{argv[0]}.{argv[1]}"
     return argv[0] if argv else "help"
 

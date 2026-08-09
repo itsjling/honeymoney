@@ -22,7 +22,7 @@ from typing import Mapping, cast
 
 from honeymoney.account_bindings import validate_profile_mappings
 from honeymoney.corrections import CORRECTION_COLUMNS, validate_correction
-from honeymoney.identity import workspace_record_fingerprint, workspace_source_revision
+from honeymoney.identity import workspace_record_fingerprint
 from honeymoney.import_records import (
     SOURCE_ID_PATTERN,
     ImportRecordError,
@@ -1332,10 +1332,7 @@ def _source_matches_record(
     evidence_key: bytes,
 ) -> bool:
     if (
-        source.get("source_revision")
-        != workspace_source_revision(
-            authority.source_revision, evidence_key=evidence_key
-        )
+        source.get("source_revision") != authority.source_revision
         or source.get("extractor_contract_id") != authority.parser_contract
     ):
         return False

@@ -265,6 +265,7 @@ class _PlannedSourceAttempt:
     source_id: str
     record: Path
     attempt_number: int
+    raw_source_revision: str
     source_revision: str
     parser_contract: str
     reservation: PendingAttemptReservation
@@ -550,7 +551,7 @@ def import_workspace(
                 planned = planned_by_path[parsed_source.path]
                 if (
                     source_id != planned.source_id
-                    or parsed_source.identity.revision != planned.source_revision
+                    or parsed_source.identity.revision != planned.raw_source_revision
                     or parsed_source.identity.contract_id != planned.parser_contract
                 ):
                     raise WorkspaceCommandError("durable_state_conflict")
@@ -570,7 +571,7 @@ def import_workspace(
                     action=action,
                     started=started,
                     outcome="success",
-                    source_revision=parsed_source.identity.revision,
+                    source_revision=planned.source_revision,
                     parser_contract=parsed_source.identity.contract_id,
                     transaction_count=len(rows),
                     warnings=parsed_source.warnings,
@@ -584,7 +585,7 @@ def import_workspace(
                     action=action,
                     started=started,
                     outcome="failure",
-                    source_revision=parsed_source.identity.revision,
+                    source_revision=planned.source_revision,
                     parser_contract=parsed_source.identity.contract_id,
                     transaction_count=0,
                     warnings=(),
@@ -2437,6 +2438,7 @@ def _plan_source_attempts(
 ) -> list[_PlannedSourceAttempt]:
     planned: list[_PlannedSourceAttempt] = []
     reserved_by_record: dict[Path, int] = {}
+    evidence_key = _content_proof_key(context)
     for source in sources:
         path = source.path
         source_id = source.source_id
@@ -2450,6 +2452,9 @@ def _plan_source_attempts(
                 raise WorkspaceCommandError("managed_path_unsafe") from error
             raise
         reserved_by_record[record] = reserved_by_record.get(record, 0) + 1
+        keyed_source_revision = workspace_source_revision(
+            source.identity.revision, evidence_key=evidence_key
+        )
         report = _attempt_report(
             source_id=source_id,
             source_label=source.source_label,
@@ -2457,7 +2462,7 @@ def _plan_source_attempts(
             action=action,
             started=started,
             outcome="failure",
-            source_revision=source.identity.revision,
+            source_revision=keyed_source_revision,
             parser_contract=source.identity.contract_id,
             transaction_count=0,
             warnings=(),
@@ -2470,7 +2475,8 @@ def _plan_source_attempts(
                 source_id=source_id,
                 record=record,
                 attempt_number=attempt_number,
-                source_revision=source.identity.revision,
+                raw_source_revision=source.identity.revision,
+                source_revision=keyed_source_revision,
                 parser_contract=source.identity.contract_id,
                 reservation=PendingAttemptReservation(
                     path=f"{base}/attempts/{attempt_number:08d}.json",
@@ -2614,7 +2620,12 @@ def _safe_attempt_error_code(error: Exception) -> str:
 def _load_ready_source_rows(context: WorkspaceContext) -> list[dict[str, str]]:
     rows: list[dict[str, str]] = []
     evidence_key = _content_proof_key(context)
-    for source in context.index["identity_manifest"]["sources"]:
+    sources = context.index["identity_manifest"]["sources"]
+    if not sources:
+        return rows
+    profiles = _load_workspace_profiles(context.config)
+    profile_mappings = _load_workspace_profile_mappings(context.config)
+    for source in sources:
         source_id = source["source_id"]
         record = import_record_path(context.paths.import_records, source_id)
         try:
@@ -2638,10 +2649,7 @@ def _load_ready_source_rows(context: WorkspaceContext) -> list[dict[str, str]]:
             if item["attempt_number"] == summary["current_attempt_number"]
         )
         if (
-            workspace_source_revision(
-                attempt["source_revision"], evidence_key=evidence_key
-            )
-            != source["source_revision"]
+            attempt["source_revision"] != source["source_revision"]
             or attempt["parser_contract"] != source["extractor_contract_id"]
         ):
             raise WorkspaceCommandError("durable_state_conflict")
@@ -2679,23 +2687,47 @@ def _load_ready_source_rows(context: WorkspaceContext) -> list[dict[str, str]]:
                     "source_file": summary["source_label"],
                 }
             )
-            _restore_profile_facts(row, context.config)
+            _restore_profile_facts(row, profiles, profile_mappings)
             rows.append(row)
     return rows
 
 
-def _restore_profile_facts(row: dict[str, str], config: Mapping[str, object]) -> None:
-    profiles = _load_workspace_profiles(dict(config))
+def _restore_profile_facts(
+    row: dict[str, str],
+    profiles: Sequence[Profile],
+    profile_mappings: Mapping[str, object],
+) -> None:
+    selected_profile_id = ""
+    selected_binding: AccountBinding | None = None
+    binding_id = row.get("account_binding_id", "")
+    if binding_id:
+        try:
+            selected_binding = binding_by_id(profile_mappings, binding_id)
+            selected_profile_id = selected_binding["profile"]
+        except ValueError:
+            pass
     profile = next(
         (
             item
             for item in profiles
-            if str(item.get("account_id", "")) == row.get("account_id", "")
+            if (
+                selected_profile_id
+                and str(item.get("id") or item.get("account_id") or "")
+                == selected_profile_id
+            )
+            or (
+                not selected_profile_id
+                and str(item.get("account_id", "")) == row.get("account_id", "")
+            )
         ),
         None,
     )
     if profile is not None:
-        row["owner"] = str(profile.get("owner", "Household"))
+        row["owner"] = (
+            selected_binding["owner"]
+            if selected_binding is not None
+            else str(profile.get("owner", "Household"))
+        )
         row["payment_method"] = str(profile.get("payment_method", "Unknown"))
 
 
