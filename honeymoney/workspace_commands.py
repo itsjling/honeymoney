@@ -1830,9 +1830,10 @@ def apply_workspace_profile_mappings(
             changed = mappings_path.read_bytes() != content
         except OSError as error:
             raise WorkspaceCommandError("workspace_input_invalid") from error
-        source_rows, prior = _derive_current_workspace(context)
+        _source_rows, prior = _derive_current_workspace(context)
+        next_source_rows = _load_ready_source_rows(context, profile_mappings=checked)
         next_derivation = derive_workspace_rows(
-            source_rows,
+            next_source_rows,
             context.index["overlap_manifest"],
             context.config,
             rules=_load_workspace_rules(context.config),
@@ -2617,14 +2618,19 @@ def _safe_attempt_error_code(error: Exception) -> str:
     return "parse_failed"
 
 
-def _load_ready_source_rows(context: WorkspaceContext) -> list[dict[str, str]]:
+def _load_ready_source_rows(
+    context: WorkspaceContext,
+    *,
+    profile_mappings: Mapping[str, object] | None = None,
+) -> list[dict[str, str]]:
     rows: list[dict[str, str]] = []
     evidence_key = _content_proof_key(context)
     sources = context.index["identity_manifest"]["sources"]
     if not sources:
         return rows
     profiles = _load_workspace_profiles(context.config)
-    profile_mappings = _load_workspace_profile_mappings(context.config)
+    if profile_mappings is None:
+        profile_mappings = _load_workspace_profile_mappings(context.config)
     for source in sources:
         source_id = source["source_id"]
         record = import_record_path(context.paths.import_records, source_id)

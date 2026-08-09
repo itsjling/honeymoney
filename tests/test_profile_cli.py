@@ -298,6 +298,71 @@ class ProfileCliTest(unittest.TestCase):
             self.assertEqual(rebuilt_row["account_id"], "justin_account")
             self.assertEqual(rebuilt_row["payment_method"], "Bank Account")
 
+    def test_binding_owner_change_refreshes_existing_views(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            paths = setup_workspace(Path(temporary) / "money")
+            common = ("--config", str(paths.config), "--json")
+            initial = self._run(
+                "profile",
+                "bind",
+                "personal",
+                "--pattern",
+                "synthetic.csv",
+                "--profile",
+                "starter_csv",
+                "--owner",
+                "Justin",
+                "--account",
+                "starter_csv=shared_account=Shared account",
+                *common,
+            )
+            self.assertEqual(initial.returncode, 0, initial.stderr)
+            statement = paths.root / "synthetic.csv"
+            statement.write_text(
+                "Date,Description,Amount,Currency\n"
+                "2026-08-09,Synthetic purchase,-1.00,HKD\n",
+                encoding="utf-8",
+            )
+            imported = self._run(
+                "import",
+                str(statement),
+                "--binding",
+                "personal",
+                *common,
+            )
+            self.assertEqual(imported.returncode, 0, imported.stderr)
+
+            changed = self._run(
+                "profile",
+                "bind",
+                "personal",
+                "--pattern",
+                "synthetic.csv",
+                "--profile",
+                "starter_csv",
+                "--owner",
+                "Franchesca",
+                "--account",
+                "starter_csv=shared_account=Shared account",
+                *common,
+            )
+
+            self.assertEqual(changed.returncode, 0, changed.stderr)
+            self.assertEqual(json.loads(changed.stdout)["data"]["written_count"], 1)
+            with (paths.views / "2026-08" / "transactions.csv").open(
+                encoding="utf-8", newline=""
+            ) as handle:
+                [row] = csv.DictReader(handle)
+            self.assertEqual(row["owner"], "Franchesca")
+            report = self._run(
+                "report",
+                "--month",
+                "2026-08",
+                "--no-open",
+                *common,
+            )
+            self.assertEqual(report.returncode, 0, report.stderr)
+
     def test_json_errors_use_nested_command_names(self) -> None:
         cases = (
             (("profile", "validate", "--json"), "profile.validate"),
