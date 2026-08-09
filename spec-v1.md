@@ -1,5 +1,10 @@
 # Project Scope: Local Private Spending Categorization System
 
+> Historical note: this file records the first product scope. ADR 0008 and the
+> 0.2.0 documentation replace its CLI, storage, output, and compatibility
+> contracts. Do not use its `run`, `--input`, `--output`, or cumulative-file
+> examples for current work.
+
 ## Goal
 
 Build a simple, privacy-preserving system to categorize household financial transactions for a married couple living in Hong Kong with some U.S. accounts.

@@ -309,7 +309,7 @@ def validate_reconciliation_config(config: Config) -> None:
         else:
             try:
                 parsed = Decimal(str(value))
-            except (InvalidOperation, ValueError):
+            except InvalidOperation, ValueError:
                 parsed = None
         if parsed is None or not parsed.is_finite() or parsed < 0 or parsed > 1:
             raise ValueError(
@@ -831,7 +831,7 @@ def _decimal_setting(value: object, default: Decimal) -> Decimal:
         return default
     try:
         parsed = Decimal(str(value))
-    except (InvalidOperation, ValueError):
+    except InvalidOperation, ValueError:
         raise AssertionError(
             "reconciliation tolerance validation was skipped"
         ) from None
@@ -845,7 +845,7 @@ def _absolute_posted_amount(row: dict[str, str]) -> Decimal:
 def _amount(row: dict[str, str]) -> Decimal | None:
     try:
         amount = Decimal(row.get("amount_hkd", ""))
-    except (InvalidOperation, ValueError):
+    except InvalidOperation, ValueError:
         return None
     return amount if amount.is_finite() else None
 
@@ -1008,6 +1008,13 @@ def complete_statement_rows(
     return [row for row in all_rows if _statement_balance_key(row) in represented_keys]
 
 
+def statement_balance_reconciliation(
+    rows: list[dict[str, str]],
+) -> BalanceReconciliation:
+    """Return source-level balance checks for complete statement rows."""
+    return _balance_reconciliation(rows)
+
+
 def _statement_balance_key(row: Mapping[str, str]) -> StatementBalanceKey | None:
     account_id = row.get("account_id", "")
     if not account_id:
@@ -1077,7 +1084,7 @@ def _balance_values_conflict(raw_values: list[str]) -> bool:
     for raw_value in raw_values:
         try:
             value = Decimal(raw_value)
-        except (InvalidOperation, ValueError):
+        except InvalidOperation, ValueError:
             return False
         if not value.is_finite():
             return False
@@ -1101,7 +1108,7 @@ def _statement_balance(
     for raw_value in raw_values:
         try:
             value = Decimal(raw_value)
-        except (InvalidOperation, ValueError):
+        except InvalidOperation, ValueError:
             return None, f"{label} balance is invalid."
         if not value.is_finite():
             return None, f"{label} balance is invalid."
@@ -1114,7 +1121,7 @@ def _statement_balance(
 def _amount_from_field(row: dict[str, str], field: str) -> Decimal | None:
     try:
         amount = Decimal(row.get(field, ""))
-    except (InvalidOperation, ValueError):
+    except InvalidOperation, ValueError:
         return None
     return amount if amount.is_finite() else None
 

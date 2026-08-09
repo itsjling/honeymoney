@@ -1242,7 +1242,7 @@ def _review_labels(value: str) -> list[str]:
 def _amount_value(value: str) -> float | None:
     try:
         amount = Decimal(value)
-    except (InvalidOperation, ValueError):
+    except InvalidOperation, ValueError:
         return None
     return float(amount) if amount.is_finite() else None
 
@@ -1250,7 +1250,7 @@ def _amount_value(value: str) -> float | None:
 def _amount_text(value: str) -> str | None:
     try:
         amount = Decimal(value)
-    except (InvalidOperation, ValueError):
+    except InvalidOperation, ValueError:
         return None
     return format(amount, "f") if amount.is_finite() else None
 
@@ -1277,7 +1277,7 @@ def _flow_summary(rows: list[dict[str, str]]) -> dict[str, Decimal | int]:
             uncategorized += 1
         try:
             amount = Decimal(row.get("amount_hkd", ""))
-        except (InvalidOperation, ValueError):
+        except InvalidOperation, ValueError:
             continue
         if not amount.is_finite():
             continue

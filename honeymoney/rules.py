@@ -250,7 +250,7 @@ def normalize_exact_text(value: str) -> str:
 def canonical_rule_amount(value: str) -> str | None:
     try:
         amount = Decimal(value)
-    except (InvalidOperation, ValueError):
+    except InvalidOperation, ValueError:
         return None
     if not amount.is_finite():
         return None

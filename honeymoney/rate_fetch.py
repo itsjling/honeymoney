@@ -373,7 +373,7 @@ def _valid_public_query(query: list[tuple[str, str]]) -> bool:
     try:
         page_size = int(values["pagesize"])
         offset = int(values["offset"])
-    except (KeyError, ValueError):
+    except KeyError, ValueError:
         return False
     fields = values.get("fields", "").split(",")
     start = _parse_date(values.get("from", ""))

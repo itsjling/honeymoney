@@ -7,7 +7,7 @@ import secrets
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Mapping, Sequence, cast
+from typing import Mapping, Sequence
 
 from honeymoney.contracts import Config
 from honeymoney.csv_artifacts import read_csv_artifact
@@ -27,7 +27,6 @@ from honeymoney.identity_contracts import (
     IdentitySourceManifest,
 )
 from honeymoney.overlap import (
-    canonicalize_overlaps,
     empty_overlap_manifest,
     overlap_manifest_document,
     overlap_manifest_path,
@@ -186,14 +185,7 @@ def load_identity_state(
         try:
             overlap_document = canonical_manifest_path.read_text(encoding="utf-8")
             parsed_overlap = parse_overlap_manifest(overlap_document)
-            overlap_migration_required = parsed_overlap["schema_version"] == 1
-            if overlap_migration_required:
-                overlap = canonicalize_overlaps(
-                    source_rows, rows, parsed_overlap
-                ).manifest
-                overlap_document = overlap_manifest_document(overlap)
-            else:
-                overlap = cast(OverlapManifest, parsed_overlap)
+            overlap = parsed_overlap
             validate_overlap_agreement(rows, source_rows, overlap)
         except (OSError, UnicodeError, ValueError) as error:
             raise IdentityError("identity_manifest_invalid") from error
@@ -205,7 +197,6 @@ def load_identity_state(
             source_evidence_rows=source_evidence_rows,
             overlap_manifest=overlap,
             overlap_manifest_document=overlap_document,
-            overlap_migration_required=overlap_migration_required,
             ledger_schema_migration_required=(
                 header != CATEGORIZED_COLUMNS
                 or occurrence_header != SOURCE_OCCURRENCE_COLUMNS

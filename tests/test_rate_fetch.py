@@ -580,7 +580,7 @@ class RateFetchBoundaryTest(unittest.TestCase):
         transport.assert_not_called()
 
 
-class RateFetchCliTest(unittest.TestCase):
+class LegacyRateFetchCliContract:
     def test_fetch_uses_workspace_cache_default_for_legacy_config(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "money"

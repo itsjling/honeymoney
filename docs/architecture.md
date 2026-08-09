@@ -1,475 +1,186 @@
 # Architecture
 
-Honeymoney is a local-first Python CLI. The filesystem is its integration
-boundary: statements and configuration go in, while CSV, JSON, and HTML
-artifacts come out. There is no database or cloud AI service. The dedicated
-`rates fetch` command may cross one fixed public-data boundary after user
-consent; no other command uses it.
+Honeymoney is a local-first Python CLI. It stores durable facts in files and
+builds replaceable calendar-month views. It has no database or cloud AI path.
+The user-gated `rates fetch` command may request public HKMA rates; no financial
+row enters that request.
 
 ## Data flow
 
 ```text
-config + profiles + statement files + local official-rate cache
-                 |
-                 v
-profile detection and CSV/PDF parsing
-                 |
-                 v
-normalized source occurrences + identity resolution against the source manifest
-                 |
-                 v
-exact-overlap multiset canonicalization
-                 |
-                 v
-deterministic rules -> opt-in local memory -> structural classification -> optional local Ollama
-                 |
-                 v
-validated corrections
-                 |
-                 v
-deterministic flow treatment + cumulative-ledger transfer reconciliation
-                 |
-                 v
-categorized.csv + review_needed.csv + import_report.json
-+ hidden source occurrences + identity manifest + overlap manifest
-                 |
-                 v
-status summaries and self-contained HTML reports
+config + profiles + rules + rates + mappings + saved corrections
+                              |
+explicit statement PATH -> parse and normalize -> import record attempt
+                              |
+              ready import-record snapshots + workspace index
+                              |
+whole-workspace identity and overlap -> rules -> local memory -> local Ollama
+                              |
+saved corrections -> valuation -> duplicate/source repair -> review -> reconciliation
+                              |
+              posting date, then transaction date, then undated
+                              |
+views/YYYY-MM/{transactions.csv,review_needed.csv,report.html}
+views/undated/{transactions.csv,review_needed.csv,report.html}
 ```
 
-The optional network path sits before the local rate cache:
+Honeymoney derives the whole workspace before it splits rows into views. An
+account transfer, duplicate group, overlap group, or correction may therefore
+connect rows in different months. A month is an output choice, not a compute
+boundary.
+
+Rules and the optional local model produce derived suggestions. Saved
+corrections remain the final human authority. Statement balance checks use each
+complete contributing import record even when a report shows one month.
+
+The only public network path is:
 
 ```text
-explicit rates fetch + public currencies + date range
-                 |
-                 v
+rates fetch + approved currencies and dates
+                    |
 fixed HKMA HTTPS endpoint -> checked complete pages -> rates.json
 ```
 
-The fetch path receives no ledger rows. Only after every response page passes
-the local provider checks does the CLI open identity state and apply the shared
-cache-and-ledger generation.
+The fetch path opens no import transaction snapshot before all public response
+pages pass local checks.
 
-Imports merge source occurrences by source `transaction_id`. Exact same-account
-occurrences from distinct sources then form canonical multiset slots. The
-public ledger uses stable canonical transaction IDs and never invents pairings
-between repeated equal source rows. The identity
-resolver uses the hidden manifest, not `source_file`, to find sources for
-replacement and reset. `source_file` is display provenance only. Corrections
-are persistent overrides keyed by `transaction_id`; rules and Ollama
-suggestions run before corrections, so reviewed choices win.
-`honeymoney learn` can turn active exact corrections into managed deterministic
-rules. It writes only after `--yes`, replaces only its own managed rules, and
-never learns owner or payment method. Broad rules require full agreement for an
-exact institution, account, normalized description, and direction. Conflicting
-groups may split only by exact posted amount and currency.
+## Storage authority
 
-## Filesystem persistence
+The directory that contains the resolved config file is the workspace root.
+See [workspace storage](workspace-storage.md) and
+[ADR 0008](adr/0008-clean-start-workspace-storage.md).
 
-`categorized.csv` is the authoritative canonical cumulative ledger.
-`.honeymoney-source-occurrences.csv` holds active source evidence and retained
-evidence for retired identity records. The identity manifest marks each record
-as active or retired. Only active rows enter canonicalization and statement
-balance checks.
-`.honeymoney-overlap-manifest.json` holds the hidden workspace namespace and
-canonical slot tombstones. Its versioned membership records hold keyed
-membership digests, membership-bound review group IDs, and explicit duplicate
-resolutions without source IDs or transaction values.
-`.honeymoney-identity-manifest.json` still owns source and record identity.
-`review_needed.csv` is regenerated from the public ledger whenever it changes,
-while
-`import_report.json` records the last import attempt and is replaced with its
-import generation. Corrections and remembered rules remain independent inputs,
-but operations that change them and the ledger publish them through the same
-recoverable persistence boundary.
-The versioned `rates.json` cache is also an input. A config that omits
-`rate_cache` resolves it to `rates.json` beside the active config, inside the
-identity workspace root. An explicit cache path wins. This default exists only
-in loaded config state and never rewrites the user's config. A local HKMA
-document import checks and normalizes every observation before it publishes
-the cache and revalued ledger through that boundary.
-Before the first ledger exists, a rate-only import uses the future ledger path
-as its coordination lock. Rate-cache and ledger recovery share that lock.
+Authority has four parts:
 
-Bundled profiles define statement parsing. User-owned account bindings in
-`profile_mappings.json` map each filename pattern and emitted profile account
-ID to an owner, unique account ID, and display name. A filename match selects
-the profile and binding together. A single-file `import --binding ID` selects
-the saved binding and its profile without using or changing filename rules.
-Sectioned profiles require a map for every declared account; profiles with
-row-supplied account IDs check every emitted ID. Binding validation rejects
-incomplete maps, conflicting filename matches, and target account IDs shared
-by distinct bindings before a ledger write. The pipeline restores the bound
-owner after rules and corrections run. Hidden source evidence keeps the safe
-binding ID so later corrections retain that owner priority; the public ledger
-does not add a binding column.
-Pattern replacement and removal validate the full mapping and profile set
-before one atomic mapping-file write. Removing a binding's final pattern also
-removes that binding. Small value-free edit receipts make exact command
-retries idempotent without retaining owner or account maps.
+1. Each import record owns one source lifecycle, immutable attempt history, and
+   the normalized transactions from its newest success.
+2. The value-free workspace index owns stable source, statement-transaction,
+   view-transaction, overlap, duplicate-decision, registered-view, and
+   generation identity.
+3. User-owned config, profiles, rules, rates, mappings, and saved corrections
+   own explicit choices and inputs.
+4. Generated views own no durable fact or choice and can be rebuilt.
 
-Each operation writes and flushes complete staged files and prior-file backups
-before replacing any public path. Non-ledger artifacts are replaced first and
-`categorized.csv` last; that final ledger replacement is the generation commit
-point. The containing directories are then synchronized. This ordering is a
-recovery protocol, not a claim that several filesystem replacements are atomic.
+An import record can exist without being ready. Its first accepted attempt may
+fail. A later failure does not replace its newest successful snapshot. A valid
+empty success is ready. Plain import retries a record with no success and
+rejects a record that already has one.
 
-Fresh setup writes `.honeymoney-managed-files.json` with the installed
-HoneyMoney version, bundle origin, workspace-relative path, and SHA-256 digest
-for each shipped profile. `setup --upgrade` manages only those profiles. It
-updates a file only when the record proves its origin and its current digest
-still matches the recorded digest. Missing records, local changes, symbolic
-links, and unsafe paths fail closed. Configured input and output paths and all
-user-owned state remain outside the write set. Evidence from a newer
-HoneyMoney release also fails closed to prevent a downgrade.
+The workspace index holds IDs, keyed proofs, allocation evidence, small state
+markers, membership, and contracts. It holds no date, amount, description,
+source path, normalized row, correction value, or reusable cross-workspace
+financial digest.
 
-An upgrade uses the managed-file record as its generation commit point. It
-stages complete profile files and prior-file backups, then publishes the record
-last. A pre-commit failure restores the old files. If an interruption happens
-after the record commit, the next upgrade completes that generation before it
-builds a new plan.
+## Identity and overlap
 
-Hidden generation state beside `categorized.csv` contains only paths, modes,
-and content digests. If a write fails before the ledger commit point, the old
-files are restored. If interruption occurs after it, the next command that
-loads the active workspace configuration completes the new generation before
-continuing. Recovery removes public files that were absent in the prior
-generation. New financial files use owner-only read and write access. Existing
-files keep their owner access while losing all group and other access.
-Diagnostics do not include transaction values. Retained state also prevents a
-new operation from silently proceeding when recovery cannot be completed.
+The source and record identity rules retained from ADR 0001 run over the whole
+accepted batch before any state changes. File display names never choose an
+identity. Replacement and reset reuse a source only through proved namespace
+or revision rules. Record matching accepts only unique evidence. Active and
+retired owners remain in the index for exact recurrence.
 
-Replacement removes obsolete source occurrences, then recomputes canonical
-membership. Reset removes a canonical correction only when every source that
-supports its overlap group belongs to the processed reset batch. A remaining
-source keeps the canonical decision. The filtered correction
-document is held in memory during categorization and is published in the same
-generation as the replacement ledger. Failed and skipped sources therefore
-retain their rows and corrections; a persistence failure restores both inputs
-to the prior generation. Import reports record the requested action and the
-ledger action actually committed for each source.
+The overlap rules retained from ADR 0003 group exact statement transactions
+across sources. Stable view-transaction slots preserve supported multiplicity
+without pairing indistinguishable repeated rows. Duplicate choices bind to the
+exact reviewed support membership. Changed evidence asks for a new choice.
 
-Before replacement or reset changes a workspace with an older review or
-canonical schema, the import path derives typed review reasons from the prior
-rows in memory. This keeps pending model suggestions and resolved manual choices
-attached to their proven canonical IDs. When a parser change rekeys a source,
-the replacement path projects that state through the same unique source-row
-proof used for corrections. A successful migration and replacement publish as
-one generation. A failed replacement leaves the prior financial generation
-unchanged, and its report describes that preserved generation. Running
-`reconcile` as a separate upgrade step remains safe but is optional.
+Saved corrections use stable view-transaction IDs. Replace keeps them. Reset
+clears one only when the successful reset set fully supports its removal.
 
-Replacement, migration, and reconciliation derive `source_data_issue` from
-the active source pool after corrections run. The canonical row keeps only
-source-data flags that active parser, balance, or provenance evidence supports.
-This also repairs stale correction review fields before publication.
-`source-data inspect` uses the same checked provenance join for any valuation
-state and returns only bounded source context. `source-data resolve` changes
-only the named row on a current schema and writes only when that join finds no
-active support. If the write also upgrades stored rows, it repairs the whole
-migrating generation. It publishes the ledger, corrections, review queue,
-source evidence, and identity files as one recoverable generation.
+## View derivation
 
-`honeymoney duplicates` reads unresolved count-mismatch groups from the overlap
-module. `duplicates resolve` validates the current membership-bound group ID,
-then records `same-event` or `keep-all`. Same-event retains the second-largest
-per-source count; keep-all retains the maximum. A membership change ignores the
-old resolution, restores duplicate review, and emits a value-free warning.
-Resolution regenerates the canonical ledger, review queue, transfers, and
-reconciliation, uses active source evidence for statement balances, and
-repairs source-data state after the overlap decision. It publishes changed
-corrections in the same generation and does not rewrite the last import report.
+A transaction belongs to the month of its valid posting date. If no posting
+date exists, it uses its valid transaction date. With neither date, it belongs
+to `views/undated/`.
 
-The current import report describes the latest attempted import even when a
-source fails, while the authoritative ledger, its derived review rows, and saved
-corrections remain on the prior financial generation. Ollama is an optional
-post-parse categorizer: its unavailability leaves parsed rows pending review and
-does not turn a successfully processed statement into a failed reset.
-An invalid response triggers one follow-up request for only missing or invalid
-rows. Valid results stay fixed. Raw model confidence does not clear review
-unless the config names a locally calibrated acceptance threshold. Import
-reports split category provenance into deterministic, memory, exact-correction,
-accepted-model, reviewable-model, and unresolved counts.
+Serialization fixes row order, headers, quoting, text safety, JSON encoding,
+and report bytes. A selected empty view has header-only CSVs and a report with
+zero transactions. If one file in a view changes, publication replaces all
+three files.
 
-`needs_review` is derived from the stable tokens in `review_reasons`; it cannot
-remain true with no current human decision. The free-text `reason` field keeps
-categorization and processing provenance. HKD valuation completeness stays
-separate from transaction review. `valuation_source` and `valuation_status`
-distinguish statement amounts, matched exchange legs, dated or fixed rate
-estimates, imported HKMA reference estimates, and missing values.
-`valuation_rate_date` and `valuation_provider` keep the rate evidence on each
-valued row. See
-[`ADR 0004`](adr/0004-review-state-and-hkd-valuation.md).
+Every refresh computes all expected views, compares deterministic old and new
+bytes, and writes only affected logical view units. It uses no month-local
+cache or dependency graph. A narrow refresh leaves unrelated missing or edited
+views alone. `views rebuild --all` creates every implied view and removes only
+registered views no longer implied.
 
-Status and report owner filters validate exact names against the configured
-owner vocabulary, remove repeated filter values, and select the same union of
-canonical rows. No filter keeps the full household set. The self-contained
-HTML embeds only the command-selected rows, then applies its local owner
-selection to every transaction-based count, total, chart, and table row.
+The index records keyed proofs for all derivation inputs at the last full
+generation. A direct input edit makes normal writers and narrow rebuilds fail
+with `full_rebuild_required`. The user must run `views rebuild --all`.
 
-`category` is the merchant/budget classification. `flow_type` is the accounting
-treatment used by cash-flow totals. Ollama is limited to configured spending
-categories and cannot set an owner or protected accounting treatment. Protected
-categories are established only by rules, corrections, conservative structural
-classification, or reconciliation. After rules, local Ollama, and corrections,
-the cumulative ledger is reconciled across owned accounts. Unique opposite-sign,
-equal-base-currency candidates within the configured date window receive stable
-transfer links derived from their existing transaction IDs. Ambiguous candidates
-are never auto-paired. Reports derive old ledgers in memory, and `reconcile`
-provides an explicit inspect/rewrite seam.
+## Publication and recovery
 
-Manual same-account cash pairs use a shared `manual_pair_id` in both correction
-rows. Correction projection carries that ID only through proven identity
-mapping. Each reconciliation rebuilds the pair from its two current members and
-checks account, posted currency, amount, sign, and owner. Missing, extra, or
-changed members fail closed as unresolved accounting review. Valid manual pairs
-run before automatic matching and keep `flow_source=correction`. A later
-non-transfer review clears both pair markers atomically and returns the other
-member to review. Pair replay maps a retired nominated source ID only through a
-single active canonical slot with the same checked identity fingerprint. Both
-mapped rows must have reciprocal links and make up the full ledger and
-correction membership for one pair. An exact replay returns `changed=false`
-before any generation write.
+One accepted state-changing command holds one exclusive workspace lock and
+publishes one generation. It completes preflight before it assigns attempt
+numbers. It then writes a checked journal containing the exact old and new
+bytes for every target.
 
-PDF profiles may map statement opening and closing balance lines. The importer
-scans raw word or table lines, then puts each balance on the first or last
-transaction for the mapped account, statement section, and posted currency. It
-never turns a balance line into a transaction. Statement-balance reconciliation
-groups hidden source occurrences by source identity, account, statement
-section, and posted currency. It uses
-`source_file` only for legacy rows that
-lack `source_id`. The existing `status` field stays `reconciled`, `difference`,
-or `unavailable`. Each statement result also says whether safe opening and
-closing evidence was found. Its outcome is `missing_opening`,
-`missing_closing`, `missing_both`, `conflicting_evidence`, `matched`, or
-`mismatched`. If both endpoints are safe but posted currency or activity input
-is unusable, its outcome remains `unavailable` and its reason names that input.
-Partial, conflicting, and unavailable results contain no calculated values.
-Conflicting balance values add a safe row flag. Conflict output names the
-source, page, section, and field but omits the values. Missing evidence alone
-does not mark a transaction for source-data review.
+The publisher stages and flushes complete files and recovery bytes. It installs
+non-index targets first, syncs their directories, and replaces the workspace
+index last. The index replacement commits the generation. Attempt reports sit
+outside rollback replacement; the command finalizes them atomically from
+reserved journal facts after it knows which generation won.
 
-Canonical cash-flow and report totals use the public ledger. The maximum
-per-source multiplicity sets the canonical count for each exact overlap group.
-Equal counts consolidate. Different counts keep that maximum, stay pooled, and
-force review. JSON keeps the old duplicate count fields as derived compatibility
-data, while `overlap` is the full provenance contract.
-Direction uses the base-currency amount when present. If conversion is missing,
-it may use a valid non-zero posted amount for direction only. Transfer matching
-and report totals still require base-currency amounts. Reports split missing
-values by cash-flow impact without transaction text.
+A stopped command leaves the journal. Normal commands fail closed while it
+exists. `doctor --fix` alone settles it: before index commit the old generation
+wins, and at or after index commit the new one wins. Recovery copies recorded
+bytes and never reruns financial logic. The journal remains until attempt
+reports and cleanup finish.
 
-Official HKMA daily observations use HKD per unit of foreign currency. A local
-import stores the raw observation and a resolution for each requested
-transaction date. Resolution uses the exact date or the latest prior date
-within seven calendar days. It never uses a future observation. Valuation order
-is statement-posted value, matched exchange leg, configured exact-date rate,
-HKMA cache, configured fixed rate, then missing. See
-[`ADR 0005`](adr/0005-local-hkma-rate-cache.md).
-The provider fields already use one foreign-currency unit, including JPY, KRW,
-and IDR. Normal statement imports add new requested-date resolutions when the
-cache already holds a matching observation.
+See [doctor](doctor.md) for audit and repair boundaries.
 
-Valuation summaries group missing values by accounting impact. Missing income,
-expense, and refund values block confirmed cash-flow totals unless the posted
-amount is exactly zero. Missing transfer, card-payment, and investment-transfer
-values do not block those totals. Missing unresolved flows stay separate.
-Summaries also split income, spending, refunds, and net cash flow into actual,
-estimated, and combined-estimate HKD values. Source counts keep each estimate
-kind distinct. See
-[`ADR 0006`](adr/0006-valuation-impact-reporting.md).
+## Public CLI
 
-## Transaction identity
+`import PATH` accepts one file or folder. `imports list` shows safe labels,
+readiness, and statement-transaction counts. `imports show` shows current state
+and bounded complete attempt history without values or raw paths.
 
-Identity v2 gives each hidden source-occurrence row four fields: `source_id`,
-`source_namespace_id`, `source_revision`, and `source_record_id`. A v2 source
-row has all four fields. Partial metadata fails validation. New source
-transaction IDs use a
-128-bit, domain-separated digest of the source and record IDs. Source IDs use
-the `src_`, `ns_`, `rev_`, and `rec_` prefixes plus full SHA-256 digests; new
-transaction IDs use `txn_` plus 32 lowercase hexadecimal characters.
-`source_file`, source page, and source row remain source display fields and
-never form identity or replacement keys.
+`views rebuild` accepts the shared period selectors. Status, pending review,
+valuation inspection, reports, and rebuilds use the same exclusive selector
+language. No selector means the current month. `--all` includes undated.
+`report export` writes one explicit standalone HTML file; managed reports stay
+inside views.
 
-Public canonical rows add `canonical_group_id`, `canonical_slot`,
-`provenance_status`, and `source_occurrence_count` after `transaction_id`.
-Their source identity, source display, and statement-balance fields stay empty.
-Canonical IDs come from a hidden random workspace namespace, the normalized
-record fingerprint, and the abstract slot number.
+The removed public contracts are `run`, `--input`, `paths.input`, and ledger
+uses of `--output`.
 
-Missing-valuation inspection emits a workspace-relative source path only after
-the path produces the stored source namespace. A matching file name alone is
-not proof. Evidence keeps one item per active source occurrence, including
-equal display, page, and row values.
+JSON uses schema version 3. It keeps the common envelope and uses
+`import_count`, `statement_transaction_count`, `view_transaction_count`,
+`import_records`, `views`, and `report_html`.
 
-The shared active-provenance index also supports source-data review. It checks
-canonical group membership and source-occurrence counts before either
-inspection path returns evidence. Source-data evidence maps each supported flag
-to a parser, balance, or provenance conflict and gives its safe source, page,
-statement section, and field without returning statement values. A valid
-unresolved overlap count or history conflict remains loadable and appears as
-typed provenance evidence; malformed persisted identity state still fails
-closed.
+## Module boundaries
 
-The resolver runs for the whole input batch before categorization, correction
-application, reconciliation, or any transaction-ID dictionary. It resolves a
-logical source from its normalized workspace-safe locator and exact source
-bytes. An ordinary import creates a new source when its namespace is new. A
-replace or reset reuses a source only through one exact namespace match, or one
-unclaimed equal-revision match for an accepted rename. It never guesses from a
-file name, directory order, or an ambiguous match.
-
-Within each source, the resolver matches records only on the accepted
-fingerprint and manifest ownership. An unchanged source uses its exact stored
-locator mapping. A changed source can reuse records only when there is one
-maximum matching; otherwise it stops with an identity ambiguity error. New
-records receive a stable allocation origin from immutable parser locators.
-Retired records keep their ownership, so they cannot pass a correction to a
-later similar transaction. Legacy IDs survive only when migration proves one
-owner; shared legacy IDs stay unowned and require review. The full contract is
-in [`ADR 0001`](adr/0001-stable-transaction-identity.md).
-
-The one-time move from an identity-v2 ledger to the canonical overlap ledger
-binds proven review history to canonical slots before a replacement or reset.
-Exact locator and fingerprint matches keep their source owners, followed by
-unique fingerprint matches. Repeated unmatched records retire and receive new
-source owners as a pool, without pairing old and new occurrences. Compatible
-corrections and review history stay on the canonical slots.
-When a parser repair changes account or currency identity during this move,
-the migration joins old and new source rows only on one unique normalized
-source-local record shape. A repeated group moves only when every old row has
-the same correction. Conflicts stay in review. The published correction file
-keeps final active canonical IDs and drops retired source aliases.
-
-## Persistence authority and recovery
-
-`categorized.csv` is the authoritative canonical ledger. `review_needed.csv` is a
-deterministic view of its rows whose `needs_review` value is `true`.
-`import_report.json` describes the latest attempted import, including an attempt
-that failed while the prior ledger stayed in place. Review and correction
-commands do not rewrite that import record. `corrections.csv` remains durable
-input for applying reviewed choices to future imports, but it is not a second
-ledger.
-
-The hidden `<categorized.csv parent>/.honeymoney-identity-manifest.json` is the
-authoritative source and record ownership store. It records IDs, hashes,
-allocation locators, and active or retired state, but never source paths,
-statement text, or display values. Hidden source rows and the identity manifest
-must agree. Retired hidden rows stay out of the public ledger. Canonical rows
-and the overlap manifest must agree.
-The first import writes both, including for a zero-record source. A missing
-manifest can bootstrap only an exact pre-v2 ledger header. An exact issue #31
-ledger keeps its old IDs for read-only commands; its first write publishes both
-new hidden files and the canonical public schema in one generation. Any partial
-canonical state fails closed.
-
-The manifest joins every recoverable ledger generation, including import,
-replace, reset, correction, review, reconcile, and recovery. A change that
-only updates mutable ledger fields carries validated ownership forward without
-changing it.
-
-## Source map
-
-- `honeymoney/cli.py`: command routing, workspace setup, identity resolution,
-  duplicate review, ledger generation, categorization, review filtering, and
-  JSON output.
-- `honeymoney/importers.py`: input discovery, profile validation and selection,
-  CSV/PDF parsing, parser locators, and private source identity inputs.
-- `honeymoney/account_bindings.py`: user-owned filename bindings, complete
-  emitted-account maps, owner/account overrides, and collision checks.
-- `honeymoney/normalization.py`: pure row/date/amount/text normalization and
-  compatibility helpers.
-- `honeymoney/overlap.py`: canonical multiset slots, membership-bound duplicate
-  review, resolution safety, manifest validation, and privacy-safe evidence.
-- `honeymoney/contracts.py`, `honeymoney/identity_contracts.py`,
-  `honeymoney/overlap_contracts.py`, and `honeymoney/parser_contracts.py`:
-  checked static contracts shared by the financial core, identity and overlap
-  boundaries, and statement parsers.
-- `honeymoney/duplicates.py`: pure identity-backed duplicate evaluation,
-  idempotent candidate annotation, and privacy-safe diagnostics.
-- `honeymoney/identity.py`: identity-v2 digests, validation, source and record
-  resolution, manifest ownership, and safe identity diagnostics.
-- `honeymoney/identity_state.py`: ledger and manifest loading, bootstrap rules,
-  cross-file validation, and manifest path handling.
-- `honeymoney/corrections.py`: correction validation, merge-by-transaction-ID,
-  cumulative reconciliation, and correction/ledger/review/rule generation content.
-- `honeymoney/csv_artifacts.py`: reversible spreadsheet-safe serialization and
-  canonical read-back for public CSV text cells; see
-  [CSV compatibility](csv-compatibility.md).
-- `honeymoney/persistence.py`: staged filesystem generation commits, authoritative
-  ledger replacement, directory synchronization, and retained-state recovery.
-- `honeymoney/workspace_upgrade.py`: bundled-profile ownership evidence,
-  privacy-safe upgrade plans, protected-path checks, and recoverable profile
-  publication.
-- `honeymoney/rules.py`: deterministic rule validation and application.
-- `honeymoney/learning.py`: conservative managed-rule planning from active exact
-  human corrections.
-- `honeymoney/categorization_memory.py`: opt-in, correction-derived local
-  spending-category matches rebuilt from validated identity state.
-- `honeymoney/ollama.py`: optional local-only categorization fallback. Its
-  shared model-listing and generation transport accepts only `http` endpoints
-  that resolve exclusively to loopback addresses, pins the connection to a
-  validated numeric address, bypasses proxies, and revalidates redirects before
-  following them.
-- `honeymoney/schema.py`: public ledger/review columns and allowed values.
-- `honeymoney/report.py`: offline HTML report generation.
-- `honeymoney/rate_fetch.py`: fixed HKMA HTTPS request construction, explicit
-  public query allowlist, response limits, and complete-page collection.
-- `honeymoney/rates.py`: official HKMA document checks, versioned cache, and
-  safe prior-date resolution.
-- `honeymoney/reconciliation.py`: deterministic flow derivation, transfer pairing,
-  and optional statement balance checks.
-- `honeymoney/review_state.py`: review-reason tokens, plain labels, and the
-  boolean invariant.
-- `honeymoney/valuation.py`: HKD value source, configured and cached rates, and
-  completeness counts.
-- `honeymoney/valuation_inspection.py`: read-only canonical-to-active-source
-  joins for missing valuation diagnosis.
-- `honeymoney/data/profiles/`: bundled institution profiles copied by setup.
-- `tests/fixtures/`: synthetic golden inputs and expected behavior.
-
-## Public boundaries
-
-Treat CLI text behavior, the versioned JSON envelope, exit codes, configuration
-fields, corrections, bundled profiles, and output columns as compatibility
-contracts. JSON commands emit one document on stdout; progress belongs on
-stderr. Exit `0` means success, `1` means strict partial success, and `2` means
-usage, configuration, or validation failure.
-
-`pending` exposes review rows. `correct` remains the structured machine/agent
-seam. `review` is the human seam: period/category/flow/direction filters feed
-interactive accounting decisions, while `--transaction ID --as DECISION` is a
-fully specified one-shot form and `--file FILE` accepts a decision-only CSV or
-JSON batch. Batch review checks all entries and current review state before it
-calls the correction operation. Each form merges saved corrections by
-transaction ID, reconciles the cumulative ledger, and replaces all derived
-files through temporary files. JSON review is accepted only for non-prompting
-one-shot and batch forms.
-
-Remembered income rules are deterministic exact matches on institution,
-account identity, normalized description, and the virtual inflow direction.
-Direction uses `amount_hkd` when present, then the posted amount. It is not part
-of transaction identity.
-Human corrections, deterministic rules, and conservative structural matching
-may establish protected flows; reconciliation may establish owned-account
-transfers. Refunds and owned-account flows remain distinct, and Ollama cannot
-set flow treatment.
+- CLI composition parses commands and coordinates typed services. It does not
+  own storage formats or financial rules.
+- Import-record storage validates source packages, snapshots, summaries, and
+  attempt reports.
+- Workspace-index code owns value-free identity and cross-file checks.
+- Identity and overlap code owns source, statement-transaction, and
+  view-transaction allocation.
+- View derivation builds the whole expected workspace output in memory.
+- View serialization produces deterministic CSV and HTML bytes.
+- Publication code owns locks, journals, staging, sync, index-last commit,
+  attempt finalization, and cleanup.
+- Doctor code owns full audit and proof-based repair.
+- Parser, rules, correction, valuation, review, reconciliation, report, rate,
+  and local Ollama modules keep their narrow domain work.
 
 ## Privacy boundary
 
-Only synthetic fixtures may enter git or cloud Codex. Real statement files,
-local workspaces, generated outputs, and live Ollama transcripts stay local.
-Ollama is disabled by default and is never part of CI.
-The only public network exception is `rates fetch`. It sends currency codes,
-dates, and page controls to the fixed HKMA endpoint after consent. It does not
-load ledger rows before the response has passed all page checks. Ordinary
-commands remain offline. The full boundary is in
-[`network-boundary.md`](network-boundary.md).
+Only synthetic fixtures may enter git or cloud Codex. Real statements, local
+workspaces, generated views, and live Ollama transcripts stay local. Ollama
+defaults off and may connect only to its checked loopback endpoint.
+
+Managed paths reject symbolic links and unsafe targets. Financial files use
+owner-only access. Operational output uses stable codes and bounded safe labels
+without amounts, descriptions, raw paths, or statement text.
+
+The HKMA exception sends only approved public currency codes, dates, and page
+controls after consent. See [network boundary](network-boundary.md).
 
 ## Quality gates
 
-The offline project check runs strict mypy over a named financial-core scope
-and measures branch coverage over the default synthetic unittest suite.
-Coverage includes child CLI processes and fails below the reviewed threshold in
-`pyproject.toml`. The checked scope, excluded modules, expansion rule, baseline,
-and critical-path test map are in [`quality-gates.md`](quality-gates.md).
+Python 3.14.6 runs formatting, lint, strict types, full unit tests, at least 87
+percent branch coverage, package checks, and builds. Fresh offline environments
+install and smoke-test both release archives. See
+[quality gates](quality-gates.md).

@@ -641,13 +641,15 @@ def canonical_bound_owners(
 def _saved_binding_owner(
     row: Mapping[str, str], mappings: Mapping[str, object]
 ) -> str | None:
-    source_file = row.get("source_file", "")
-    if not source_file:
-        return None
-    mapping = matching_filename_mapping(Path(source_file), mappings)
-    if mapping is None or not mapping.get("binding"):
-        return None
-    binding_id = str(mapping["binding"])
+    binding_id = row.get(_BOUND_BINDING_ID_FIELD, "")
+    if not binding_id:
+        source_file = row.get("source_file", "")
+        if not source_file:
+            return None
+        mapping = matching_filename_mapping(Path(source_file), mappings)
+        if mapping is None or not mapping.get("binding"):
+            return None
+        binding_id = str(mapping["binding"])
     account_identity = normalized_account_id(row.get("account_id", ""))
     for raw_binding in _mapping_list(mappings, "account_bindings"):
         if not isinstance(raw_binding, Mapping) or raw_binding.get("id") != binding_id:

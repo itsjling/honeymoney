@@ -8,8 +8,9 @@ import threading
 import time
 import urllib.error
 from decimal import Decimal, InvalidOperation
+from email.message import Message
 from io import BytesIO
-from typing import Any, Callable, Mapping, NamedTuple
+from typing import Callable, Mapping, NamedTuple, Protocol, TypeAlias
 from urllib.parse import urljoin, urlsplit, urlunsplit
 
 from honeymoney.classification_policy import (
@@ -17,6 +18,7 @@ from honeymoney.classification_policy import (
     model_boundary_guidance,
     model_category_descriptions,
 )
+from honeymoney.contracts import Config
 from honeymoney.duplicates import (
     DUPLICATE_FLAG,
     release_duplicate_review_ownership,
@@ -33,6 +35,34 @@ _DEFAULT_OLLAMA_URL = "http://localhost:11434/api/generate"
 _DEFAULT_OLLAMA_MODEL = "qwen2.5:7b-instruct"
 _REDIRECT_STATUSES = {301, 302, 303, 307, 308}
 _MAX_REDIRECTS = 5
+
+OllamaReport: TypeAlias = dict[str, str | int]
+_SocketAddress: TypeAlias = (
+    tuple[str, int] | tuple[str, int, int, int] | tuple[int, bytes]
+)
+_AddressInfo: TypeAlias = tuple[
+    socket.AddressFamily,
+    socket.SocketKind,
+    int,
+    str,
+    _SocketAddress,
+]
+
+
+class _Resolver(Protocol):
+    def __call__(
+        self,
+        host: bytes | str | None,
+        port: bytes | str | int | None,
+        family: int = 0,
+        type: int = 0,
+        proto: int = 0,
+        flags: int = 0,
+    ) -> list[_AddressInfo]: ...
+
+
+class OllamaTransport(Protocol):
+    def request(self, request: "OllamaHttpRequest") -> bytes: ...
 
 
 class OllamaHttpRequest(NamedTuple):
@@ -135,13 +165,13 @@ def _default_sender(request: OllamaHttpRequest) -> OllamaHttpResponse:
             deadline.enforce()
             try:
                 response = connection.getresponse()
-            except (OSError, ValueError):
+            except OSError, ValueError:
                 deadline.enforce()
                 raise
             deadline.enforce()
             try:
                 body = response.read()
-            except (OSError, ValueError):
+            except OSError, ValueError:
                 deadline.enforce()
                 raise
             deadline.enforce()
@@ -161,7 +191,7 @@ class LoopbackOllamaTransport:
     def __init__(
         self,
         *,
-        resolver: Callable[..., list[tuple[Any, ...]]] | None = None,
+        resolver: _Resolver | None = None,
         sender: Callable[[OllamaHttpRequest], OllamaHttpResponse] | None = None,
         max_redirects: int = _MAX_REDIRECTS,
     ) -> None:
@@ -185,7 +215,7 @@ class LoopbackOllamaTransport:
                         current.url,
                         response.status,
                         response.reason,
-                        response.headers,
+                        _http_error_headers(response.headers),
                         BytesIO(response.body),
                     )
                 return response.body
@@ -235,7 +265,7 @@ class LoopbackOllamaTransport:
 def validate_ollama_endpoint(
     url: str,
     *,
-    resolver: Callable[..., list[tuple[Any, ...]]] | None = None,
+    resolver: _Resolver | None = None,
 ) -> _ValidatedEndpoint:
     """Validate an HTTP Ollama URL and pin it to resolved loopback addresses."""
     try:
@@ -305,6 +335,14 @@ def _header(headers: Mapping[str, str], name: str) -> str:
     return ""
 
 
+def _http_error_headers(headers: Mapping[str, str]) -> Message[str, str]:
+    """Build the concrete header object required by ``HTTPError``."""
+    result: Message[str, str] = Message()
+    for key, value in headers.items():
+        result[key] = value
+    return result
+
+
 def _redirect_request_parts(
     request: OllamaHttpRequest, status: int
 ) -> tuple[str, bytes | None, dict[str, str]]:
@@ -332,8 +370,8 @@ class OllamaProgress(NamedTuple):
 
 
 def list_ollama_models(
-    ollama_config: dict[str, Any],
-    transport: LoopbackOllamaTransport | None = None,
+    ollama_config: Mapping[str, object],
+    transport: OllamaTransport | None = None,
 ) -> list[str]:
     """Return model names installed at the configured Ollama endpoint."""
     generate_url = str(ollama_config.get("url", _DEFAULT_OLLAMA_URL))
@@ -355,13 +393,15 @@ def list_ollama_models(
             min(_timeout_seconds(ollama_config), 10.0),
         )
     )
-    payload = json.loads(body.decode("utf-8"))
-    if not isinstance(payload, dict) or not isinstance(payload.get("models"), list):
+    payload = _json_object(body.decode("utf-8"))
+    models = payload.get("models")
+    if not isinstance(models, list):
         raise ValueError("Ollama model list response did not contain a models array")
 
     names = []
-    for model in payload["models"]:
-        if not isinstance(model, dict):
+    for model_value in models:
+        model = _string_key_mapping(model_value)
+        if model is None:
             continue
         name = model.get("name") or model.get("model")
         if isinstance(name, str) and name.strip():
@@ -371,13 +411,13 @@ def list_ollama_models(
 
 def apply_ollama_fallback(
     transactions: list[dict[str, str]],
-    config: dict[str, Any],
+    config: Config,
     progress: Callable[[OllamaProgress], None] | None = None,
-    transport: LoopbackOllamaTransport | None = None,
+    transport: OllamaTransport | None = None,
     corrections: Mapping[str, Mapping[str, str]] | None = None,
-) -> tuple[dict[str, Any], list[str]]:
-    ollama_config = config.get("ollama", {})
-    if not ollama_config.get("enabled", False):
+) -> tuple[OllamaReport, list[str]]:
+    ollama_config = _ollama_settings(config)
+    if not bool(ollama_config.get("enabled", False)):
         return {
             "status": "disabled",
             "candidate_count": 0,
@@ -612,7 +652,7 @@ def apply_ollama_fallback(
 def _has_exact_category_correction(
     transaction: Mapping[str, str],
     corrections: Mapping[str, Mapping[str, str]] | None,
-    config: dict[str, Any],
+    config: Config,
 ) -> bool:
     if corrections is None:
         return False
@@ -621,20 +661,58 @@ def _has_exact_category_correction(
     return category != "Unknown" and category in allowed_categories(config)
 
 
-def _batch_size(ollama_config: dict[str, Any]) -> int:
+def _batch_size(ollama_config: Mapping[str, object]) -> int:
     try:
-        batch_size = int(ollama_config.get("batch_size", 5))
-    except (TypeError, ValueError):
+        batch_size = _integer(ollama_config.get("batch_size", 5))
+    except TypeError, ValueError:
         return 5
     return max(1, batch_size)
 
 
-def _timeout_seconds(ollama_config: dict[str, Any]) -> float:
+def _timeout_seconds(ollama_config: Mapping[str, object]) -> float:
     try:
-        timeout = float(ollama_config.get("timeout_seconds", 120))
-    except (TypeError, ValueError):
+        timeout = _number(ollama_config.get("timeout_seconds", 120))
+    except TypeError, ValueError:
         return 120.0
     return timeout if timeout > 0 else 120.0
+
+
+def _ollama_settings(config: Config) -> Mapping[str, object]:
+    value = config.get("ollama")
+    return value if isinstance(value, Mapping) else {}
+
+
+def _integer(value: object) -> int:
+    if isinstance(value, (str, bytes, bytearray, int, float)):
+        return int(value)
+    raise TypeError("Ollama numeric setting must be text or a number")
+
+
+def _number(value: object) -> float:
+    if isinstance(value, (str, bytes, bytearray, int, float)):
+        return float(value)
+    raise TypeError("Ollama numeric setting must be text or a number")
+
+
+def _json_object(document: str) -> dict[str, object]:
+    value: object = json.loads(document)
+    mapping = _string_key_mapping(value)
+    if mapping is None:
+        raise ValueError("Ollama response must be a JSON object")
+    return dict(mapping)
+
+
+def _json_value(value: object) -> object:
+    if not isinstance(value, (str, bytes, bytearray)):
+        raise TypeError("Ollama response must be JSON text")
+    parsed: object = json.loads(value)
+    return parsed
+
+
+def _string_key_mapping(value: object) -> Mapping[str, object] | None:
+    if not isinstance(value, Mapping) or not all(isinstance(key, str) for key in value):
+        return None
+    return value
 
 
 def _error_text(error: Exception) -> str:
@@ -643,7 +721,7 @@ def _error_text(error: Exception) -> str:
         try:
             body = json.loads(error.read().decode("utf-8", "replace"))
             message = str(body.get("error", ""))
-        except (json.JSONDecodeError, UnicodeDecodeError, OSError):
+        except json.JSONDecodeError, UnicodeDecodeError, OSError:
             pass
         detail = f": {message}" if message else ""
         return f"HTTP {error.code} {error.reason}{detail}"
@@ -656,11 +734,11 @@ def _chunks(rows: list[dict[str, str]], size: int) -> list[list[dict[str, str]]]
 
 def _request_ollama(
     transactions: list[dict[str, str]],
-    ollama_config: dict[str, Any],
-    config: dict[str, Any],
+    ollama_config: Mapping[str, object],
+    config: Config,
     tick: Callable[[float], None] | None = None,
-    transport: LoopbackOllamaTransport | None = None,
-) -> dict[str, Any]:
+    transport: OllamaTransport | None = None,
+) -> dict[str, object]:
     descriptions = model_category_descriptions(config)
     categories = sorted(descriptions)
     payload = {
@@ -699,14 +777,14 @@ def _request_ollama(
 
     http = transport or LoopbackOllamaTransport()
     if tick is None:
-        return json.loads(http.request(request).decode("utf-8"))
+        return _json_object(http.request(request).decode("utf-8"))
 
-    result: dict[str, Any] = {}
+    result: dict[str, dict[str, object]] = {}
     error: dict[str, Exception] = {}
 
     def worker() -> None:
         try:
-            result["body"] = json.loads(http.request(request).decode("utf-8"))
+            result["body"] = _json_object(http.request(request).decode("utf-8"))
         except Exception as exc:  # re-raised on the caller's thread below
             error["exc"] = exc
 
@@ -719,10 +797,13 @@ def _request_ollama(
             tick(time.monotonic() - start)
     if "exc" in error:
         raise error["exc"]
-    return result["body"]
+    try:
+        return result["body"]
+    except KeyError as exc:
+        raise RuntimeError("Ollama request worker returned no response") from exc
 
 
-def _response_format(categories: list[str]) -> dict[str, Any]:
+def _response_format(categories: list[str]) -> dict[str, object]:
     return {
         "type": "object",
         "properties": {
@@ -764,8 +845,8 @@ def _ollama_transaction_payload(transaction: dict[str, str]) -> dict[str, str]:
 
 def _apply_ollama_response(
     unresolved: list[dict[str, str]],
-    response_body: dict[str, Any],
-    config: dict[str, Any],
+    response_body: Mapping[str, object],
+    config: Config,
 ) -> tuple[
     dict[str, int],
     int,
@@ -774,8 +855,8 @@ def _apply_ollama_response(
 ]:
     raw_response = response_body.get("response", "")
     try:
-        categorizations = json.loads(raw_response)
-    except (TypeError, json.JSONDecodeError):
+        categorizations: object = _json_value(raw_response)
+    except TypeError, json.JSONDecodeError:
         detail = f"Ollama response was not JSON: {_snippet(raw_response)}"
         return (
             {"accepted": 0, "reviewable": 0, "rejected": 0},
@@ -783,8 +864,9 @@ def _apply_ollama_response(
             [detail],
             list(unresolved),
         )
-    if isinstance(categorizations, dict):
-        categorizations = categorizations.get("categorizations")
+    wrapped = _string_key_mapping(categorizations)
+    if wrapped is not None:
+        categorizations = wrapped.get("categorizations")
     if not isinstance(categorizations, list):
         detail = f"Ollama response was not a JSON list: {_snippet(raw_response)}"
         return (
@@ -801,13 +883,22 @@ def _apply_ollama_response(
     details: list[str] = []
     handled_ids: set[str] = set()
     mentioned_ids: set[str] = set()
-    for categorization in categorizations:
-        if not isinstance(categorization, dict):
+    for categorization_value in categorizations:
+        categorization = _string_key_mapping(categorization_value)
+        if categorization is None:
             continue
         transaction_id = str(categorization.get("id", ""))
         transaction = by_id.get(transaction_id)
         if transaction is not None:
             mentioned_ids.add(transaction_id)
+        if transaction is None:
+            invalid += 1
+            details.append(
+                "Ollama categorization rejected "
+                f"({transaction_id or 'unknown'}): "
+                f"unknown transaction id {transaction_id or '(missing)'}"
+            )
+            continue
         category = str(categorization.get("category", ""))
         reason = str(categorization.get("reason", ""))
         try:
@@ -816,9 +907,7 @@ def _apply_ollama_response(
             confidence = Decimal("-1")
 
         problem = ""
-        if transaction is None:
-            problem = f"unknown transaction id {transaction_id or '(missing)'}"
-        elif transaction_id in handled_ids:
+        if transaction_id in handled_ids:
             problem = "duplicate categorization for the same transaction"
         elif category not in categories:
             problem = f"category {category or '(missing)'!r} is not allowed"
@@ -832,7 +921,7 @@ def _apply_ollama_response(
             problem = f"confidence {categorization.get('confidence')!r} is not between 0 and 1"
         if problem:
             invalid += 1
-            subject = transaction.get("merchant", "") if transaction else transaction_id
+            subject = transaction.get("merchant", "")
             details.append(
                 f"Ollama categorization rejected ({subject or 'unknown'}): {problem}"
             )
@@ -872,7 +961,15 @@ def _apply_ollama_response(
             REVIEW_REASON_CATEGORY_SUGGESTION,
             outcome.outcome == "reviewable",
         )
-        counts[outcome.outcome] += 1
+        if outcome.outcome == "accepted":
+            counts["accepted"] += 1
+        elif outcome.outcome == "reviewable":
+            counts["reviewable"] += 1
+        else:
+            invalid += 1
+            details.append(
+                f"Ollama categorization rejected ({transaction.get('merchant', '') or transaction_id}): category {category!r} is not allowed"
+            )
 
     unanswered = len(set(by_id) - mentioned_ids)
     if unanswered:
@@ -892,7 +989,7 @@ def _model_requires_independent_review(
     transaction: dict[str, str],
     category: str,
     confidence: Decimal,
-    config: dict[str, Any],
+    config: Config,
 ) -> bool:
     without_duplicate = {
         **transaction,
@@ -906,7 +1003,7 @@ def _model_requires_independent_review(
     )
 
 
-def _snippet(value: Any, limit: int = 120) -> str:
+def _snippet(value: object, limit: int = 120) -> str:
     text = " ".join(str(value or "").split())
     if len(text) > limit:
         return f"{text[:limit]}…"

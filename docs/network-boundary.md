@@ -52,8 +52,8 @@ The request discloses:
 
 No code path from a transaction or source row enters the request builder. The
 request cannot contain transaction values, descriptions, merchant names,
-accounts, owners, statement paths, source IDs, ledger rows, corrections, or
-model prompts.
+accounts, owners, statement paths, source IDs, import-record rows, corrections,
+or model prompts.
 
 ## Inbound checks and writes
 
@@ -64,11 +64,12 @@ requested currency. Dates must stay within the shown range, sort in ascending
 order within and across pages, and never overlap another page. The final page
 must be shorter than the requested page size.
 
-The CLI collects and checks all pages before it loads ledger rows. A provider
-error, timeout, bad document, out-of-range date, repeated page, or incomplete
-page causes no cache or ledger write. After success, the shared rate operation
-publishes only the cache and any derived valuation generation. Its retained
-write protocol restores the prior cache and ledger if publication fails.
+The CLI collects and checks all pages before it loads ready import-record rows.
+A provider error, timeout, bad document, out-of-range date, repeated page, or
+incomplete page causes no cache, index, or view write. After success, the
+shared rate operation derives the whole workspace and publishes the cache,
+affected views, and workspace index as one generation. Index-last publication
+and its checked journal recover the prior or new generation after a stop.
 
 Human and versioned JSON errors use these privacy-safe classes:
 

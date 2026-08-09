@@ -375,7 +375,7 @@ def _positive_decimal(value: object) -> Decimal | None:
 def _decimal(value: str) -> Decimal | None:
     try:
         parsed = Decimal(value)
-    except (InvalidOperation, ValueError):
+    except InvalidOperation, ValueError:
         return None
     return parsed if parsed.is_finite() else None
 

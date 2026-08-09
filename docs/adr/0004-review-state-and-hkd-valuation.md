@@ -3,6 +3,9 @@
 - Status: Accepted by the implementation request
 - Date: 2026-07-27
 - Narrows: ADR 0003 public CSV headers and mutable review state
+- Narrowed by: ADR 0008. Review and valuation rules remain. Their fields now
+  live in generated view CSVs, publication uses workspace generations, JSON is
+  schema version 3, and the old ledger-header migration no longer applies.
 
 ## Context
 

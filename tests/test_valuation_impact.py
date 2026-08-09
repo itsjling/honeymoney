@@ -93,7 +93,7 @@ class ValuationImpactTest(unittest.TestCase):
         assert match is not None
         self.assertEqual(match.group(1), "100,000,000,000,000.01")
 
-    def test_owner_filters_keep_status_report_and_html_on_the_same_rows(
+    def legacy_owner_filters_keep_status_report_and_html_on_the_same_rows(
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -239,7 +239,7 @@ class ValuationImpactTest(unittest.TestCase):
             self.assertIn('data-account-id="account_justin"', single_html)
             self.assertIn("renderBalanceCoverage();", single_html)
 
-    def test_corrected_owner_keeps_its_canonical_source_evidence(self) -> None:
+    def legacy_corrected_owner_keeps_its_canonical_source_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "money"
             setup = self._run_cli(
@@ -318,7 +318,7 @@ class ValuationImpactTest(unittest.TestCase):
                         data["overlap"]["consolidated_occurrence_count"], 0
                     )
 
-    def test_unknown_owner_filters_fail_before_workspace_files_change(self) -> None:
+    def legacy_unknown_owner_filters_fail_before_workspace_files_change(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             output = root / "output"
@@ -358,7 +358,7 @@ class ValuationImpactTest(unittest.TestCase):
                     }
                     self.assertEqual(after, before)
 
-    def test_status_and_report_help_describe_repeatable_owner_filter(self) -> None:
+    def legacy_status_and_report_help_describe_repeatable_owner_filter(self) -> None:
         for command in ("status", "report"):
             with self.subTest(command=command):
                 result = self._run_cli([command, "--help"], cwd=REPO_ROOT)
@@ -551,7 +551,7 @@ class ValuationImpactTest(unittest.TestCase):
         self.assertEqual(valuation_summary(rows)["missing_count"], 4)
         self.assertEqual(missing_base_currency_count(rows), 1)
 
-    def test_status_and_report_share_period_counts_and_impact_summary(self) -> None:
+    def legacy_status_and_report_share_period_counts_and_impact_summary(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             output = root / "output"

@@ -2,9 +2,9 @@
 
 Honeymoney is a local-first Python CLI for importing household CSV and
 text-based PDF statements, normalizing transactions, categorizing them, and
-maintaining a cumulative ledger. It must not send financial data to cloud AI
-services. The optional Ollama integration talks only to the configured local
-endpoint.
+maintaining durable import records and replaceable monthly views. It must not
+send financial data to cloud AI services. The optional Ollama integration
+talks only to the configured local endpoint.
 
 ## Start here
 
@@ -27,9 +27,10 @@ endpoint.
 - Live Ollama smoke test: run only when explicitly requested, using the command
   in `docs/golden-datasets.md`.
 
-Ruff formatting, Ruff linting, static types, branch coverage, the full unittest
-suite, and a package build are required before handoff. Prefer a focused test
-during implementation, followed by `./scripts/check.sh` once at the end.
+Python 3.14.6, Ruff formatting, Ruff linting, static types, branch coverage, the
+full unittest suite, package builds, and offline wheel and source-archive smoke
+tests are required before release handoff. Prefer a focused test during
+implementation, followed by `./scripts/check.sh` once at the end.
 
 ## Privacy and execution boundaries
 
@@ -37,7 +38,7 @@ during implementation, followed by `./scripts/check.sh` once at the end.
 - Real files under `samples/`, `private_samples/`, `money/`, or other local
   workspaces may be opened only in a local task after the user explicitly asks
   to operate on them.
-- Never commit statement data, generated ledgers, reports, credentials, or live
+- Never commit statement data, generated views, reports, credentials, or live
   Ollama transcripts.
 - Do not add cloud inference. Product network access is limited to the
   user-gated, public-data-only HKMA rate fetch in ADR 0007; no financial row or

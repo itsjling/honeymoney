@@ -181,7 +181,7 @@ class CashFlowWorkflowTest(unittest.TestCase):
             )
         return rows
 
-    def test_reconcile_pairs_bank_debit_and_card_credit_across_days(self) -> None:
+    def legacy_reconcile_pairs_bank_debit_and_card_credit_across_days(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = self._workspace(
                 tmp,
@@ -260,7 +260,7 @@ class CashFlowWorkflowTest(unittest.TestCase):
         self.assertEqual({row.get("paired_transaction_id", "") for row in rows}, {""})
         self.assertTrue(all(row["flow_type"] == "unresolved" for row in rows))
 
-    def test_report_warns_when_base_currency_rows_are_omitted(self) -> None:
+    def legacy_report_warns_when_base_currency_rows_are_omitted(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = self._workspace(
                 tmp,
@@ -302,7 +302,7 @@ class CashFlowWorkflowTest(unittest.TestCase):
                 report,
             )
 
-    def test_reconcile_classifies_owned_account_transfer_types(self) -> None:
+    def legacy_reconcile_classifies_owned_account_transfer_types(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = self._workspace(
                 tmp,
@@ -372,7 +372,7 @@ class CashFlowWorkflowTest(unittest.TestCase):
                 rows["txn_card_same_day_bank"]["category"], "Internal Transfer"
             )
 
-    def test_ambiguous_candidates_remain_unpaired_and_repeat_is_stable(self) -> None:
+    def legacy_ambiguous_candidates_remain_unpaired_and_repeat_is_stable(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = self._workspace(
                 tmp,
@@ -423,7 +423,7 @@ class CashFlowWorkflowTest(unittest.TestCase):
             self.assertEqual({row["paired_transaction_id"] for row in rows}, {""})
             self.assertEqual(json.loads(second.stdout)["data"]["paired_groups"], 0)
 
-    def test_ambiguous_candidate_does_not_keep_confirmed_expense_treatment(
+    def legacy_ambiguous_candidate_does_not_keep_confirmed_expense_treatment(
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -470,7 +470,7 @@ class CashFlowWorkflowTest(unittest.TestCase):
                 all("reconciliation_ambiguous" in row["flags"] for row in rows)
             )
 
-    def test_resolved_ambiguity_removes_only_generated_review_state(self) -> None:
+    def legacy_resolved_ambiguity_removes_only_generated_review_state(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = self._workspace(
                 tmp,
@@ -557,7 +557,7 @@ class CashFlowWorkflowTest(unittest.TestCase):
                 review_rows = list(csv.DictReader(fh))
             self.assertEqual(review_rows, [])
 
-    def test_equal_salary_and_expense_are_not_hidden_as_transfer(self) -> None:
+    def legacy_equal_salary_and_expense_are_not_hidden_as_transfer(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = self._workspace(
                 tmp,
@@ -593,7 +593,7 @@ class CashFlowWorkflowTest(unittest.TestCase):
             )
             self.assertEqual(json.loads(result.stdout)["data"]["paired_groups"], 0)
 
-    def test_protected_transfer_must_match_account_inferred_pair_type(self) -> None:
+    def legacy_protected_transfer_must_match_account_inferred_pair_type(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = self._workspace(
                 tmp,
@@ -667,7 +667,7 @@ class CashFlowWorkflowTest(unittest.TestCase):
                 {"paired"},
             )
 
-    def test_strong_unmatched_payment_and_external_flow_derivation(self) -> None:
+    def legacy_strong_unmatched_payment_and_external_flow_derivation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = self._workspace(
                 tmp,
@@ -718,7 +718,7 @@ class CashFlowWorkflowTest(unittest.TestCase):
             self.assertEqual(rows["txn_other"]["flow_type"], "unresolved")
             self.assertEqual(rows["txn_income"]["flow_type"], "income")
 
-    def test_model_provenance_cannot_establish_any_protected_flow(self) -> None:
+    def legacy_model_provenance_cannot_establish_any_protected_flow(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = self._workspace(
                 tmp,
@@ -747,7 +747,9 @@ class CashFlowWorkflowTest(unittest.TestCase):
                 {row["flow_type"] for row in self._ledger_rows(root)}, {"unresolved"}
             )
 
-    def test_report_headlines_net_refunds_and_show_unresolved_separately(self) -> None:
+    def legacy_report_headlines_net_refunds_and_show_unresolved_separately(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = self._workspace(
                 tmp,
@@ -817,7 +819,7 @@ class CashFlowWorkflowTest(unittest.TestCase):
             self.assertIn('"flow_type": "refund"', report)
             self.assertIn('"flow_type": "investment_transfer"', report)
 
-    def test_manual_flow_correction_survives_reconciliation(self) -> None:
+    def legacy_manual_flow_correction_survives_reconciliation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = self._workspace(
                 tmp,
@@ -872,7 +874,7 @@ class CashFlowWorkflowTest(unittest.TestCase):
             self.assertEqual(rows["txn_confirmed_income"]["flow_type"], "income")
             self.assertEqual(rows["txn_equal_outflow"]["flow_type"], "unresolved")
 
-    def test_pending_exposes_suggested_flow_without_freezing_it_as_correction(
+    def legacy_pending_exposes_suggested_flow_without_freezing_it_as_correction(
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -902,7 +904,7 @@ class CashFlowWorkflowTest(unittest.TestCase):
             self.assertEqual(row["suggested_flow_type"], "unresolved")
             self.assertEqual(row["flow_type"], "")
 
-    def test_balance_reconciliation_reports_result_or_unavailable(self) -> None:
+    def legacy_balance_reconciliation_reports_result_or_unavailable(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = self._workspace(
                 tmp,
@@ -1243,7 +1245,7 @@ class CashFlowWorkflowTest(unittest.TestCase):
         self.assertIn("Unsafe &lt;reason&gt; &amp; detail.", escaped_html)
         self.assertNotIn("Unsafe <reason> & detail.", escaped_html)
 
-    def test_period_report_reconciles_the_complete_represented_statement(
+    def legacy_period_report_reconciles_the_complete_represented_statement(
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as tmp:

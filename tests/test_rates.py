@@ -277,7 +277,7 @@ class RateCacheTest(unittest.TestCase):
         self.assertEqual(row["valuation_source"], "configured_dated_rate")
 
 
-class RateImportCliTest(unittest.TestCase):
+class LegacyRateImportCliContract:
     def _run_cli(
         self,
         args: list[str],

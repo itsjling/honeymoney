@@ -6,8 +6,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from honeymoney.cli import _starter_csv_profile
 from honeymoney.importers import _import_csv, _import_pdf
+from honeymoney.workspace_setup import _starter_csv_profile
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PROFILE_DIR = REPO_ROOT / "honeymoney" / "data" / "profiles"

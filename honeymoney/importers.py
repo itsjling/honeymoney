@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from typing import Any, Callable, TypeAlias
+from typing import Any, Callable, Mapping, TypeAlias
 
 from honeymoney.account_bindings import (
     AccountBinding,
@@ -67,11 +67,15 @@ class _PdfBalanceLine:
 
 
 @dataclass(frozen=True)
-class _InputSourceSnapshot:
+class InputSourceSnapshot:
     source_bytes: bytes
     resolved_path: Path
     locator_kind: str
     locator: str
+
+
+# Keep the internal name while workspace publication adopts the typed snapshot.
+_InputSourceSnapshot = InputSourceSnapshot
 
 
 class _PdfSnapshotStream(io.BytesIO):
@@ -203,6 +207,52 @@ def _capture_input_source(
         resolved_path,
         locator_kind,
         locator,
+    )
+
+
+def preview_profile_input(
+    profile: Mapping[str, object],
+    profile_id: str,
+    input_path: Path,
+    config: Mapping[str, object],
+) -> tuple[list[dict[str, str]], list[str]]:
+    """Parse one stable input snapshot with an already selected profile."""
+    profile_document = dict(profile)
+    config_document = dict(config)
+    suffix = input_path.suffix.lower()
+    if suffix == ".csv":
+        if "csv" not in profile_document:
+            raise ValueError(
+                f"Profile {profile_id} does not define csv parser settings "
+                f"required for {input_path.name}"
+            )
+        source_snapshot = _capture_input_source(input_path, config_document)
+        return (
+            _import_csv(
+                input_path,
+                profile_document,
+                config_document,
+                input_path.parent,
+                source_bytes=source_snapshot.source_bytes,
+            ),
+            [],
+        )
+    if suffix == ".pdf":
+        if "pdf" not in profile_document:
+            raise ValueError(
+                f"Profile {profile_id} does not define pdf parser settings "
+                f"required for {input_path.name}"
+            )
+        source_snapshot = _capture_input_source(input_path, config_document)
+        return _import_pdf(
+            input_path,
+            profile_document,
+            config_document,
+            input_path.parent,
+            source_bytes=source_snapshot.source_bytes,
+        )
+    raise ValueError(
+        f"Unsupported preview input type for {input_path.name}; expected .csv or .pdf"
     )
 
 
@@ -912,6 +962,8 @@ def _import_transactions(
     *,
     explicit_binding: AccountBinding | None = None,
     include_identity_sources: bool = False,
+    source_snapshots: Mapping[Path, InputSourceSnapshot] | None = None,
+    preselected_profiles: Mapping[Path, dict[str, Any]] | None = None,
     status: Callable[[str], None] | None = None,
     clear_status: Callable[[], None] | None = None,
 ) -> (
@@ -938,6 +990,11 @@ def _import_transactions(
         explicit_profile = (
             _explicit_binding_profile(input_file, profiles, explicit_binding)
             if explicit_binding is not None
+            else None
+        )
+        preselected_profile = (
+            preselected_profiles.get(input_file)
+            if preselected_profiles is not None
             else None
         )
         explicit_binding_fields = (
@@ -968,20 +1025,26 @@ def _import_transactions(
                 profile = (
                     explicit_profile
                     if explicit_profile is not None
-                    else _select_pdf_profile(
-                        input_file,
-                        profiles,
-                        interactive,
-                        profile_mappings,
-                        profile_mappings_path,
-                        clear_status,
+                    else (
+                        preselected_profile
+                        if preselected_profile is not None
+                        else _select_pdf_profile(
+                            input_file,
+                            profiles,
+                            interactive,
+                            profile_mappings,
+                            profile_mappings_path,
+                            clear_status,
+                        )
                     )
                 )
-                source_snapshot = (
-                    _capture_input_source(input_file, config)
-                    if include_identity_sources
-                    else None
-                )
+                source_snapshot = None
+                if include_identity_sources:
+                    source_snapshot = (
+                        source_snapshots.get(input_file)
+                        if source_snapshots is not None
+                        else _capture_input_source(input_file, config)
+                    )
                 if include_identity_sources:
                     if source_snapshot is None:
                         raise AssertionError(
@@ -1065,15 +1128,20 @@ def _import_transactions(
             continue
         if suffix != ".csv":
             continue
-        source_snapshot = (
-            _capture_input_source(input_file, config)
-            if include_identity_sources
-            else None
-        )
+        source_snapshot = None
+        if include_identity_sources:
+            source_snapshot = (
+                source_snapshots.get(input_file)
+                if source_snapshots is not None
+                else _capture_input_source(input_file, config)
+            )
         if explicit_binding is not None:
             if explicit_profile is None:
                 raise AssertionError("Explicit binding profile was not selected")
             profile = explicit_profile
+            prompted_for_profile = False
+        elif preselected_profile is not None:
+            profile = preselected_profile
             prompted_for_profile = False
         else:
             profile, prompted_for_profile = _select_csv_profile(
@@ -2542,7 +2610,7 @@ def _date_matches_profile(value: str, date_formats: Any, statement_year: Any) ->
                 else None
             )
             _parse_profile_date(value, date_format, fallback_year=fallback_year)
-        except (TypeError, ValueError):
+        except TypeError, ValueError:
             continue
         return True
     return False
@@ -2763,7 +2831,7 @@ def _pdf_row_count_indexes(
         else:
             try:
                 index = int(column)
-            except (TypeError, ValueError):
+            except TypeError, ValueError:
                 continue
         if 0 <= index < cell_count:
             indexes.append(index)

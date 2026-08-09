@@ -547,7 +547,7 @@ class SpreadsheetSafeCsvTest(unittest.TestCase):
                 {"txn_review_export": {"category": "Dining"}},
             )
 
-    def test_normal_import_neutralizes_statement_text_but_not_negative_amounts(
+    def legacy_normal_import_neutralizes_statement_text_but_not_negative_amounts(
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -605,7 +605,7 @@ class SpreadsheetSafeCsvTest(unittest.TestCase):
                 repeated_row["transaction_id"], ledger_row["transaction_id"]
             )
 
-    def test_structured_and_interactive_corrections_share_safe_serialization(
+    def legacy_structured_and_interactive_corrections_share_safe_serialization(
         self,
     ) -> None:
         custom_category = "=Custom Category"

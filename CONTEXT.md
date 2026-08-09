@@ -48,7 +48,7 @@ import record to several.
 _Avoid_: Final transaction, canonical record
 
 **Saved correction**:
-A workspace-wide human decision attached to a stable canonical transaction.
+A workspace-wide human decision attached to a stable view transaction.
 It does not belong to one import record or output period, and it stays saved
 when that transaction is no longer current.
 _Avoid_: Output edit, import correction
@@ -59,3 +59,19 @@ and overlap identity, plus duplicate decisions bound to the exact supporting
 records. It keeps active and retired identities for the life of the workspace
 so imports and saved corrections can reconnect without guessing.
 _Avoid_: Cumulative ledger, transaction store
+
+**Workspace generation**:
+One checked set of durable state and generated views published by one accepted
+state-changing command. The workspace index commits the generation last.
+_Avoid_: File update, ledger generation
+
+**Publication journal**:
+The checked recovery record that holds the exact old and new bytes needed to
+settle a stopped workspace generation. Normal commands fail while it remains;
+only `doctor --fix` may settle it.
+_Avoid_: Write cache, transaction log
+
+**Registered view**:
+A calendar-month or undated view recorded in the workspace index. Registration
+lets a full rebuild remove a view that current durable facts no longer imply.
+_Avoid_: Report month, range folder

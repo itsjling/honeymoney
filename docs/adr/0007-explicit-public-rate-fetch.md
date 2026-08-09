@@ -3,6 +3,9 @@
 - Status: Accepted by the implementation request
 - Date: 2026-07-27
 - Extends: ADR 0005 local rate import and cache
+- Narrowed by: ADR 0008 only where this ADR names ledger loading and
+  publication. The user gate, fixed public request, and ban on financial data
+  in the request remain binding.
 
 ## Context
 

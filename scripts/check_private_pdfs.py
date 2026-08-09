@@ -16,11 +16,7 @@ from typing import Any
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
-from honeymoney.cli import (  # noqa: E402
-    _import_pdf,
-    _validate_config_document,
-    _validate_profile,
-)
+from honeymoney.importers import _import_pdf, _validate_profile  # noqa: E402
 
 DEFAULT_ROOT = REPO_ROOT / "private_samples" / "pdf_acceptance"
 DEFAULT_CONFIG = REPO_ROOT / "examples" / "config.json"
@@ -51,6 +47,11 @@ PARSER_COLUMNS = [
 
 class AcceptanceError(ValueError):
     """A safe, user-facing private acceptance suite error."""
+
+
+def _validate_config_document(config: object) -> None:
+    if not isinstance(config, dict):
+        raise ValueError("Config must be a JSON object")
 
 
 @dataclass(frozen=True)
