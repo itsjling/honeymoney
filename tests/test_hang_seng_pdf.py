@@ -288,6 +288,20 @@ class HangSengPdfTest(unittest.TestCase):
 
         self.assertEqual(len(result), 2)
 
+    def test_card_opening_balance_precedes_activity_and_appears_once(self):
+        moved = layout("credit_card")
+        opening = moved.pop(3)
+        moved.insert(5, opening)
+        repeated = layout("credit_card")
+        repeated.insert(4, deepcopy(repeated[3]))
+        late = layout("credit_card")
+        late.insert(-1, deepcopy(late[3]))
+
+        for lines in (moved, repeated, late):
+            with self.subTest(lines=lines):
+                with self.assertRaisesRegex(ValueError, "opening balance"):
+                    card_rows(pages(lines))
+
     def test_cli_import_rejects_a_truncated_card_table(self):
         truncated = layout("credit_card")[:-1]
         with tempfile.TemporaryDirectory() as temporary:
@@ -596,6 +610,44 @@ class HangSengPdfTest(unittest.TestCase):
             with self.subTest(reader=reader.__name__):
                 with self.assertRaisesRegex(ValueError, "continuation page"):
                     reader(statement_pages)
+
+    def test_continuation_data_before_a_late_header_fails(self):
+        bank = layout("bank")
+        card = layout("credit_card")
+        cases = (
+            (
+                bank_rows,
+                pages(bank[:3]) + pages([bank[3], bank[1]] + bank[4:]),
+            ),
+            (
+                card_rows,
+                pages(card[:4]) + pages([card[4], card[2]] + card[5:]),
+            ),
+        )
+
+        for reader, statement_pages in cases:
+            with self.subTest(reader=reader.__name__):
+                with self.assertRaisesRegex(ValueError, "continuation page"):
+                    reader(statement_pages)
+
+    def test_continuation_allows_metadata_before_the_repeated_header(self):
+        bank = layout("bank")
+        card = layout("credit_card")
+        metadata = [[10, "Synthetic page metadata"]]
+        cases = (
+            (
+                bank_rows,
+                pages(bank[:3]) + pages([metadata, bank[1]] + bank[3:]),
+            ),
+            (
+                card_rows,
+                pages(card[:4]) + pages([metadata, card[2]] + card[4:]),
+            ),
+        )
+
+        for reader, statement_pages in cases:
+            with self.subTest(reader=reader.__name__):
+                self.assertEqual(len(reader(statement_pages)), 2)
 
     def test_failed_import_warning_does_not_echo_invalid_date(self):
         with tempfile.TemporaryDirectory() as temporary:

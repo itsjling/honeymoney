@@ -117,10 +117,6 @@ def _bank_balances(
         row["Closing"] = balances[-1][1]
 
 
-def _has_header(page: Page, header: str) -> bool:
-    return any(header in _cell(line, 0, 1000) for line in page)
-
-
 def _bank_line_fields(line: list[Word]) -> tuple[str, str, tuple[str, str, str]]:
     return (
         _cell(line, 70, 106),
@@ -168,9 +164,7 @@ def bank_rows(pages: list[Page]) -> list[SourceRow]:
     continuation = False
     summary_seen = False
     for page_number, page in enumerate(pages, 1):
-        has_header = _has_header(page, _BANK_HEADER)
-        if continuation and not has_header:
-            raise ValueError("Hang Seng bank continuation page has no table header")
+        awaiting_header = continuation
         in_table = False
         requires_opening = False
         for line_number, line in enumerate(page, 1):
@@ -185,10 +179,17 @@ def bank_rows(pages: list[Page]) -> list[SourceRow]:
                 summary_seen = True
                 continue
             if _BANK_HEADER in text:
+                awaiting_header = False
                 in_table = True
                 requires_opening = not continuation or bool(
                     balances and balances[-1][0] == "closing"
                 )
+                continue
+            if awaiting_header:
+                if _bank_data_without_header(line):
+                    raise ValueError(
+                        "Hang Seng bank continuation page has no table header"
+                    )
                 continue
             if not in_table:
                 if (
@@ -255,6 +256,8 @@ def bank_rows(pages: list[Page]) -> list[SourceRow]:
                 pending[0]["Description"] += " " + description
             elif raw_date or balance:
                 raise ValueError("Incomplete Hang Seng bank transaction")
+        if awaiting_header:
+            raise ValueError("Hang Seng bank continuation page has no table header")
         continuation = in_table
     if continuation:
         raise ValueError("Hang Seng bank table has no closing balance")
@@ -275,8 +278,7 @@ def card_rows(pages: list[Page]) -> list[SourceRow]:
     continuation = False
     end_seen = False
     for page_number, page in enumerate(pages, 1):
-        if continuation and not _has_header(page, _CARD_HEADER):
-            raise ValueError("Hang Seng card continuation page has no table header")
+        awaiting_header = continuation
         in_table = False
         for line_number, line in enumerate(page, 1):
             text = _cell(line, 0, 1000)
@@ -299,7 +301,22 @@ def card_rows(pages: list[Page]) -> list[SourceRow]:
             if _cell(line, 379, 483) == "NEW BALANCE":
                 closing_pending = True
             if _CARD_HEADER in text:
+                awaiting_header = False
                 in_table = True
+                continue
+            if awaiting_header:
+                transaction_date = _cell(line, 20, 85)
+                posting_date = _cell(line, 85, 151)
+                description = _cell(line, 151, 520)
+                amount = _cell(line, 520, 600)
+                if (
+                    _CARD_DATE.fullmatch(transaction_date) is not None
+                    or _CARD_DATE.fullmatch(posting_date) is not None
+                    or (description == "OPENING BALANCE" and bool(amount))
+                ):
+                    raise ValueError(
+                        "Hang Seng card continuation page has no table header"
+                    )
                 continue
             if not in_table:
                 continue
@@ -315,9 +332,13 @@ def card_rows(pages: list[Page]) -> list[SourceRow]:
             description = _cell(line, 151, 520)
             amount = _cell(line, 520, 600)
             if description == "OPENING BALANCE":
+                if openings or pending is not None or rows:
+                    raise ValueError("Missing or conflicting Hang Seng opening balance")
                 openings.append(_money(amount, liability=True))
                 continue
             if transaction_date or posting_date or amount:
+                if not openings:
+                    raise ValueError("Missing or conflicting Hang Seng opening balance")
                 if (
                     not transaction_date
                     or not posting_date
@@ -348,6 +369,8 @@ def card_rows(pages: list[Page]) -> list[SourceRow]:
                 if pending is None:
                     raise ValueError("Hang Seng card description has no transaction")
                 pending[0]["Description"] += " " + description
+        if awaiting_header:
+            raise ValueError("Hang Seng card continuation page has no table header")
         continuation = in_table
     if continuation:
         raise ValueError("Hang Seng card table has no end marker")
