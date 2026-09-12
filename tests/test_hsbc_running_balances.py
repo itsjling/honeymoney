@@ -1,5 +1,3 @@
-"""Synthetic coordinate cases for printed HSBC running balances."""
-
 import copy
 import unittest
 
@@ -147,3 +145,31 @@ class HsbcRunningBalanceTest(unittest.TestCase):
             [start() + opening() + transaction(balance="") + line(110, (120, "110.00"))]
         )
         self.assertEqual(rows[0]["statement_closing_balance"], "")
+
+    def test_account_only_table_opening_uses_unique_section_running_balance(self):
+        profile = load_profile("hsbc_one_pdf.json")
+        profile["pdf"]["balance_mappings"] = [
+            {
+                "account_id": "hsbc_one_hkd_savings",
+                "currency": "HKD",
+                "opening_regex": r"OPENING (?P<balance>\d+\.\d{2})",
+                "closing_regex": r"CLOSING (?P<balance>\d+\.\d{2})",
+            }
+        ]
+        rows, warnings, _ = _import_fake_pdf(
+            profile,
+            page_words=[start() + transaction()],
+            page_tables=[[[["OPENING", "100.00"]]]],
+        )
+        self.assertEqual(warnings, [])
+        self.assertEqual(rows[0]["statement_opening_balance"], "100.00")
+        self.assertEqual(rows[0]["statement_closing_balance"], "110.00")
+        accounts = profile["pdf"]["sectioned_word_rows"]["accounts"]
+        accounts["HKD Current"]["account_id"] = "hsbc_one_hkd_savings"
+        rows, _, _ = _import_fake_pdf(
+            profile,
+            page_words=[start() + transaction(), start("HKD Current") + transaction()],
+            page_tables=[[[["OPENING", "100.00"]]], []],
+        )
+        self.assertEqual(len(rows), 2)
+        self.assertTrue(all(not row["statement_closing_balance"] for row in rows))

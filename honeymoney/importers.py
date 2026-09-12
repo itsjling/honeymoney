@@ -2386,8 +2386,6 @@ def _pdf_sectioned_word_source_rows(
                     str(current_account["statement_section"]),
                     current_currency.upper(),
                 )
-                # Every transaction replaces the candidate, including one with no
-                # printed balance. Never reuse an earlier running balance.
                 printed_balance = _pdf_words_in_bounds(line, columns["balance"])
                 match = re.fullmatch(
                     r"(?P<balance>[+-]?\d[\d,]*\.\d{2})(?:\s*(?P<sign>CR|DR))?",
@@ -2425,11 +2423,18 @@ def _pdf_sectioned_word_source_rows(
             description_parts = []
 
     if balance_observations is not None:
-        for target, candidate in final_balances.items():
-            endpoints = balance_observations.get(target)
-            if candidate is None or not endpoints or not endpoints["opening"]:
+        for target, endpoints in balance_observations.items():
+            candidate = final_balances.get(target)
+            if target not in final_balances and not target[1]:
+                matching_candidates = [
+                    value
+                    for key, value in final_balances.items()
+                    if key[0] == target[0] and key[2] == target[2]
+                ]
+                if len(matching_candidates) == 1:
+                    candidate = matching_candidates[0]
+            if candidate is None or not endpoints["opening"]:
                 continue
-            # Keep explicit closing evidence so disagreement remains a conflict.
             endpoints["closing"].append(candidate.value)
             balance_observations.pages.setdefault(
                 (target, "closing", candidate.value), set()
