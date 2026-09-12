@@ -27,6 +27,11 @@ class ProfileColumns(TypedDict, total=False):
     statement_closing_balance: ColumnSource
 
 
+class StatementDateSettings(TypedDict):
+    regex: str
+    date_formats: list[str]
+
+
 class ParserSettings(TypedDict, total=False):
     columns: ProfileColumns
     parser: str
@@ -49,6 +54,7 @@ class ParserSettings(TypedDict, total=False):
     split_multiline_row_count_columns: list[str]
     balance_mappings: list[dict[str, str]]
     sectioned_word_rows: dict[str, object]
+    statement_date: StatementDateSettings
 
 
 class Profile(TypedDict, total=False):
@@ -66,3 +72,23 @@ class Profile(TypedDict, total=False):
     skip_descriptions: list[str]
     csv: ParserSettings
     pdf: ParserSettings
+
+
+class ParserSourceReport(TypedDict, total=False):
+    source_file: str
+    status: str
+    reason: str
+    transaction_count: str
+    profile_id: str
+    parser: str
+    binding_id: str
+    binding_selection: str
+    statement_date: str | None
+    statement_date_source_pages: list[int]
+
+
+class ParseResult(TypedDict):
+    transactions: list[dict[str, str]]
+    warnings: list[str]
+    statement_date: str | None
+    statement_date_source_pages: list[int]

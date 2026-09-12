@@ -171,6 +171,10 @@ JSON uses schema version 3. It keeps the common envelope and uses
 - Parser, rules, correction, valuation, review, reconciliation, report, rate,
   and local Ollama modules keep their narrow domain work.
 
+Parser source reports expose the printed statement date and its source pages;
+see [statement dates](statement-dates.md). This metadata stays separate from
+transaction year resolution and workspace storage.
+
 ## Privacy boundary
 
 Only synthetic fixtures may enter git or cloud Codex. Real statements, local

@@ -10,12 +10,12 @@ from typing import Callable, Literal, Mapping, TypeAlias, overload
 
 from honeymoney.account_bindings import AccountBinding
 from honeymoney.identity import IncomingSourceIdentity
-from honeymoney.parser_contracts import Profile
+from honeymoney.parser_contracts import ParseResult, ParserSourceReport, Profile
 
 ProfileMappings: TypeAlias = dict[str, object]
 ImportedRows: TypeAlias = list[dict[str, str]]
 ImportWarnings: TypeAlias = list[str]
-ImportReports: TypeAlias = list[dict[str, str]]
+ImportReports: TypeAlias = list[ParserSourceReport]
 IdentityImportResult: TypeAlias = tuple[
     ImportedRows,
     ImportWarnings,
@@ -88,6 +88,12 @@ def preview_profile_input(
     metadata: dict[str, int] | None = None,
     value_rows: bool = True,
 ) -> tuple[ImportedRows, ImportWarnings]: ...
+def parse_statement(
+    profile: Mapping[str, object],
+    profile_id: str,
+    input_path: Path,
+    config: Mapping[str, object],
+) -> ParseResult: ...
 @overload
 def _import_transactions(
     input_files: list[Path],

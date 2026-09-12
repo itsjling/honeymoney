@@ -44,7 +44,7 @@ from honeymoney.normalization import (
     _parse_decimal,
     _parse_profile_date,
 )
-from honeymoney.parser_contracts import Profile
+from honeymoney.parser_contracts import ParseResult, ParserSourceReport, Profile
 from honeymoney.persistence import ensure_private_directory, private_atomic_write_text
 from honeymoney.schema import (
     ALLOWED_ACCOUNT_TYPES,
@@ -132,6 +132,7 @@ class _CachedPdfPage:
             "extract_words",
             "extract_tables",
             "extract_table",
+            "extract_text",
         } or not callable(attribute):
             return attribute
 
@@ -210,6 +211,66 @@ def _capture_input_source(
     )
 
 
+def parse_statement(
+    profile: Mapping[str, object],
+    profile_id: str,
+    input_path: Path,
+    config: Mapping[str, object],
+) -> ParseResult:
+    """Parse one stable source and return source-level statement facts."""
+    profile_document = dict(profile)
+    config_document = dict(config)
+    suffix = input_path.suffix.lower()
+    if suffix == ".csv":
+        if "csv" not in profile_document:
+            raise ValueError(
+                f"Profile {profile_id} does not define csv parser settings "
+                f"required for {input_path.name}"
+            )
+        source_snapshot = _capture_input_source(input_path, config_document)
+        transactions = _import_csv(
+            input_path,
+            profile_document,
+            config_document,
+            input_path.parent,
+            source_bytes=source_snapshot.source_bytes,
+        )
+        return {
+            "transactions": transactions,
+            "warnings": [],
+            "statement_date": None,
+            "statement_date_source_pages": [],
+        }
+    if suffix == ".pdf":
+        if "pdf" not in profile_document:
+            raise ValueError(
+                f"Profile {profile_id} does not define pdf parser settings "
+                f"required for {input_path.name}"
+            )
+        pdf_settings = profile_document["pdf"]
+        if isinstance(pdf_settings, dict):
+            _validate_pdf_statement_date(profile_id, pdf_settings)
+        source_snapshot = _capture_input_source(input_path, config_document)
+        source_report = _empty_statement_date_report()
+        transactions, warnings = _import_pdf(
+            input_path,
+            profile_document,
+            config_document,
+            input_path.parent,
+            source_bytes=source_snapshot.source_bytes,
+            source_report=source_report,
+        )
+        return {
+            "transactions": transactions,
+            "warnings": warnings,
+            "statement_date": source_report["statement_date"],
+            "statement_date_source_pages": source_report["statement_date_source_pages"],
+        }
+    raise ValueError(
+        f"Unsupported preview input type for {input_path.name}; expected .csv or .pdf"
+    )
+
+
 def preview_profile_input(
     profile: Mapping[str, object],
     profile_id: str,
@@ -250,6 +311,9 @@ def preview_profile_input(
                 f"Profile {profile_id} does not define pdf parser settings "
                 f"required for {input_path.name}"
             )
+        pdf_settings = profile_document["pdf"]
+        if isinstance(pdf_settings, dict):
+            _validate_pdf_statement_date(profile_id, pdf_settings)
         source_snapshot = source_snapshot or _capture_input_source(
             input_path, config_document
         )
@@ -600,7 +664,77 @@ def _validate_pdf_profile(profile_id: str, settings: dict[str, Any]) -> None:
                 f"Profile {profile_id} pdf.columns map missing row-regex groups: "
                 + ", ".join(missing_sources)
             )
+    _validate_pdf_statement_date(profile_id, settings)
     _validate_pdf_balance_mappings(profile_id, settings)
+
+
+def _validate_pdf_statement_date(profile_id: str, settings: dict[str, Any]) -> None:
+    value = settings.get("statement_date")
+    if value is None:
+        return
+    field = "pdf.statement_date"
+    if not isinstance(value, dict) or set(value) != {"regex", "date_formats"}:
+        raise ValueError(
+            f"Profile {profile_id} field {field} must contain regex and date_formats"
+        )
+    pattern = value.get("regex")
+    if not isinstance(pattern, str) or not pattern.strip():
+        raise ValueError(
+            f"Profile {profile_id} field {field}.regex must be a non-empty string"
+        )
+    try:
+        compiled = re.compile(pattern, flags=re.IGNORECASE)
+    except re.error as error:
+        raise ValueError(
+            f"Profile {profile_id} field {field}.regex must be a valid regular expression"
+        ) from error
+    if "date" not in compiled.groupindex:
+        raise ValueError(
+            f"Profile {profile_id} field {field}.regex must define a date group"
+        )
+    date_formats = value.get("date_formats")
+    if not isinstance(date_formats, list) or not date_formats:
+        raise ValueError(
+            f"Profile {profile_id} field {field}.date_formats must be a non-empty JSON array"
+        )
+    for index, date_format in enumerate(date_formats):
+        format_field = f"{field}.date_formats[{index}]"
+        if not isinstance(date_format, str) or not date_format.strip():
+            raise ValueError(
+                f"Profile {profile_id} field {format_field} must be a non-empty string"
+            )
+        directives = _date_format_directives(date_format)
+        if not (
+            "d" in directives
+            and directives.intersection({"m", "b", "B"})
+            and "Y" in directives
+        ):
+            raise ValueError(
+                f"Profile {profile_id} field {format_field} must include day, month, and year"
+            )
+        try:
+            rendered = datetime(2024, 2, 28).strftime(date_format)
+            datetime.strptime(rendered, date_format)
+        except ValueError as error:
+            raise ValueError(
+                f"Profile {profile_id} field {format_field} must be a valid date format"
+            ) from error
+
+
+def _date_format_directives(date_format: str) -> set[str]:
+    directives: set[str] = set()
+    index = 0
+    while index < len(date_format):
+        if date_format[index] != "%":
+            index += 1
+            continue
+        if index + 1 >= len(date_format):
+            break
+        directive = date_format[index + 1]
+        index += 2
+        if directive != "%":
+            directives.add(directive)
+    return directives
 
 
 def _validate_pdf_balance_mappings(profile_id: str, settings: dict[str, Any]) -> None:
@@ -978,11 +1112,11 @@ def _import_transactions(
     status: Callable[[str], None] | None = None,
     clear_status: Callable[[], None] | None = None,
 ) -> (
-    tuple[list[dict[str, str]], list[str], list[dict[str, str]]]
+    tuple[list[dict[str, str]], list[str], list[ParserSourceReport]]
     | tuple[
         list[dict[str, str]],
         list[str],
-        list[dict[str, str]],
+        list[ParserSourceReport],
         tuple[IncomingSourceIdentity, ...],
     ]
 ):
@@ -991,7 +1125,7 @@ def _import_transactions(
     clear_status = clear_status or (lambda: None)
     transactions: list[dict[str, str]] = []
     warnings: list[str] = []
-    file_reports: list[dict[str, str]] = []
+    file_reports: list[ParserSourceReport] = []
     identity_sources: list[IncomingSourceIdentity] = []
     for file_number, input_file in enumerate(input_files, start=1):
         status(
@@ -1017,6 +1151,7 @@ def _import_transactions(
             else {}
         )
         if suffix == ".pdf":
+            statement_date_report = _empty_statement_date_report()
             if config.get("pdf", {}).get("enabled") is False:
                 warning = (
                     "PDF parsing disabled; skipped "
@@ -1028,6 +1163,7 @@ def _import_transactions(
                         "source_file": _relative_source(input_file, input_root),
                         "status": "skipped",
                         "reason": warning,
+                        **statement_date_report,
                         **explicit_binding_fields,
                     }
                 )
@@ -1068,10 +1204,15 @@ def _import_transactions(
                         input_root,
                         include_identity_records=True,
                         source_bytes=source_snapshot.source_bytes,
+                        source_report=statement_date_report,
                     )
                 else:
                     imported, pdf_warnings = _import_pdf(
-                        input_file, profile, config, input_root
+                        input_file,
+                        profile,
+                        config,
+                        input_root,
+                        source_report=statement_date_report,
                     )
                 binding_fields = _apply_source_account_binding(
                     input_file,
@@ -1094,6 +1235,7 @@ def _import_transactions(
                         "source_file": _relative_source(input_file, input_root),
                         "status": "failed",
                         "reason": warning,
+                        **_empty_statement_date_report(),
                         **explicit_binding_fields,
                     }
                 )
@@ -1106,6 +1248,7 @@ def _import_transactions(
                         "source_file": _relative_source(input_file, input_root),
                         "status": "failed",
                         "reason": warning,
+                        **_empty_statement_date_report(),
                         **explicit_binding_fields,
                     }
                 )
@@ -1133,6 +1276,7 @@ def _import_transactions(
                         profile.get("id") or profile.get("account_id") or "default"
                     ),
                     "parser": "pdfplumber",
+                    **statement_date_report,
                     **binding_fields,
                 }
             )
@@ -1210,6 +1354,7 @@ def _import_transactions(
                 "profile_id": str(
                     profile.get("id") or profile.get("account_id") or "default"
                 ),
+                **_empty_statement_date_report(),
                 **binding_fields,
             }
         )
@@ -1571,6 +1716,7 @@ def _import_pdf(
     source_bytes: bytes | None = None,
     value_rows: bool = True,
     metadata: dict[str, int] | None = None,
+    source_report: ParserSourceReport | None = None,
 ) -> (
     tuple[list[dict[str, str]], list[str]]
     | tuple[list[dict[str, str]], list[str], tuple[IncomingRecordIdentity, ...]]
@@ -1610,6 +1756,12 @@ def _import_pdf(
             cached_pdf = _CachedPdfDocument(
                 tuple(_CachedPdfPage(page, budget) for page in pdf.pages)
             )
+            if source_report is not None:
+                statement_date, source_pages = _pdf_statement_date(
+                    cached_pdf, pdf_settings
+                )
+                source_report["statement_date"] = statement_date
+                source_report["statement_date_source_pages"] = source_pages
             balance_observations = _pdf_balance_observations(cached_pdf, pdf_settings)
             if pdf_settings.get("word_rows") == "sectioned":
                 source_rows = _pdf_sectioned_word_source_rows(
@@ -1782,6 +1934,72 @@ def _import_pdf(
     if include_identity_records:
         return rows, warnings, tuple(identity_records)
     return rows, warnings
+
+
+def _empty_statement_date_report() -> ParserSourceReport:
+    return {
+        "statement_date": None,
+        "statement_date_source_pages": [],
+    }
+
+
+def _pdf_statement_date(
+    pdf: _CachedPdfDocument, pdf_settings: dict[str, Any]
+) -> tuple[str | None, list[int]]:
+    settings = pdf_settings.get("statement_date")
+    if not isinstance(settings, dict):
+        return None, []
+    pattern = settings.get("regex")
+    date_formats = settings.get("date_formats")
+    if not isinstance(pattern, str) or not isinstance(date_formats, list):
+        return None, []
+
+    compiled = re.compile(pattern, flags=re.IGNORECASE | re.MULTILINE)
+    dates: dict[date, set[int]] = {}
+    invalid_match = False
+    for page_number, page in enumerate(pdf.pages, start=1):
+        text = _pdf_statement_date_text(page)
+        for match in compiled.finditer(text):
+            raw_date = _clean_text(match.group("date"))
+            parsed_dates: set[date] = set()
+            for date_format in date_formats:
+                if not isinstance(date_format, str):
+                    continue
+                try:
+                    parsed_dates.add(datetime.strptime(raw_date, date_format).date())
+                except ValueError:
+                    continue
+            if not parsed_dates:
+                invalid_match = True
+                continue
+            for parsed_date in parsed_dates:
+                dates.setdefault(parsed_date, set()).add(page_number)
+
+    if invalid_match or len(dates) != 1:
+        return None, []
+    statement_date, pages = next(iter(dates.items()))
+    return statement_date.isoformat(), sorted(pages)
+
+
+def _pdf_statement_date_text(page: _CachedPdfPage) -> str:
+    if hasattr(page, "extract_text"):
+        text = page.extract_text() or ""
+        if text:
+            return str(text)
+
+    if hasattr(page, "extract_words"):
+        words = page.extract_words(x_tolerance=1, y_tolerance=3) or []
+        if words:
+            return "\n".join(
+                " ".join(str(word.get("text", "")) for word in line)
+                for line in _pdf_word_lines(words, 3)
+            )
+
+    lines: list[str] = []
+    for table in _pdf_tables(page):
+        for row in table:
+            lines.append(" ".join(str(cell or "") for cell in row))
+    return "\n".join(lines)
 
 
 def _pdf_balance_observations(

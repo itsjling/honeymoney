@@ -12,6 +12,10 @@
   "statement_year": 2026,
   "pdf": {
     "parser": "pdfplumber",
+    "statement_date": {
+      "regex": "^[ \\t]*Statement[ \\t]+Date[ \\t]*:?[ \\t]*(?P<date>[A-Za-z0-9][A-Za-z0-9,/-]*(?:[ \\t]+[A-Za-z0-9][A-Za-z0-9,/-]*){0,2})",
+      "date_formats": ["%Y-%m-%d", "%d/%m/%Y", "%d %b %Y", "%d %B %Y", "%d %b, %Y", "%d %B, %Y", "%d%b%Y"]
+    },
     "has_header": false,
     "row_regex": "^(?P<transaction_date>\\d{1,2} [A-Za-z]{3})\\s+(?P<posting_date>\\d{1,2} [A-Za-z]{3})\\s+(?P<description>.*?)\\s+(?P<amount>[+-]?\\d[\\d,]*\\.\\d{2})$",
     "balance_mappings": [

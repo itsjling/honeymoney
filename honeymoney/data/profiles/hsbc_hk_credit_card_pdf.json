@@ -12,6 +12,10 @@
   "statement_year": 2026,
   "pdf": {
     "parser": "pdfplumber",
+    "statement_date": {
+      "regex": "^[ \\t]*Statement[ \\t]+Date[ \\t]*:?[ \\t]*(?P<date>[A-Za-z0-9][A-Za-z0-9,/-]*(?:[ \\t]+[A-Za-z0-9][A-Za-z0-9,/-]*){0,2})",
+      "date_formats": ["%Y-%m-%d", "%d/%m/%Y", "%d %b %Y", "%d %B %Y", "%d %b, %Y", "%d %B, %Y", "%d%b%Y"]
+    },
     "has_header": true,
     "word_rows": true,
     "word_rows_only": true,
