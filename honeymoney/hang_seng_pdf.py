@@ -16,6 +16,7 @@ class Word:
 
 Page = list[list[Word]]
 SourceRow = tuple[dict[str, str], int, int]
+_BankBalance = tuple[str, str, int, str]
 _AMOUNT = re.compile(r"\$?([+-]?(?:\d{1,3}(?:,\d{3})+|\d+)\.\d{2})\s*(CR|DR|-)?", re.I)
 _BANK_DATE = re.compile(r"(\d{1,2})\s+([A-Za-z]{3})")
 _BANK_HEADER = "Date Transaction Details Deposit Withdrawal Balance in HKD"
@@ -88,7 +89,9 @@ def _balances(rows: list[SourceRow], openings: list[str], closings: list[str]) -
         row["Closing"] = closing
 
 
-def _bank_balances(rows: list[SourceRow], balances: list[tuple[str, str, int]]) -> None:
+def _bank_balances(
+    rows: list[SourceRow], balances: list[_BankBalance], closing_date: date
+) -> None:
     if not balances or balances[0][0] != "opening":
         raise ValueError("Missing or conflicting Hang Seng opening balance")
     if balances[-1][0] != "closing":
@@ -97,9 +100,13 @@ def _bank_balances(rows: list[SourceRow], balances: list[tuple[str, str, int]]) 
         if previous[0] == current[0]:
             raise ValueError("Missing or conflicting Hang Seng bank balance sequence")
         if current[0] == "opening" and (
-            current[1] != previous[1] or current[2] != previous[2] + 1
+            current[1] != previous[1]
+            or current[2] != previous[2] + 1
+            or current[3] != previous[3]
         ):
             raise ValueError("Missing or conflicting Hang Seng balance carry")
+    if balances[-1][3] != closing_date.isoformat():
+        raise ValueError("Hang Seng closing balance date does not match statement date")
     for row, _, _ in rows:
         row["Opening"] = balances[0][1]
         row["Closing"] = balances[-1][1]
@@ -136,7 +143,7 @@ def _has_bank_table_data(page: Page) -> bool:
 def bank_rows(pages: list[Page]) -> list[SourceRow]:
     closing_date = _bank_statement_date(pages)
     rows: list[SourceRow] = []
-    balances: list[tuple[str, str, int]] = []
+    balances: list[_BankBalance] = []
     current_date = ""
     pending: SourceRow | None = None
     continuation = False
@@ -177,7 +184,11 @@ def bank_rows(pages: list[Page]) -> list[SourceRow]:
                 kind = "opening" if compact == "b/fbalance" else "closing"
                 if kind == "closing" and requires_opening:
                     raise ValueError("Missing or conflicting Hang Seng opening balance")
-                balances.append((kind, _money(balance), page_number))
+                try:
+                    balance_date = _bank_date(raw_date, closing_date)
+                except ValueError:
+                    raise ValueError("Invalid Hang Seng balance date") from None
+                balances.append((kind, _money(balance), page_number, balance_date))
                 requires_opening = False
                 if compact == "c/fbalance":
                     in_table = False
@@ -223,7 +234,7 @@ def bank_rows(pages: list[Page]) -> list[SourceRow]:
         raise ValueError("Hang Seng bank table has no closing balance")
     if pending is not None:
         rows.append(pending)
-    _bank_balances(rows, balances)
+    _bank_balances(rows, balances, closing_date)
     return rows
 
 

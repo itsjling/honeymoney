@@ -280,6 +280,7 @@ class HangSengPdfTest(unittest.TestCase):
         lines[0] = [[414, "Date :05 February 2028"]]
         lines[3][0][1] = "31 Jan"
         lines[5][0][1] = "02 Feb"
+        lines[7][0][1] = "05 Feb"
         result = bank_rows(pages(lines))
         self.assertEqual(
             [row[0]["Date"] for row in result], ["2028-01-31", "2028-02-02"]
@@ -313,6 +314,79 @@ class HangSengPdfTest(unittest.TestCase):
             bank_rows(
                 pages(lines[:5] + [carried]) + pages([lines[1], brought] + lines[5:])
             )
+
+        brought[-1][1] = "30.00"
+        brought[0][1] = "30 Dec"
+        with self.assertRaisesRegex(ValueError, "balance carry"):
+            bank_rows(
+                pages(lines[:5] + [carried]) + pages([lines[1], brought] + lines[5:])
+            )
+
+    def test_bank_terminal_balance_date_must_match_statement_date(self):
+        lines = layout("bank")
+        carried = [[74, "31 Dec"], [108, "C/F Balance"], [495, "30.00"]]
+        with self.assertRaisesRegex(ValueError, "closing balance date"):
+            bank_rows(pages(lines[:5] + [carried]))
+
+        for raw_date in ("", "32 Dec"):
+            with self.subTest(raw_date=raw_date):
+                broken = deepcopy(lines)
+                broken[7][0][1] = raw_date
+                with self.assertRaisesRegex(
+                    ValueError, "Invalid Hang Seng balance date"
+                ):
+                    bank_rows(pages(broken))
+
+    def test_cli_import_rejects_a_truncated_bank_rollover(self):
+        lines = layout("bank")
+        carried = [[74, "31 Dec"], [108, "C/F Balance"], [495, "30.00"]]
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "money"
+            setup = self._run("setup", "--root", str(root), "--json")
+            self.assertEqual(setup.returncode, 0, setup.stderr)
+            source = root / "synthetic-truncated-bank.pdf"
+            source.write_bytes(pdf_bytes(lines[:5] + [carried]))
+            config = root / "config.json"
+            bound = self._run(
+                "profile",
+                "bind",
+                "synthetic-truncated-bank",
+                "--pattern",
+                source.name,
+                "--profile",
+                "hang_seng_bank_pdf",
+                "--owner",
+                "Household",
+                "--account",
+                "hang_seng_bank=hang_seng_bank=Synthetic Hang Seng",
+                "--config",
+                str(config),
+                "--json",
+            )
+            self.assertEqual(bound.returncode, 0, bound.stderr)
+
+            imported = self._run(
+                "import",
+                str(source),
+                "--binding",
+                "synthetic-truncated-bank",
+                "--config",
+                str(config),
+                "--no-interactive",
+                "--json",
+            )
+
+            self.assertEqual(imported.returncode, 2, imported.stdout)
+            self.assertEqual(
+                json.loads(imported.stdout)["errors"][0]["code"], "import_failed"
+            )
+            records = list((root / ".honeymoney" / "import-records").iterdir())
+            self.assertEqual(len(records), 1)
+            summary = json.loads((records[0] / "summary.json").read_text())
+            attempt = json.loads((records[0] / "attempts/00000001.json").read_text())
+            self.assertFalse(summary["ready"])
+            self.assertEqual(summary["statement_transaction_count"], 0)
+            self.assertEqual(attempt["outcome"], "failure")
 
     def test_bank_rejects_data_after_a_closed_table_without_a_balance_pair(self):
         lines = layout("bank")
