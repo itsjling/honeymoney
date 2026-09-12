@@ -238,6 +238,41 @@ class HangSengPdfTest(unittest.TestCase):
             result[1][0]["Description"], "SYNTHETIC REPAYMENT REFERENCE BETA"
         )
 
+    def test_bank_page_balance_rollover_keeps_statement_endpoints(self):
+        lines = layout("bank")
+        carried = [[74, "31 Dec"], [108, "C/F Balance"], [495, "30.00"]]
+        brought = [[74, "31 Dec"], [108, "B/F Balance"], [495, "30.00"]]
+        statement = pages(lines[:5] + [carried]) + pages(
+            [lines[1], brought] + lines[5:]
+        )
+
+        result = bank_rows(statement)
+
+        self.assertEqual([row[0]["Opening"] for row in result], ["0.00", "0.00"])
+        self.assertEqual([row[0]["Closing"] for row in result], ["0.00", "0.00"])
+
+        brought[-1][1] = "31.00"
+        with self.assertRaisesRegex(ValueError, "balance carry"):
+            bank_rows(
+                pages(lines[:5] + [carried]) + pages([lines[1], brought] + lines[5:])
+            )
+
+    def test_bank_rejects_data_after_a_closed_table_without_a_balance_pair(self):
+        lines = layout("bank")
+        carried = [[74, "31 Dec"], [108, "C/F Balance"], [495, "30.00"]]
+        first_page = pages(lines[:5] + [carried])
+        cases = (
+            first_page + pages(lines[5:]),
+            first_page + pages([lines[1]] + lines[5:7]),
+        )
+        for statement in cases:
+            with self.subTest(statement=statement):
+                with self.assertRaises(ValueError):
+                    bank_rows(statement)
+
+        result = bank_rows(pages(lines) + pages([[[108, "Important Notes"]]]))
+        self.assertEqual(len(result), 2)
+
     def test_continuation_page_without_repeated_header_fails(self):
         bank = layout("bank")
         card = layout("credit_card")

@@ -88,26 +88,79 @@ def _balances(rows: list[SourceRow], openings: list[str], closings: list[str]) -
         row["Closing"] = closing
 
 
+def _bank_balances(rows: list[SourceRow], balances: list[tuple[str, str, int]]) -> None:
+    if not balances or balances[0][0] != "opening":
+        raise ValueError("Missing or conflicting Hang Seng opening balance")
+    if balances[-1][0] != "closing":
+        raise ValueError("Missing or conflicting Hang Seng closing balance")
+    for previous, current in zip(balances, balances[1:], strict=False):
+        if previous[0] == current[0]:
+            raise ValueError("Missing or conflicting Hang Seng bank balance sequence")
+        if current[0] == "opening" and (
+            current[1] != previous[1] or current[2] != previous[2] + 1
+        ):
+            raise ValueError("Missing or conflicting Hang Seng balance carry")
+    for row, _, _ in rows:
+        row["Opening"] = balances[0][1]
+        row["Closing"] = balances[-1][1]
+
+
 def _has_header(page: Page, header: str) -> bool:
     return any(header in _cell(line, 0, 1000) for line in page)
+
+
+def _has_bank_table_data(page: Page) -> bool:
+    for line in page:
+        text = _cell(line, 0, 1000)
+        if "Transaction Summary" in text or "Important Notes" in text:
+            continue
+        raw_date = _cell(line, 70, 106)
+        description = _cell(line, 106, 300)
+        amounts = (
+            _cell(line, 300, 385),
+            _cell(line, 385, 475),
+            _cell(line, 475, 540),
+        )
+        if description.replace(" ", "").casefold() in {
+            "b/fbalance",
+            "c/fbalance",
+        }:
+            return True
+        if _BANK_DATE.fullmatch(raw_date) and (description or any(amounts)):
+            return True
+        if any(_AMOUNT.fullmatch(amount) for amount in amounts):
+            return True
+    return False
 
 
 def bank_rows(pages: list[Page]) -> list[SourceRow]:
     closing_date = _bank_statement_date(pages)
     rows: list[SourceRow] = []
-    openings: list[str] = []
-    closings: list[str] = []
+    balances: list[tuple[str, str, int]] = []
     current_date = ""
     pending: SourceRow | None = None
     continuation = False
     for page_number, page in enumerate(pages, 1):
-        if continuation and not _has_header(page, _BANK_HEADER):
+        has_header = _has_header(page, _BANK_HEADER)
+        if continuation and not has_header:
             raise ValueError("Hang Seng bank continuation page has no table header")
+        if (
+            not continuation
+            and balances
+            and balances[-1][0] == "closing"
+            and not has_header
+            and _has_bank_table_data(page)
+        ):
+            raise ValueError("Hang Seng bank data after closing balance has no header")
         in_table = False
+        requires_opening = False
         for line_number, line in enumerate(page, 1):
             text = _cell(line, 0, 1000)
             if _BANK_HEADER in text:
                 in_table = True
+                requires_opening = not continuation or bool(
+                    balances and balances[-1][0] == "closing"
+                )
                 continue
             if not in_table:
                 continue
@@ -121,8 +174,11 @@ def bank_rows(pages: list[Page]) -> list[SourceRow]:
                 if pending is not None:
                     rows.append(pending)
                     pending = None
-                target = openings if compact == "b/fbalance" else closings
-                target.append(_money(balance))
+                kind = "opening" if compact == "b/fbalance" else "closing"
+                if kind == "closing" and requires_opening:
+                    raise ValueError("Missing or conflicting Hang Seng opening balance")
+                balances.append((kind, _money(balance), page_number))
+                requires_opening = False
                 if compact == "c/fbalance":
                     in_table = False
                 continue
@@ -134,6 +190,8 @@ def bank_rows(pages: list[Page]) -> list[SourceRow]:
             if raw_date:
                 current_date = _bank_date(raw_date, closing_date)
             if deposit or withdrawal:
+                if requires_opening:
+                    raise ValueError("Missing or conflicting Hang Seng opening balance")
                 if (
                     bool(deposit) == bool(withdrawal)
                     or not current_date
@@ -161,9 +219,11 @@ def bank_rows(pages: list[Page]) -> list[SourceRow]:
             elif raw_date or balance:
                 raise ValueError("Incomplete Hang Seng bank transaction")
         continuation = in_table
+    if continuation:
+        raise ValueError("Hang Seng bank table has no closing balance")
     if pending is not None:
         rows.append(pending)
-    _balances(rows, openings, closings)
+    _bank_balances(rows, balances)
     return rows
 
 
