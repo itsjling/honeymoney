@@ -216,6 +216,10 @@ def preview_profile_input(
     profile_id: str,
     input_path: Path,
     config: Mapping[str, object],
+    *,
+    source_snapshot: InputSourceSnapshot | None = None,
+    metadata: dict[str, int] | None = None,
+    value_rows: bool = True,
 ) -> tuple[list[dict[str, str]], list[str]]:
     """Parse one stable input snapshot with an already selected profile."""
     profile_document = dict(profile)
@@ -227,7 +231,9 @@ def preview_profile_input(
                 f"Profile {profile_id} does not define csv parser settings "
                 f"required for {input_path.name}"
             )
-        source_snapshot = _capture_input_source(input_path, config_document)
+        source_snapshot = source_snapshot or _capture_input_source(
+            input_path, config_document
+        )
         return (
             _import_csv(
                 input_path,
@@ -235,6 +241,7 @@ def preview_profile_input(
                 config_document,
                 input_path.parent,
                 source_bytes=source_snapshot.source_bytes,
+                value_rows=value_rows,
             ),
             [],
         )
@@ -244,13 +251,17 @@ def preview_profile_input(
                 f"Profile {profile_id} does not define pdf parser settings "
                 f"required for {input_path.name}"
             )
-        source_snapshot = _capture_input_source(input_path, config_document)
+        source_snapshot = source_snapshot or _capture_input_source(
+            input_path, config_document
+        )
         return _import_pdf(
             input_path,
             profile_document,
             config_document,
             input_path.parent,
             source_bytes=source_snapshot.source_bytes,
+            metadata=metadata,
+            value_rows=value_rows,
         )
     raise ValueError(
         f"Unsupported preview input type for {input_path.name}; expected .csv or .pdf"
@@ -1488,6 +1499,7 @@ def _import_csv(
     *,
     include_identity_records: bool = False,
     source_bytes: bytes | None = None,
+    value_rows: bool = True,
 ) -> (
     list[dict[str, str]]
     | tuple[list[dict[str, str]], tuple[IncomingRecordIdentity, ...]]
@@ -1529,7 +1541,8 @@ def _import_csv(
                 columns=columns,
                 source_file=_relative_source(csv_path, input_root),
             )
-            value_transaction(normalized, config)
+            if value_rows:
+                value_transaction(normalized, config)
             if _row_is_skipped(normalized, skip_patterns):
                 row_number += 1
                 continue
@@ -1572,6 +1585,8 @@ def _import_pdf(
     *,
     include_identity_records: bool = False,
     source_bytes: bytes | None = None,
+    value_rows: bool = True,
+    metadata: dict[str, int] | None = None,
 ) -> (
     tuple[list[dict[str, str]], list[str]]
     | tuple[list[dict[str, str]], list[str], tuple[IncomingRecordIdentity, ...]]
@@ -1605,6 +1620,8 @@ def _import_pdf(
         with pdfplumber.open(pdf_source) as pdf:
             if len(pdf.pages) > MAX_PDF_PAGES:
                 raise ValueError(f"PDF page count exceeds {MAX_PDF_PAGES}")
+            if metadata is not None:
+                metadata["page_count"] = len(pdf.pages)
             budget = _PdfImportBudget()
             cached_pdf = _CachedPdfDocument(
                 tuple(_CachedPdfPage(page, budget) for page in pdf.pages)
@@ -1630,7 +1647,10 @@ def _import_pdf(
                 source_rows = hang_seng_reader(pages)
             elif pdf_settings.get("word_rows") == "sectioned":
                 source_rows = _pdf_sectioned_word_source_rows(
-                    cached_pdf, pdf_path, pdf_settings
+                    cached_pdf,
+                    pdf_path,
+                    pdf_settings,
+                    balance_observations=balance_observations,
                 )
             else:
                 source_rows = None
@@ -1645,7 +1665,8 @@ def _import_pdf(
                         source_file=_relative_source(pdf_path, input_root),
                         source_page=str(page_number),
                     )
-                    value_transaction(normalized, config)
+                    if value_rows:
+                        value_transaction(normalized, config)
                     if _row_is_skipped(normalized, skip_patterns):
                         continue
                     budget.record_transaction()
@@ -1694,7 +1715,8 @@ def _import_pdf(
                             source_file=_relative_source(pdf_path, input_root),
                             source_page=str(page_number),
                         )
-                        value_transaction(normalized, config)
+                        if value_rows:
+                            value_transaction(normalized, config)
                         if _row_is_skipped(normalized, skip_patterns):
                             continue
                         budget.record_transaction()
@@ -1773,7 +1795,8 @@ def _import_pdf(
                                 source_file=_relative_source(pdf_path, input_root),
                                 source_page=str(page_number),
                             )
-                            value_transaction(normalized, config)
+                            if value_rows:
+                                value_transaction(normalized, config)
                             if _row_is_skipped(normalized, skip_patterns):
                                 continue
                             budget.record_transaction()
@@ -2265,7 +2288,11 @@ def _attach_pdf_balances(
 
 
 def _pdf_sectioned_word_source_rows(
-    pdf: Any, pdf_path: Path, pdf_settings: dict[str, Any]
+    pdf: Any,
+    pdf_path: Path,
+    pdf_settings: dict[str, Any],
+    *,
+    balance_observations: _PdfBalanceObservations | None = None,
 ) -> list[tuple[dict[str, str], int, int]]:
     settings = pdf_settings.get("sectioned_word_rows", {})
     if not isinstance(settings, dict):
@@ -2284,6 +2311,7 @@ def _pdf_sectioned_word_source_rows(
         raise ValueError("PDF sectioned_word_rows requires account sections")
 
     rows: list[tuple[dict[str, str], int, int]] = []
+    final_balances: dict[_PdfBalanceTarget, _PdfBalanceCandidate | None] = {}
     current_date = ""
     account_dates: dict[str, str] = {}
     current_currency = ""
@@ -2412,6 +2440,30 @@ def _pdf_sectioned_word_source_rows(
                     f"{pdf_path.name} page {page_number} row {line_number}"
                 )
 
+            if columns.get("balance") is not None:
+                target = (
+                    str(current_account["account_id"]),
+                    str(current_account["statement_section"]),
+                    current_currency.upper(),
+                )
+                printed_balance = _pdf_words_in_bounds(line, columns["balance"])
+                match = re.fullmatch(
+                    r"(?P<balance>[+-]?\d[\d,]*\.\d{2})(?:\s*(?P<sign>CR|DR))?",
+                    printed_balance,
+                    flags=re.IGNORECASE,
+                )
+                final_balances[target] = (
+                    _PdfBalanceCandidate(
+                        page_number,
+                        line_number,
+                        _strict_pdf_balance(
+                            match.group("balance"), match.group("sign")
+                        ),
+                    )
+                    if match is not None
+                    else None
+                )
+
             rows.append(
                 (
                     {
@@ -2430,6 +2482,23 @@ def _pdf_sectioned_word_source_rows(
             )
             description_parts = []
 
+    if balance_observations is not None:
+        for target, endpoints in balance_observations.items():
+            candidate = final_balances.get(target)
+            if target not in final_balances and not target[1]:
+                matching_candidates = [
+                    value
+                    for key, value in final_balances.items()
+                    if key[0] == target[0] and key[2] == target[2]
+                ]
+                if len(matching_candidates) == 1:
+                    candidate = matching_candidates[0]
+            if candidate is None or not endpoints["opening"]:
+                continue
+            endpoints["closing"].append(candidate.value)
+            balance_observations.pages.setdefault(
+                (target, "closing", candidate.value), set()
+            ).add(candidate.page_number)
     return rows
 
 

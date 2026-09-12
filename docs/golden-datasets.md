@@ -136,6 +136,17 @@ accepts a closing value for an account and currency only after it has found
 that target's opening value, and it accepts only one such close. This keeps
 portfolio totals and totals for another currency out of a transaction account.
 
+Sectioned profiles may set `pdf.sectioned_word_rows.columns.balance` to the
+printed running-balance column bounds. HSBC One uses this to read the balance
+on the final transaction line for each account, section, and currency across
+pages. This requires an opening balance for the same target. It never computes
+a closing balance from transactions or adds rows for inactive currencies. A
+missing or malformed final balance leaves this source unavailable, even if an
+earlier transaction had a balance. A balance printed only on a separate
+continuation line is not supported. Explicit closing evidence still applies.
+If it differs from the final printed running balance, the endpoint conflicts.
+Zero, CR, and DR suffixes are supported.
+
 Keep the patterns narrow enough to match one kind of balance line. Validation
 rejects missing pairs, bad patterns, unknown sections, missing named groups,
 fixed mappings for the same account and currency, and any dynamic mapping that

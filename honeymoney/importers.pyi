@@ -83,6 +83,10 @@ def preview_profile_input(
     profile_id: str,
     input_path: Path,
     config: Mapping[str, object],
+    *,
+    source_snapshot: InputSourceSnapshot | None = None,
+    metadata: dict[str, int] | None = None,
+    value_rows: bool = True,
 ) -> tuple[ImportedRows, ImportWarnings]: ...
 @overload
 def _import_transactions(

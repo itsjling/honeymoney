@@ -339,6 +339,37 @@ def _smoke_installed_cli(
             f"{installed_package}"
         )
 
+    parse_source = temporary_path / "parse-synthetic.csv"
+    parse_source.write_text(
+        "Transaction date,Post date,Description,Billing amount,Billing currency,"
+        "Merchant name,Credit / Debit\n"
+        "2026-08-08,2026-08-09,Synthetic purchase,12.00,HKD,Synthetic Grocer,Debit\n",
+        encoding="utf-8",
+    )
+    parsed = _successful_json_command(
+        [
+            str(command_path),
+            "parse",
+            str(parse_source),
+            "--profile",
+            "mox_credit_card",
+            "--json",
+        ],
+        environment=environment,
+        working_directory=temporary_path,
+        label="Installed distribution parse",
+    )
+    parse_data = _successful_command_data(parsed, label="Installed distribution parse")
+    rows = parse_data.get("rows")
+    if (
+        not isinstance(rows, list)
+        or len(rows) != 1
+        or rows[0].get("posted_amount") != "-12.00"
+    ):
+        raise ValueError("Installed distribution parse did not return the source row")
+    if "category" in rows[0] or (temporary_path / ".honeymoney").exists():
+        raise ValueError("Installed distribution parse crossed its read-only boundary")
+
     workspace = temporary_path / "workspace"
     _successful_json_command(
         [str(command_path), "setup", "--root", str(workspace), "--json"],

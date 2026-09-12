@@ -24,6 +24,7 @@ from honeymoney.account_bindings import (
 )
 from honeymoney.corrections import load_corrections
 from honeymoney.ollama import list_ollama_models
+from honeymoney.parse_service import parse_statement
 from honeymoney.parser_contracts import Profile
 from honeymoney.periods import PeriodSelection, resolve_period_selection
 from honeymoney.rate_fetch import fetch_hkma_daily_rates, prepare_hkma_fetch
@@ -86,6 +87,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     command, tail = arguments[0], arguments[1:]
     if command == "setup":
         return _setup_command(tail)
+    if command == "parse":
+        return _parse_command(tail)
     if command == "import":
         return _import_command(tail)
     if command == "imports":
@@ -154,6 +157,28 @@ def run() -> int:
         else:
             print(str(error), file=sys.stderr)
         return 2
+
+
+def _parse_command(argv: list[str]) -> int:
+    parser = _parser("honeymoney parse", "Parse one statement without a workspace.")
+    parser.add_argument("path")
+    parser.add_argument("--profile", required=True)
+    parser.add_argument("--json", action="store_true")
+    try:
+        args = parser.parse_args(argv)
+    except CliUsageError:
+        raise CliUsageError("Invalid parse command arguments") from None
+    data = parse_statement(
+        Path(_clean_pasted_path(args.path)).expanduser(), args.profile
+    )
+    if args.json:
+        _emit_json("parse", "success", data=data)
+    else:
+        rows = data["rows"]
+        assert isinstance(rows, list)
+        print(f"Parsed {len(rows)} statement rows. No records were saved.")
+        print("Use --json for source facts, warnings, and statement balance checks.")
+    return 0
 
 
 def _setup_command(argv: list[str]) -> int:
@@ -1295,6 +1320,7 @@ Local, clean-start household statement storage and monthly views.
 
 Commands:
   honeymoney setup [--root DIR]
+  honeymoney parse PATH --profile PROFILE_ID [--json]
   honeymoney import PATH [--replace | --reset] [--binding ID]
   honeymoney imports list
   honeymoney imports show SOURCE_ID

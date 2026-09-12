@@ -3,6 +3,10 @@
 The public CLI is the main integration seam. Command parsing and presentation
 compose typed services; they do not define file schemas or financial rules.
 
+The parse-only service selects a bundled profile, captures one source snapshot,
+and returns allowed source facts plus statement balance checks. It owns no
+workspace state and never invokes categorization, valuation, or publication.
+
 Import discovery reads only the explicit `PATH`, selects checked profiles and
 account bindings, and gives normalized statement transactions to import-record
 storage. Parsers own immutable row locators. Normalization stays pure and does
