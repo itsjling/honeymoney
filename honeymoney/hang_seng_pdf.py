@@ -20,6 +20,7 @@ _BankBalance = tuple[str, str, int, str]
 _AMOUNT = re.compile(r"\$?([+-]?(?:\d{1,3}(?:,\d{3})+|\d+)\.\d{2})\s*(CR|DR|-)?", re.I)
 _BANK_DATE = re.compile(r"(\d{1,2})\s+([A-Za-z]{3})")
 _BANK_HEADER = "Date Transaction Details Deposit Withdrawal Balance in HKD"
+_BANK_SUMMARY = "Transaction Summary"
 _CARD_HEADER = "TRANS DATE POST DATE NEW ACTIVITY AMOUNT"
 
 
@@ -116,28 +117,42 @@ def _has_header(page: Page, header: str) -> bool:
     return any(header in _cell(line, 0, 1000) for line in page)
 
 
-def _has_bank_table_data(page: Page) -> bool:
-    for line in page:
-        text = _cell(line, 0, 1000)
-        if "Transaction Summary" in text or "Important Notes" in text:
-            continue
-        raw_date = _cell(line, 70, 106)
-        description = _cell(line, 106, 300)
-        amounts = (
+def _bank_line_fields(line: list[Word]) -> tuple[str, str, tuple[str, str, str]]:
+    return (
+        _cell(line, 70, 106),
+        _cell(line, 106, 300),
+        (
             _cell(line, 300, 385),
             _cell(line, 385, 475),
             _cell(line, 475, 540),
-        )
-        if description.replace(" ", "").casefold() in {
-            "b/fbalance",
-            "c/fbalance",
-        }:
-            return True
-        if _BANK_DATE.fullmatch(raw_date) and (description or any(amounts)):
-            return True
-        if any(_AMOUNT.fullmatch(amount) for amount in amounts):
-            return True
-    return False
+        ),
+    )
+
+
+def _bank_balance_description(description: str) -> bool:
+    return description.replace(" ", "").casefold() in {
+        "b/fbalance",
+        "c/fbalance",
+    }
+
+
+def _bank_data_without_header(line: list[Word]) -> bool:
+    raw_date, description, amounts = _bank_line_fields(line)
+    return (
+        _bank_balance_description(description)
+        or bool(_BANK_DATE.fullmatch(raw_date) and (description or any(amounts)))
+        or any(_AMOUNT.fullmatch(amount) for amount in amounts)
+    )
+
+
+def _bank_data_after_summary(line: list[Word]) -> bool:
+    text = _cell(line, 0, 1000)
+    raw_date, description, amounts = _bank_line_fields(line)
+    return (
+        _BANK_HEADER in text
+        or _bank_balance_description(description)
+        or bool(_BANK_DATE.fullmatch(raw_date) and (description or any(amounts)))
+    )
 
 
 def bank_rows(pages: list[Page]) -> list[SourceRow]:
@@ -147,22 +162,24 @@ def bank_rows(pages: list[Page]) -> list[SourceRow]:
     current_date = ""
     pending: SourceRow | None = None
     continuation = False
+    summary_seen = False
     for page_number, page in enumerate(pages, 1):
         has_header = _has_header(page, _BANK_HEADER)
         if continuation and not has_header:
             raise ValueError("Hang Seng bank continuation page has no table header")
-        if (
-            not continuation
-            and balances
-            and balances[-1][0] == "closing"
-            and not has_header
-            and _has_bank_table_data(page)
-        ):
-            raise ValueError("Hang Seng bank data after closing balance has no header")
         in_table = False
         requires_opening = False
         for line_number, line in enumerate(page, 1):
             text = _cell(line, 0, 1000)
+            if summary_seen:
+                if _bank_data_after_summary(line):
+                    raise ValueError("Hang Seng bank data after transaction summary")
+                continue
+            if text == _BANK_SUMMARY:
+                if in_table or not balances or balances[-1][0] != "closing":
+                    raise ValueError("Hang Seng bank table has no closing balance")
+                summary_seen = True
+                continue
             if _BANK_HEADER in text:
                 in_table = True
                 requires_opening = not continuation or bool(
@@ -170,18 +187,26 @@ def bank_rows(pages: list[Page]) -> list[SourceRow]:
                 )
                 continue
             if not in_table:
+                if (
+                    balances
+                    and balances[-1][0] == "closing"
+                    and _bank_data_without_header(line)
+                ):
+                    raise ValueError(
+                        "Hang Seng bank data after closing balance has no header"
+                    )
                 continue
-            raw_date = _cell(line, 70, 106)
-            description = _cell(line, 106, 300)
-            deposit = _cell(line, 300, 385)
-            withdrawal = _cell(line, 385, 475)
-            balance = _cell(line, 475, 540)
-            compact = description.replace(" ", "").casefold()
-            if compact in {"b/fbalance", "c/fbalance"}:
+            raw_date, description, amounts = _bank_line_fields(line)
+            deposit, withdrawal, balance = amounts
+            if _bank_balance_description(description):
                 if pending is not None:
                     rows.append(pending)
                     pending = None
-                kind = "opening" if compact == "b/fbalance" else "closing"
+                kind = (
+                    "opening"
+                    if description.replace(" ", "").casefold() == "b/fbalance"
+                    else "closing"
+                )
                 if kind == "closing" and requires_opening:
                     raise ValueError("Missing or conflicting Hang Seng opening balance")
                 try:
@@ -190,13 +215,10 @@ def bank_rows(pages: list[Page]) -> list[SourceRow]:
                     raise ValueError("Invalid Hang Seng balance date") from None
                 balances.append((kind, _money(balance), page_number, balance_date))
                 requires_opening = False
-                if compact == "c/fbalance":
+                if kind == "closing":
                     in_table = False
                 continue
-            if (
-                description.startswith("Transaction Summary")
-                or "Important Notes" in text
-            ):
+            if "Important Notes" in text:
                 raise ValueError("Hang Seng bank table has no closing balance")
             if raw_date:
                 current_date = _bank_date(raw_date, closing_date)
@@ -235,6 +257,8 @@ def bank_rows(pages: list[Page]) -> list[SourceRow]:
     if pending is not None:
         rows.append(pending)
     _bank_balances(rows, balances, closing_date)
+    if not summary_seen:
+        raise ValueError("Hang Seng bank statement has no transaction summary")
     return rows
 
 

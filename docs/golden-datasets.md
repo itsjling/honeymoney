@@ -108,6 +108,13 @@ The canonical PDF import goldens currently cover `hang_seng_bank_pdf`,
 bank-statement profile; do not add goldens for the retired `hsbc_hk_bank` or
 `hsbc_hk_bank_pdf` profiles.
 
+The synthetic `hang_seng_bank_pdf` layout ends with a full-line
+`Transaction Summary` heading after its final dated `C/F Balance`. The heading
+may appear on the next page. Summary totals and notes may follow it, but a new
+table header, dated transaction row, or balance row must fail parsing. This
+fixture records the supported contract and does not prove that all Hang Seng
+layouts use it.
+
 Every profile is validated before statement rows are read. Keep stable account
 metadata, define exactly one of `csv` or `pdf`, map a transaction or posting
 date and exactly one amount strategy (`amount` or the `debit`/`credit` pair),

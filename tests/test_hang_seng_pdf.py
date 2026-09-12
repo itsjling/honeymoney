@@ -322,6 +322,83 @@ class HangSengPdfTest(unittest.TestCase):
                 pages(lines[:5] + [carried]) + pages([lines[1], brought] + lines[5:])
             )
 
+    def test_bank_summary_marker_can_follow_the_closed_table(self):
+        lines = layout("bank")
+
+        result = bank_rows(pages(lines[:-1]) + pages([lines[-1]]))
+
+        self.assertEqual(len(result), 2)
+
+    def test_bank_requires_summary_after_the_final_closing_balance(self):
+        lines = layout("bank")
+        important_notes = [[108, "Important Notes"]]
+        same_date_partial = lines[:5] + [
+            [[74, "05 Jan"], [108, "C/F Balance"], [495, "30.00"]]
+        ]
+
+        for statement in (
+            lines[:-1],
+            lines[:-1] + [important_notes],
+            same_date_partial,
+        ):
+            with self.subTest(statement=statement):
+                with self.assertRaisesRegex(ValueError, "no transaction summary"):
+                    bank_rows(pages(statement))
+
+    def test_bank_summary_before_the_closing_balance_is_invalid(self):
+        lines = layout("bank")
+        marker = lines.pop()
+        lines.insert(-1, marker)
+
+        with self.assertRaisesRegex(ValueError, "table has no closing balance"):
+            bank_rows(pages(lines))
+
+    def test_bank_transaction_summary_merchant_text_remains_a_transaction(self):
+        lines = layout("bank")
+        lines[3][1][1] = "Transaction Summary PURCHASE"
+
+        result = bank_rows(pages(lines))
+
+        self.assertEqual(
+            result[0][0]["Description"],
+            "Transaction Summary PURCHASE REFERENCE ALPHA",
+        )
+
+    def test_bank_rejects_table_data_after_the_summary(self):
+        lines = layout("bank")
+        forbidden = (
+            [[74, "Date Transaction Details Deposit Withdrawal Balance in HKD"]],
+            [[74, "05 Jan"], [108, "SYNTHETIC LATE ROW"], [319, "1.00"]],
+            [[74, "05 Jan"], [108, "B/F Balance"], [495, "0.00"]],
+            [[74, "05 Jan"], [108, "C/F Balance"], [495, "0.00"]],
+        )
+
+        for extra_line in forbidden:
+            statements = (
+                pages(lines + [extra_line]),
+                pages(lines) + pages([extra_line]),
+            )
+            for statement in statements:
+                with self.subTest(extra_line=extra_line, page_count=len(statement)):
+                    with self.assertRaisesRegex(
+                        ValueError, "data after transaction summary"
+                    ):
+                        bank_rows(statement)
+
+    def test_bank_allows_summary_totals_and_notes_after_the_marker(self):
+        lines = layout("bank")
+        lines.extend(
+            [
+                [[108, "TOTAL DEPOSITS"], [319, "30.00"]],
+                [[108, "Important Notes"]],
+                [[108, "Synthetic summary note"]],
+            ]
+        )
+
+        result = bank_rows(pages(lines))
+
+        self.assertEqual(len(result), 2)
+
     def test_bank_terminal_balance_date_must_match_statement_date(self):
         lines = layout("bank")
         carried = [[74, "31 Dec"], [108, "C/F Balance"], [495, "30.00"]]
@@ -337,15 +414,15 @@ class HangSengPdfTest(unittest.TestCase):
                 ):
                     bank_rows(pages(broken))
 
-    def test_cli_import_rejects_a_truncated_bank_rollover(self):
+    def test_cli_import_rejects_a_bank_statement_without_its_summary(self):
         lines = layout("bank")
-        carried = [[74, "31 Dec"], [108, "C/F Balance"], [495, "30.00"]]
+        truncated = lines[:5] + [[[74, "05 Jan"], [108, "C/F Balance"], [495, "30.00"]]]
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary) / "money"
             setup = self._run("setup", "--root", str(root), "--json")
             self.assertEqual(setup.returncode, 0, setup.stderr)
             source = root / "synthetic-truncated-bank.pdf"
-            source.write_bytes(pdf_bytes(lines[:5] + [carried]))
+            source.write_bytes(pdf_bytes(truncated))
             config = root / "config.json"
             bound = self._run(
                 "profile",
@@ -387,6 +464,30 @@ class HangSengPdfTest(unittest.TestCase):
             self.assertFalse(summary["ready"])
             self.assertEqual(summary["statement_transaction_count"], 0)
             self.assertEqual(attempt["outcome"], "failure")
+
+    def test_parse_cli_rejects_a_bank_statement_without_writing(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "synthetic-truncated-bank.pdf"
+            lines = layout("bank")
+            truncated = lines[:5] + [
+                [[74, "05 Jan"], [108, "C/F Balance"], [495, "30.00"]]
+            ]
+            source.write_bytes(pdf_bytes(truncated))
+
+            parsed = self._run(
+                "parse",
+                str(source),
+                "--profile",
+                "hang_seng_bank_pdf",
+                "--json",
+            )
+
+            self.assertEqual(parsed.returncode, 2, parsed.stdout)
+            self.assertEqual(
+                json.loads(parsed.stdout)["errors"][0]["code"], "parse_failed"
+            )
+            self.assertEqual(list(root.iterdir()), [source])
 
     def test_bank_rejects_data_after_a_closed_table_without_a_balance_pair(self):
         lines = layout("bank")
