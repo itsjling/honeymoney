@@ -55,6 +55,7 @@ files = [
   "honeymoney/csv_artifacts.py",
   "honeymoney/doctor.py",
   "honeymoney/duplicates.py",
+  "honeymoney/hang_seng_pdf.py",
   "honeymoney/identity.pyi",
   "honeymoney/identity_contracts.py",
   "honeymoney/identity_state.py",

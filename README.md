@@ -72,6 +72,14 @@ prints transaction values or raw source paths.
 Honeymoney does not copy the original statement into the workspace. Keep your
 original files in your own protected storage for later reimport.
 
+Setup includes PDF profiles for Hang Seng ATM Savings and Hang Seng enJoy
+credit card statements. These profiles preserve source dates, wrapped
+descriptions, and statement balances from the supported text layouts.
+The ATM Savings layout must place a full-line `Transaction Summary` heading
+after the final dated `C/F Balance`. The heading may start a later page, and
+summary totals or notes may follow it. This contract covers the tested layout;
+it does not claim support for every Hang Seng statement layout.
+
 ## Generated views
 
 Honeymoney derives all ready import records together, then places each view

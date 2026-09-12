@@ -102,10 +102,24 @@ one `accepted_statement` case containing the smallest synthetic set of rows
 that covers the accepted layout's important branches. Keep the private PDF and
 accepted CSV only in the ignored local acceptance corpus.
 
-The canonical PDF import goldens currently cover `hsbc_one_pdf`,
-`hsbc_hk_credit_card_pdf`, `mox_bank_pdf`, and `mox_credit_card_pdf`. HSBC One
-is the only HSBC bank-statement profile; do not add goldens for the retired
-`hsbc_hk_bank` or `hsbc_hk_bank_pdf` profiles.
+The canonical PDF import goldens currently cover `hang_seng_bank_pdf`,
+`hang_seng_credit_card_pdf`, `hsbc_one_pdf`, `hsbc_hk_credit_card_pdf`,
+`mox_bank_pdf`, and `mox_credit_card_pdf`. HSBC One is the only HSBC
+bank-statement profile; do not add goldens for the retired `hsbc_hk_bank` or
+`hsbc_hk_bank_pdf` profiles.
+
+The synthetic `hang_seng_bank_pdf` layout ends with a full-line
+`Transaction Summary` heading after its final dated `C/F Balance`. The heading
+may appear on the next page. Summary totals and notes may follow it, but a new
+table header, dated transaction row, or balance row must fail parsing. This
+fixture records the supported contract and does not prove that all Hang Seng
+layouts use it.
+
+The synthetic `hang_seng_credit_card_pdf` layout ends its transaction table
+with a full-line, star-decorated `FINANCE CHARGE RATES` or
+`SUMMARY OF ACTIVITY` heading. The same words in merchant text do not end the
+table. Summary totals and notes may follow the heading, but a new table header,
+dated transaction row, or opening balance row must fail parsing.
 
 Every profile is validated before statement rows are read. Keep stable account
 metadata, define exactly one of `csv` or `pdf`, map a transaction or posting
