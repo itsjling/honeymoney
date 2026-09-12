@@ -1596,7 +1596,10 @@ def _import_pdf(
             balance_observations = _pdf_balance_observations(cached_pdf, pdf_settings)
             if pdf_settings.get("word_rows") == "sectioned":
                 source_rows = _pdf_sectioned_word_source_rows(
-                    cached_pdf, pdf_path, pdf_settings
+                    cached_pdf,
+                    pdf_path,
+                    pdf_settings,
+                    balance_observations=balance_observations,
                 )
                 for source_row, page_number, row_number in source_rows:
                     normalized = _normalized_row(
@@ -2225,7 +2228,11 @@ def _attach_pdf_balances(
 
 
 def _pdf_sectioned_word_source_rows(
-    pdf: Any, pdf_path: Path, pdf_settings: dict[str, Any]
+    pdf: Any,
+    pdf_path: Path,
+    pdf_settings: dict[str, Any],
+    *,
+    balance_observations: _PdfBalanceObservations | None = None,
 ) -> list[tuple[dict[str, str], int, int]]:
     settings = pdf_settings.get("sectioned_word_rows", {})
     if not isinstance(settings, dict):
@@ -2244,6 +2251,7 @@ def _pdf_sectioned_word_source_rows(
         raise ValueError("PDF sectioned_word_rows requires account sections")
 
     rows: list[tuple[dict[str, str], int, int]] = []
+    final_balances: dict[_PdfBalanceTarget, _PdfBalanceCandidate | None] = {}
     current_date = ""
     account_dates: dict[str, str] = {}
     current_currency = ""
@@ -2372,6 +2380,32 @@ def _pdf_sectioned_word_source_rows(
                     f"{pdf_path.name} page {page_number} row {line_number}"
                 )
 
+            if columns.get("balance") is not None:
+                target = (
+                    str(current_account["account_id"]),
+                    str(current_account["statement_section"]),
+                    current_currency.upper(),
+                )
+                # Every transaction replaces the candidate, including one with no
+                # printed balance. Never reuse an earlier running balance.
+                printed_balance = _pdf_words_in_bounds(line, columns["balance"])
+                match = re.fullmatch(
+                    r"(?P<balance>[+-]?\d[\d,]*\.\d{2})(?:\s*(?P<sign>CR|DR))?",
+                    printed_balance,
+                    flags=re.IGNORECASE,
+                )
+                final_balances[target] = (
+                    _PdfBalanceCandidate(
+                        page_number,
+                        line_number,
+                        _strict_pdf_balance(
+                            match.group("balance"), match.group("sign")
+                        ),
+                    )
+                    if match is not None
+                    else None
+                )
+
             rows.append(
                 (
                     {
@@ -2390,6 +2424,16 @@ def _pdf_sectioned_word_source_rows(
             )
             description_parts = []
 
+    if balance_observations is not None:
+        for target, candidate in final_balances.items():
+            endpoints = balance_observations.get(target)
+            if candidate is None or not endpoints or not endpoints["opening"]:
+                continue
+            # Keep explicit closing evidence so disagreement remains a conflict.
+            endpoints["closing"].append(candidate.value)
+            balance_observations.pages.setdefault(
+                (target, "closing", candidate.value), set()
+            ).add(candidate.page_number)
     return rows
 
 
