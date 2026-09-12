@@ -223,6 +223,71 @@ class HangSengPdfTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "card table has no end marker"):
             card_rows(pages(truncated))
 
+    def test_card_end_marker_phrase_in_merchant_text_remains_a_transaction(self):
+        for phrase in ("SUMMARY OF ACTIVITY", "FINANCE CHARGE RATES"):
+            with self.subTest(phrase=phrase):
+                lines = layout("credit_card")
+                lines[4][2][1] = phrase
+
+                result = card_rows(pages(lines))
+
+                self.assertEqual(len(result), 2)
+                self.assertEqual(
+                    result[0][0]["Description"], f"{phrase} REFERENCE ALPHA"
+                )
+
+    def test_card_end_marker_requires_a_decorated_full_line(self):
+        for phrase in ("SUMMARY OF ACTIVITY", "FINANCE CHARGE RATES"):
+            with self.subTest(phrase=phrase):
+                lines = layout("credit_card")
+                lines[-1] = [[184, phrase]]
+
+                with self.assertRaisesRegex(ValueError, "table has no end marker"):
+                    card_rows(pages(lines))
+
+    def test_card_accepts_each_supported_end_marker_heading(self):
+        for phrase in ("SUMMARY OF ACTIVITY", "FINANCE CHARGE RATES"):
+            with self.subTest(phrase=phrase):
+                lines = layout("credit_card")
+                lines[-1] = [[184, f"***** {phrase} *****"]]
+
+                result = card_rows(pages(lines))
+
+                self.assertEqual(len(result), 2)
+
+    def test_card_rejects_table_data_after_its_end_marker(self):
+        lines = layout("credit_card")
+        forbidden = (
+            lines[2],
+            lines[4],
+            [[25, "31 DEC 2026"], [156, "SYNTHETIC LATE ROW"], [547, "1.00"]],
+            [[91, "02 JAN 2027"], [156, "SYNTHETIC LATE ROW"], [547, "1.00"]],
+            [[156, "OPENING BALANCE"], [547, "10.00"]],
+        )
+
+        for extra_line in forbidden:
+            statements = (
+                pages(lines + [extra_line]),
+                pages(lines) + pages([extra_line]),
+            )
+            for statement in statements:
+                with self.subTest(extra_line=extra_line, page_count=len(statement)):
+                    with self.assertRaisesRegex(ValueError, "data after end marker"):
+                        card_rows(statement)
+
+    def test_card_allows_summary_totals_and_notes_after_its_end_marker(self):
+        lines = layout("credit_card")
+        summary = [
+            [[156, "TOTAL ACTIVITY"], [547, "50.00"]],
+            [[547, "50.00"]],
+            [[156, "Important Notes"]],
+            [[156, "Synthetic summary note"]],
+        ]
+
+        result = card_rows(pages(lines) + pages(summary))
+
+        self.assertEqual(len(result), 2)
+
     def test_cli_import_rejects_a_truncated_card_table(self):
         truncated = layout("credit_card")[:-1]
         with tempfile.TemporaryDirectory() as temporary:
@@ -348,7 +413,7 @@ class HangSengPdfTest(unittest.TestCase):
     def test_bank_terminal_heading_before_the_closing_balance_is_invalid(self):
         for heading in ("Transaction Summary", "Important Notes"):
             lines = layout("bank")
-            lines.insert(-2, [[108, heading]])
+            lines.insert(3, [[108, heading]])
 
             with self.subTest(heading=heading):
                 with self.assertRaisesRegex(ValueError, "table has no closing balance"):
@@ -365,6 +430,18 @@ class HangSengPdfTest(unittest.TestCase):
                 self.assertEqual(
                     result[0][0]["Description"],
                     f"{phrase} SHOP REFERENCE ALPHA",
+                )
+
+    def test_bank_terminal_phrase_as_wrapped_description_remains_content(self):
+        for phrase in ("Transaction Summary", "Important Notes"):
+            with self.subTest(phrase=phrase):
+                lines = layout("bank")
+                lines[4] = [[108, phrase]]
+
+                result = bank_rows(pages(lines))
+
+                self.assertEqual(
+                    result[0][0]["Description"], f"SYNTHETIC TRANSFER {phrase}"
                 )
 
     def test_bank_rejects_table_data_after_the_summary(self):

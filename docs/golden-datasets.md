@@ -115,6 +115,12 @@ table header, dated transaction row, or balance row must fail parsing. This
 fixture records the supported contract and does not prove that all Hang Seng
 layouts use it.
 
+The synthetic `hang_seng_credit_card_pdf` layout ends its transaction table
+with a full-line, star-decorated `FINANCE CHARGE RATES` or
+`SUMMARY OF ACTIVITY` heading. The same words in merchant text do not end the
+table. Summary totals and notes may follow the heading, but a new table header,
+dated transaction row, or opening balance row must fail parsing.
+
 Every profile is validated before statement rows are read. Keep stable account
 metadata, define exactly one of `csv` or `pdf`, map a transaction or posting
 date and exactly one amount strategy (`amount` or the `debit`/`credit` pair),

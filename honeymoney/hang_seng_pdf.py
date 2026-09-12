@@ -22,6 +22,10 @@ _BANK_DATE = re.compile(r"(\d{1,2})\s+([A-Za-z]{3})")
 _BANK_HEADER = "Date Transaction Details Deposit Withdrawal Balance in HKD"
 _BANK_SUMMARY = "Transaction Summary"
 _CARD_HEADER = "TRANS DATE POST DATE NEW ACTIVITY AMOUNT"
+_CARD_DATE = re.compile(r"\d{1,2}\s+[A-Za-z]{3}\s+\d{4}")
+_CARD_END = re.compile(
+    r"\*+\s+(?:FINANCE CHARGE RATES|SUMMARY OF ACTIVITY)\s+\*+", re.I
+)
 
 
 def _cell(line: list[Word], left: float, right: float) -> str:
@@ -175,8 +179,8 @@ def bank_rows(pages: list[Page]) -> list[SourceRow]:
                 if _bank_data_after_summary(line):
                     raise ValueError("Hang Seng bank data after transaction summary")
                 continue
-            if text == _BANK_SUMMARY:
-                if in_table or not balances or balances[-1][0] != "closing":
+            if text == _BANK_SUMMARY and not in_table:
+                if not balances or balances[-1][0] != "closing":
                     raise ValueError("Hang Seng bank table has no closing balance")
                 summary_seen = True
                 continue
@@ -218,7 +222,7 @@ def bank_rows(pages: list[Page]) -> list[SourceRow]:
                 if kind == "closing":
                     in_table = False
                 continue
-            if text == "Important Notes":
+            if text in {_BANK_SUMMARY, "Important Notes"} and pending is None:
                 raise ValueError("Hang Seng bank table has no closing balance")
             if raw_date:
                 current_date = _bank_date(raw_date, closing_date)
@@ -269,12 +273,26 @@ def card_rows(pages: list[Page]) -> list[SourceRow]:
     pending: SourceRow | None = None
     closing_pending = False
     continuation = False
+    end_seen = False
     for page_number, page in enumerate(pages, 1):
         if continuation and not _has_header(page, _CARD_HEADER):
             raise ValueError("Hang Seng card continuation page has no table header")
         in_table = False
         for line_number, line in enumerate(page, 1):
             text = _cell(line, 0, 1000)
+            if end_seen:
+                transaction_date = _cell(line, 20, 85)
+                posting_date = _cell(line, 85, 151)
+                description = _cell(line, 151, 520)
+                amount = _cell(line, 520, 600)
+                if (
+                    _CARD_HEADER in text
+                    or _CARD_DATE.fullmatch(transaction_date) is not None
+                    or _CARD_DATE.fullmatch(posting_date) is not None
+                    or (description == "OPENING BALANCE" and bool(amount))
+                ):
+                    raise ValueError("Hang Seng card data after end marker")
+                continue
             if closing_pending:
                 closings.append(_money(_cell(line, 379, 483), liability=True))
                 closing_pending = False
@@ -285,11 +303,12 @@ def card_rows(pages: list[Page]) -> list[SourceRow]:
                 continue
             if not in_table:
                 continue
-            if "FINANCE CHARGE RATES" in text or "SUMMARY OF ACTIVITY" in text:
+            if _CARD_END.fullmatch(text):
                 if pending is not None:
                     rows.append(pending)
                     pending = None
                 in_table = False
+                end_seen = True
                 continue
             transaction_date = _cell(line, 20, 85)
             posting_date = _cell(line, 85, 151)
