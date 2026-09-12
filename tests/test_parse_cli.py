@@ -307,6 +307,119 @@ class ParseCliTest(unittest.TestCase):
             self.assertEqual(len(result["warnings"]), 2)
             self.assertEqual(result["rows"][0]["posted_amount"], "")
 
+    def test_invalid_amount_is_blank_and_cannot_reconcile_as_zero(self) -> None:
+        rows = [
+            {
+                "date": "2026-05-01",
+                "account_id": "mox_credit_card",
+                "account_type": "credit_card",
+                "original_amount": "0.00",
+                "posted_amount": "0.00",
+                "posted_currency": "HKD",
+                "statement_opening_balance": "100.00",
+                "statement_closing_balance": "80.00",
+                "source_file": "private.csv",
+                "source_row": "1",
+                "flags": "uncategorized;invalid_amount",
+            },
+            {
+                "date": "2026-05-02",
+                "account_id": "mox_credit_card",
+                "account_type": "credit_card",
+                "original_amount": "20.00",
+                "posted_amount": "20.00",
+                "posted_currency": "HKD",
+                "statement_opening_balance": "100.00",
+                "statement_closing_balance": "80.00",
+                "source_file": "private.csv",
+                "source_row": "2",
+                "flags": "uncategorized",
+            },
+            {
+                "date": "2026-05-03",
+                "account_id": "mox_credit_card",
+                "account_type": "credit_card",
+                "original_amount": "0.00",
+                "posted_amount": "0.00",
+                "posted_currency": "HKD",
+                "statement_opening_balance": "100.00",
+                "statement_closing_balance": "80.00",
+                "source_file": "private.csv",
+                "source_row": "3",
+                "flags": "uncategorized",
+            },
+        ]
+        with (
+            patch.object(importers, "preview_profile_input", return_value=(rows, [])),
+            patch.object(
+                sys,
+                "argv",
+                [
+                    "honeymoney",
+                    "parse",
+                    str(CSV),
+                    "--profile",
+                    "mox_credit_card",
+                    "--json",
+                ],
+            ),
+            redirect_stdout(io.StringIO()) as output,
+        ):
+            self.assertEqual(cli.run(), 0)
+
+        data = json.loads(output.getvalue())["data"]
+        self.assertEqual(
+            [row["original_amount"] for row in data["rows"]],
+            ["", "20.00", "0.00"],
+        )
+        self.assertEqual(
+            [row["posted_amount"] for row in data["rows"]],
+            ["", "20.00", "0.00"],
+        )
+        self.assertEqual(
+            data["warnings"], ["One or more rows have invalid source amounts."]
+        )
+        balance = data["balance_checks"]["mox_credit_card"]
+        self.assertEqual(balance["status"], "unavailable")
+        self.assertEqual(
+            balance["statements"][0]["reason"],
+            "One or more posted amounts are unavailable.",
+        )
+
+    def test_csv_json_distinguishes_invalid_amounts_from_zero(self) -> None:
+        source_text = CSV.read_text()
+        header = source_text.splitlines()[0]
+        rows = (
+            "2026-05-01,2026-05-02,CARD PURCHASE,PRIVATE,HKD,Shop,Debit",
+            "2026-05-03,2026-05-04,CARD PURCHASE,,HKD,Shop,Debit",
+            "2026-05-05,2026-05-06,CARD PURCHASE,0.00,HKD,Shop,Debit",
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary) / "statement.csv"
+            source.write_text("\n".join((header, *rows)))
+            with redirect_stdout(io.StringIO()) as output:
+                code = cli.main(
+                    [
+                        "parse",
+                        str(source),
+                        "--profile",
+                        "mox_credit_card",
+                        "--json",
+                    ]
+                )
+
+        self.assertEqual(code, 0)
+        data = json.loads(output.getvalue())["data"]
+        self.assertEqual(
+            [row["original_amount"] for row in data["rows"]], ["", "", "0.00"]
+        )
+        self.assertEqual(
+            [row["posted_amount"] for row in data["rows"]], ["", "", "0.00"]
+        )
+        self.assertEqual(
+            data["warnings"], ["One or more rows have invalid source amounts."]
+        )
+
     def test_invalid_dates_and_fixed_year_assumptions_are_visible(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             source = Path(temporary) / "bad-date.csv"

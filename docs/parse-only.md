@@ -65,12 +65,14 @@ merchant original_description source_page source_row
 ```
 
 Amounts are signed decimal strings. Outflows are negative, and inflows are
-positive. This sign is not a category or an accounting-flow decision. Dates
-use ISO format when the parser can resolve them. Page numbers are one-based.
-CSV rows have no source page. Row references follow the selected parser's
-existing locator format. Account IDs and names come from the profile rather
-than a workspace binding. Categories, flow types, confidence, review state,
-owner, valuation, FX estimates, and workspace IDs are absent.
+positive. This sign is not a category or an accounting-flow decision. When a
+row has an invalid source amount, both amount fields are empty and the result
+includes a warning. Such a row makes its balance check unavailable instead of
+counting as zero. Dates use ISO format when the parser can resolve them. Page
+numbers are one-based. CSV rows have no source page. Row references follow the
+selected parser's existing locator format. Account IDs and names come from the
+profile rather than a workspace binding. Categories, flow types, confidence,
+review state, owner, valuation, FX estimates, and workspace IDs are absent.
 
 The JSON includes financial facts by design. Human output gives only a row
 count. Errors and source labels do not echo source paths or filenames. Balance

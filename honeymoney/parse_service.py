@@ -97,11 +97,16 @@ def parse_statement(input_path: Path, profile_id: str) -> dict[str, object]:
             "parse_no_rows",
             "No transaction rows found; check the profile or review the source manually.",
         )
+    fact_rows = [dict(row) for row in rows]
+    for row in fact_rows:
+        if "invalid_amount" in row.get("flags", "").split(";"):
+            row["original_amount"] = ""
+            row["posted_amount"] = ""
     display_name = f"statement{suffix}"
     warnings = [warning.replace(input_path.name, display_name) for warning in warnings]
-    for row in rows:
+    for row in fact_rows:
         row["source_file"] = display_name
-    if any("invalid_amount" in row.get("flags", "").split(";") for row in rows):
+    if any("invalid_amount" in row.get("flags", "").split(";") for row in fact_rows):
         warnings.append("One or more rows have invalid source amounts.")
     if any(
         not _is_iso_date(row.get("date", ""))
@@ -109,7 +114,7 @@ def parse_statement(input_path: Path, profile_id: str) -> dict[str, object]:
             row.get(field) and not _is_iso_date(row[field])
             for field in ("transaction_date", "posting_date")
         )
-        for row in rows
+        for row in fact_rows
     ):
         warnings.append("One or more rows have missing or invalid dates.")
     if isinstance(profile.get("statement_year"), int):
@@ -128,9 +133,11 @@ def parse_statement(input_path: Path, profile_id: str) -> dict[str, object]:
         ).hexdigest(),
         "source_sha256": hashlib.sha256(snapshot.source_bytes).hexdigest(),
         "page_count": metadata.get("page_count"),
-        "rows": [{field: row.get(field, "") for field in FACT_FIELDS} for row in rows],
+        "rows": [
+            {field: row.get(field, "") for field in FACT_FIELDS} for row in fact_rows
+        ],
         "warnings": warnings,
-        "balance_checks": statement_balance_reconciliation(rows),
+        "balance_checks": statement_balance_reconciliation(fact_rows),
     }
 
 
