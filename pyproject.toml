@@ -65,6 +65,7 @@ files = [
   "honeymoney/overlap.py",
   "honeymoney/overlap_contracts.py",
   "honeymoney/parser_contracts.py",
+  "honeymoney/parse_service.py",
   "honeymoney/persistence.py",
   "honeymoney/periods.py",
   "honeymoney/provenance.py",

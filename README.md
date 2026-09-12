@@ -31,6 +31,13 @@ Setup creates config, starter user inputs, the empty workspace index, and the
 import-record container. It does not create an input folder or any generated
 view. See [workspace storage](docs/workspace-storage.md).
 
+## Parse a statement without a workspace
+
+`honeymoney parse PATH --profile PROFILE_ID --json` returns statement facts and
+balance checks for local apps that own their records and categories. It creates
+no workspace and runs no categorization or valuation. See
+[the parse-only contract](docs/parse-only.md).
+
 ## Import records
 
 Import requires one file or folder:

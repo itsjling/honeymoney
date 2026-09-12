@@ -215,6 +215,10 @@ def preview_profile_input(
     profile_id: str,
     input_path: Path,
     config: Mapping[str, object],
+    *,
+    source_snapshot: InputSourceSnapshot | None = None,
+    metadata: dict[str, int] | None = None,
+    value_rows: bool = True,
 ) -> tuple[list[dict[str, str]], list[str]]:
     """Parse one stable input snapshot with an already selected profile."""
     profile_document = dict(profile)
@@ -226,7 +230,9 @@ def preview_profile_input(
                 f"Profile {profile_id} does not define csv parser settings "
                 f"required for {input_path.name}"
             )
-        source_snapshot = _capture_input_source(input_path, config_document)
+        source_snapshot = source_snapshot or _capture_input_source(
+            input_path, config_document
+        )
         return (
             _import_csv(
                 input_path,
@@ -234,6 +240,7 @@ def preview_profile_input(
                 config_document,
                 input_path.parent,
                 source_bytes=source_snapshot.source_bytes,
+                value_rows=value_rows,
             ),
             [],
         )
@@ -243,13 +250,17 @@ def preview_profile_input(
                 f"Profile {profile_id} does not define pdf parser settings "
                 f"required for {input_path.name}"
             )
-        source_snapshot = _capture_input_source(input_path, config_document)
+        source_snapshot = source_snapshot or _capture_input_source(
+            input_path, config_document
+        )
         return _import_pdf(
             input_path,
             profile_document,
             config_document,
             input_path.parent,
             source_bytes=source_snapshot.source_bytes,
+            metadata=metadata,
+            value_rows=value_rows,
         )
     raise ValueError(
         f"Unsupported preview input type for {input_path.name}; expected .csv or .pdf"
@@ -1472,6 +1483,7 @@ def _import_csv(
     *,
     include_identity_records: bool = False,
     source_bytes: bytes | None = None,
+    value_rows: bool = True,
 ) -> (
     list[dict[str, str]]
     | tuple[list[dict[str, str]], tuple[IncomingRecordIdentity, ...]]
@@ -1513,7 +1525,8 @@ def _import_csv(
                 columns=columns,
                 source_file=_relative_source(csv_path, input_root),
             )
-            value_transaction(normalized, config)
+            if value_rows:
+                value_transaction(normalized, config)
             if _row_is_skipped(normalized, skip_patterns):
                 row_number += 1
                 continue
@@ -1556,6 +1569,8 @@ def _import_pdf(
     *,
     include_identity_records: bool = False,
     source_bytes: bytes | None = None,
+    value_rows: bool = True,
+    metadata: dict[str, int] | None = None,
 ) -> (
     tuple[list[dict[str, str]], list[str]]
     | tuple[list[dict[str, str]], list[str], tuple[IncomingRecordIdentity, ...]]
@@ -1589,6 +1604,8 @@ def _import_pdf(
         with pdfplumber.open(pdf_source) as pdf:
             if len(pdf.pages) > MAX_PDF_PAGES:
                 raise ValueError(f"PDF page count exceeds {MAX_PDF_PAGES}")
+            if metadata is not None:
+                metadata["page_count"] = len(pdf.pages)
             budget = _PdfImportBudget()
             cached_pdf = _CachedPdfDocument(
                 tuple(_CachedPdfPage(page, budget) for page in pdf.pages)
@@ -1611,7 +1628,8 @@ def _import_pdf(
                         source_file=_relative_source(pdf_path, input_root),
                         source_page=str(page_number),
                     )
-                    value_transaction(normalized, config)
+                    if value_rows:
+                        value_transaction(normalized, config)
                     if _row_is_skipped(normalized, skip_patterns):
                         continue
                     budget.record_transaction()
@@ -1657,7 +1675,8 @@ def _import_pdf(
                             source_file=_relative_source(pdf_path, input_root),
                             source_page=str(page_number),
                         )
-                        value_transaction(normalized, config)
+                        if value_rows:
+                            value_transaction(normalized, config)
                         if _row_is_skipped(normalized, skip_patterns):
                             continue
                         budget.record_transaction()
@@ -1736,7 +1755,8 @@ def _import_pdf(
                                 source_file=_relative_source(pdf_path, input_root),
                                 source_page=str(page_number),
                             )
-                            value_transaction(normalized, config)
+                            if value_rows:
+                                value_transaction(normalized, config)
                             if _row_is_skipped(normalized, skip_patterns):
                                 continue
                             budget.record_transaction()
