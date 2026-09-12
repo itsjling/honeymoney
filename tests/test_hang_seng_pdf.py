@@ -345,24 +345,27 @@ class HangSengPdfTest(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "no transaction summary"):
                     bank_rows(pages(statement))
 
-    def test_bank_summary_before_the_closing_balance_is_invalid(self):
-        lines = layout("bank")
-        marker = lines.pop()
-        lines.insert(-1, marker)
+    def test_bank_terminal_heading_before_the_closing_balance_is_invalid(self):
+        for heading in ("Transaction Summary", "Important Notes"):
+            lines = layout("bank")
+            lines.insert(-2, [[108, heading]])
 
-        with self.assertRaisesRegex(ValueError, "table has no closing balance"):
-            bank_rows(pages(lines))
+            with self.subTest(heading=heading):
+                with self.assertRaisesRegex(ValueError, "table has no closing balance"):
+                    bank_rows(pages(lines))
 
-    def test_bank_transaction_summary_merchant_text_remains_a_transaction(self):
-        lines = layout("bank")
-        lines[3][1][1] = "Transaction Summary PURCHASE"
+    def test_bank_terminal_phrase_in_merchant_text_remains_a_transaction(self):
+        for phrase in ("Transaction Summary", "Important Notes"):
+            with self.subTest(phrase=phrase):
+                lines = layout("bank")
+                lines[3][1][1] = f"{phrase} SHOP"
 
-        result = bank_rows(pages(lines))
+                result = bank_rows(pages(lines))
 
-        self.assertEqual(
-            result[0][0]["Description"],
-            "Transaction Summary PURCHASE REFERENCE ALPHA",
-        )
+                self.assertEqual(
+                    result[0][0]["Description"],
+                    f"{phrase} SHOP REFERENCE ALPHA",
+                )
 
     def test_bank_rejects_table_data_after_the_summary(self):
         lines = layout("bank")

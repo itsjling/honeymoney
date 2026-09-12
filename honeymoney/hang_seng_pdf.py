@@ -218,7 +218,7 @@ def bank_rows(pages: list[Page]) -> list[SourceRow]:
                 if kind == "closing":
                     in_table = False
                 continue
-            if "Important Notes" in text:
+            if text == "Important Notes":
                 raise ValueError("Hang Seng bank table has no closing balance")
             if raw_date:
                 current_date = _bank_date(raw_date, closing_date)
