@@ -295,6 +295,8 @@ def card_rows(pages: list[Page]) -> list[SourceRow]:
                     raise ValueError("Hang Seng card description has no transaction")
                 pending[0]["Description"] += " " + description
         continuation = in_table
+    if continuation:
+        raise ValueError("Hang Seng card table has no end marker")
     if pending is not None:
         rows.append(pending)
     _balances(rows, openings, closings)

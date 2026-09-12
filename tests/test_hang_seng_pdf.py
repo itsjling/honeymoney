@@ -218,6 +218,63 @@ class HangSengPdfTest(unittest.TestCase):
                     else "SYNTHETIC SHOP REFERENCE ALPHA",
                 )
 
+    def test_truncated_card_table_fails_reader(self):
+        truncated = layout("credit_card")[:-1]
+        with self.assertRaisesRegex(ValueError, "card table has no end marker"):
+            card_rows(pages(truncated))
+
+    def test_cli_import_rejects_a_truncated_card_table(self):
+        truncated = layout("credit_card")[:-1]
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "money"
+            setup = self._run("setup", "--root", str(root), "--json")
+            self.assertEqual(setup.returncode, 0, setup.stderr)
+            source = root / "synthetic-truncated-card.pdf"
+            source.write_bytes(pdf_bytes(truncated))
+            config = root / "config.json"
+            bound = self._run(
+                "profile",
+                "bind",
+                "synthetic-truncated-card",
+                "--pattern",
+                source.name,
+                "--profile",
+                "hang_seng_credit_card_pdf",
+                "--owner",
+                "Household",
+                "--account",
+                "hang_seng_credit_card=hang_seng_credit_card=Synthetic Hang Seng",
+                "--config",
+                str(config),
+                "--json",
+            )
+            self.assertEqual(bound.returncode, 0, bound.stderr)
+
+            imported = self._run(
+                "import",
+                str(source),
+                "--binding",
+                "synthetic-truncated-card",
+                "--config",
+                str(config),
+                "--no-interactive",
+                "--json",
+            )
+
+            self.assertEqual(imported.returncode, 2, imported.stdout)
+            self.assertEqual(
+                json.loads(imported.stdout)["errors"][0]["code"], "import_failed"
+            )
+            records = root / ".honeymoney" / "import-records"
+            imported_records = list(records.iterdir())
+            self.assertEqual(len(imported_records), 1)
+            record = imported_records[0]
+            summary = json.loads((record / "summary.json").read_text())
+            attempt = json.loads((record / "attempts/00000001.json").read_text())
+            self.assertFalse(summary["ready"])
+            self.assertEqual(summary["statement_transaction_count"], 0)
+            self.assertEqual(attempt["outcome"], "failure")
+
     def test_bank_next_month_and_year_come_from_statement(self):
         lines = layout("bank")
         lines[0] = [[414, "Date :05 February 2028"]]
