@@ -8,7 +8,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
@@ -235,6 +235,50 @@ class ParseCliTest(unittest.TestCase):
                 parse_statement(CSV, "mox_credit_card")
             self.assertEqual(error.exception.code, "parse_failed")
             self.assertNotIn("private-source", str(error.exception))
+
+    def test_syntax_errors_hide_arguments_in_json_and_human_output(self) -> None:
+        cases = (
+            [str(CSV), "/synthetic/private-extra.csv", "--profile", "mox_credit_card"],
+            [str(CSV), "--profile", "mox_credit_card", "--synthetic-private-option"],
+        )
+        for arguments in cases:
+            with (
+                self.subTest(arguments=arguments, output="json"),
+                patch.object(
+                    sys, "argv", ["honeymoney", "parse", *arguments, "--json"]
+                ),
+                redirect_stdout(io.StringIO()) as output,
+                redirect_stderr(io.StringIO()) as errors,
+            ):
+                self.assertEqual(cli.run(), 2)
+                result = json.loads(output.getvalue())
+                self.assertEqual(result["errors"][0]["code"], "usage_error")
+                self.assertEqual(
+                    result["errors"][0]["message"], "Invalid parse command arguments"
+                )
+                self.assertEqual(errors.getvalue(), "")
+                self.assertNotIn("private", output.getvalue())
+
+            with (
+                self.subTest(arguments=arguments, output="human"),
+                patch.object(sys, "argv", ["honeymoney", "parse", *arguments]),
+                redirect_stdout(io.StringIO()) as output,
+                redirect_stderr(io.StringIO()) as errors,
+            ):
+                self.assertEqual(cli.run(), 2)
+                self.assertEqual(output.getvalue(), "")
+                self.assertEqual(errors.getvalue(), "Invalid parse command arguments\n")
+                self.assertNotIn("private", errors.getvalue())
+
+    def test_parse_help_exits_normally(self) -> None:
+        with (
+            patch.object(sys, "argv", ["honeymoney", "parse", "--help"]),
+            redirect_stdout(io.StringIO()) as output,
+            self.assertRaises(SystemExit) as exit_status,
+        ):
+            cli.run()
+        self.assertEqual(exit_status.exception.code, 0)
+        self.assertIn("usage: honeymoney parse", output.getvalue())
 
     def test_empty_csv_and_unrecognized_pdf_require_manual_review(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

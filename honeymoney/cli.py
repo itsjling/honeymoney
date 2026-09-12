@@ -164,7 +164,10 @@ def _parse_command(argv: list[str]) -> int:
     parser.add_argument("path")
     parser.add_argument("--profile", required=True)
     parser.add_argument("--json", action="store_true")
-    args = parser.parse_args(argv)
+    try:
+        args = parser.parse_args(argv)
+    except CliUsageError:
+        raise CliUsageError("Invalid parse command arguments") from None
     data = parse_statement(
         Path(_clean_pasted_path(args.path)).expanduser(), args.profile
     )
