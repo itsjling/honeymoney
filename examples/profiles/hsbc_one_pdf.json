@@ -52,7 +52,8 @@
         "currency": [50, 81],
         "description": [95, 330],
         "deposit": [330, 414],
-        "withdrawal": [414, 480]
+        "withdrawal": [414, 480],
+        "balance": [480, 550]
       },
       "date_regex": "^(?:(?P<currency>[A-Z]{3})\\s+)?(?P<day>\\d{1,2})\\s+(?P<month>[A-Za-z]{3})\\b",
       "currency_regex": "^[A-Z]{3}$",
