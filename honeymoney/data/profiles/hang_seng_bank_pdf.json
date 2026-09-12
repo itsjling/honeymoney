@@ -1,0 +1,25 @@
+{
+  "id": "hang_seng_bank_pdf",
+  "account_id": "hang_seng_bank",
+  "account": "Hang Seng ATM Savings",
+  "account_type": "bank",
+  "institution": "Hang Seng Bank",
+  "country": "HK",
+  "account_currency": "HKD",
+  "owner": "Household",
+  "payment_method": "Bank Account",
+  "date_formats": [
+    "%Y-%m-%d"
+  ],
+  "pdf": {
+    "parser": "pdfplumber",
+    "word_rows": "hang_seng_bank",
+    "columns": {
+      "transaction_date": "Date",
+      "description": "Description",
+      "amount": "Amount",
+      "statement_opening_balance": "Opening",
+      "statement_closing_balance": "Closing"
+    }
+  }
+}

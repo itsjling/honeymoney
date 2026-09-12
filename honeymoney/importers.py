@@ -23,6 +23,7 @@ from honeymoney.account_bindings import (
     matching_filename_mapping,
     validate_profile_mappings,
 )
+from honeymoney.hang_seng_pdf import Word, bank_rows, card_rows
 from honeymoney.identity import (
     AllocationLocator,
     IncomingRecordIdentity,
@@ -529,10 +530,11 @@ def _validate_pdf_profile(profile_id: str, settings: dict[str, Any]) -> None:
     if not (
         isinstance(word_rows, bool)
         or isinstance(word_rows, str)
-        and word_rows == "sectioned"
+        and word_rows in {"sectioned", "hang_seng_bank", "hang_seng_credit_card"}
     ):
         raise ValueError(
-            f"Profile {profile_id} field pdf.word_rows must be a boolean or sectioned"
+            f"Profile {profile_id} field pdf.word_rows must be a boolean, sectioned, "
+            "hang_seng_bank, or hang_seng_credit_card"
         )
     if word_rows is True:
         _validate_pdf_bounds_map(
@@ -561,6 +563,20 @@ def _validate_pdf_profile(profile_id: str, settings: dict[str, Any]) -> None:
             )
     elif word_rows == "sectioned":
         _validate_sectioned_pdf_profile(profile_id, settings.get("sectioned_word_rows"))
+    elif word_rows in {"hang_seng_bank", "hang_seng_credit_card"}:
+        available_sources = {"Date", "Description", "Amount", "Opening", "Closing"}
+        if word_rows == "hang_seng_credit_card":
+            available_sources.add("Posting")
+        missing_sources = sorted(
+            str(source)
+            for source in settings["columns"].values()
+            if source not in available_sources
+        )
+        if missing_sources:
+            raise ValueError(
+                f"Profile {profile_id} pdf.columns map unknown Hang Seng sources: "
+                + ", ".join(missing_sources)
+            )
     elif compiled_row_regex is not None:
         join_fields = settings.get("join_fields", {})
         if not isinstance(join_fields, dict):
@@ -1594,10 +1610,31 @@ def _import_pdf(
                 tuple(_CachedPdfPage(page, budget) for page in pdf.pages)
             )
             balance_observations = _pdf_balance_observations(cached_pdf, pdf_settings)
-            if pdf_settings.get("word_rows") == "sectioned":
+            hang_seng_reader = {
+                "hang_seng_bank": bank_rows,
+                "hang_seng_credit_card": card_rows,
+            }.get(pdf_settings.get("word_rows"))
+            if hang_seng_reader is not None:
+                pages = [
+                    [
+                        [
+                            Word(str(word.get("text", "")), float(word["x0"]))
+                            for word in line
+                        ]
+                        for line in _pdf_word_lines(
+                            page.extract_words(x_tolerance=1, y_tolerance=3) or [], 3
+                        )
+                    ]
+                    for page in cached_pdf.pages
+                ]
+                source_rows = hang_seng_reader(pages)
+            elif pdf_settings.get("word_rows") == "sectioned":
                 source_rows = _pdf_sectioned_word_source_rows(
                     cached_pdf, pdf_path, pdf_settings
                 )
+            else:
+                source_rows = None
+            if source_rows is not None:
                 for source_row, page_number, row_number in source_rows:
                     normalized = _normalized_row(
                         source_row=source_row,
@@ -1617,7 +1654,10 @@ def _import_pdf(
                         identity_records.append(
                             IncomingRecordIdentity(
                                 normalized,
-                                AllocationLocator(4, (page_number, row_number)),
+                                AllocationLocator(
+                                    _pdf_adapter_tag(profile),
+                                    (page_number, row_number),
+                                ),
                             )
                         )
                 _attach_pdf_balances(rows, balance_observations)

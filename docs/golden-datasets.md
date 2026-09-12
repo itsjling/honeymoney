@@ -102,10 +102,11 @@ one `accepted_statement` case containing the smallest synthetic set of rows
 that covers the accepted layout's important branches. Keep the private PDF and
 accepted CSV only in the ignored local acceptance corpus.
 
-The canonical PDF import goldens currently cover `hsbc_one_pdf`,
-`hsbc_hk_credit_card_pdf`, `mox_bank_pdf`, and `mox_credit_card_pdf`. HSBC One
-is the only HSBC bank-statement profile; do not add goldens for the retired
-`hsbc_hk_bank` or `hsbc_hk_bank_pdf` profiles.
+The canonical PDF import goldens currently cover `hang_seng_bank_pdf`,
+`hang_seng_credit_card_pdf`, `hsbc_one_pdf`, `hsbc_hk_credit_card_pdf`,
+`mox_bank_pdf`, and `mox_credit_card_pdf`. HSBC One is the only HSBC
+bank-statement profile; do not add goldens for the retired `hsbc_hk_bank` or
+`hsbc_hk_bank_pdf` profiles.
 
 Every profile is validated before statement rows are read. Keep stable account
 metadata, define exactly one of `csv` or `pdf`, map a transaction or posting
