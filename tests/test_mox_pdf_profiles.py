@@ -83,6 +83,17 @@ class MoxBankPdfSectionsTest(unittest.TestCase):
             [row["posted_currency"] for row in rows],
             ["HKD", "USD", "USD", "USD", "USD"],
         )
+        sections_by_account = {
+            row["account_id"]: row["statement_section"] for row in rows
+        }
+        self.assertEqual(len(sections_by_account), 4)
+        self.assertTrue(all(sections_by_account.values()))
+        self.assertEqual(sections_by_account["mox_bank_main"], "HKD Mox Account")
+        self.assertEqual(sections_by_account["mox_bank_usd"], "USD Mox Account")
+        self.assertNotEqual(
+            sections_by_account[_time_deposit_account_id(first_reference)],
+            sections_by_account[_time_deposit_account_id(second_reference)],
+        )
         self.assertEqual(
             [row["transaction_date"] for row in rows],
             [

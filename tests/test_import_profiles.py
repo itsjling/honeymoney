@@ -246,6 +246,47 @@ class MoxBankPdfProfileTest(unittest.TestCase):
                 ):
                     _load_profiles({**base_config(), "profiles": [profile_path]})
 
+    def test_workspace_profile_validates_mox_adapter_column_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            profile_path = Path(tmp) / "profile.json"
+            profile = load_profile("mox_bank_pdf.json")
+            profile["pdf"]["columns"]["description"] = "bogus"
+            profile_path.write_text(json.dumps(profile), encoding="utf-8")
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "pdf.columns map unknown Mox bank fields: bogus",
+            ):
+                _load_profiles({**base_config(), "profiles": [profile_path]})
+
+            profile["pdf"]["word_rows"] = True
+            profile_path.write_text(json.dumps(profile), encoding="utf-8")
+            with self.assertRaisesRegex(
+                ValueError,
+                "pdf.columns map unknown Mox bank fields: bogus",
+            ):
+                _load_profiles({**base_config(), "profiles": [profile_path]})
+            profile["pdf"].pop("word_rows")
+
+            profile["pdf"]["columns"] = {
+                "transaction_date": "transaction_date",
+                "posting_date": "posting_date",
+                "description": "description",
+                "amount": "original_amount",
+                "posted_amount": "amount",
+                "account_id": "account_id",
+                "account": "account",
+                "statement_section": "statement_section",
+                "original_currency": "original_currency",
+                "posted_currency": "currency",
+                "statement_opening_balance": "statement_opening_balance",
+                "statement_closing_balance": "statement_closing_balance",
+            }
+            profile_path.write_text(json.dumps(profile), encoding="utf-8")
+
+            loaded = _load_profiles({**base_config(), "profiles": [profile_path]})
+            self.assertEqual(loaded[0]["pdf"]["columns"], profile["pdf"]["columns"])
+
 
 class MoxCreditCardPdfProfileTest(unittest.TestCase):
     def test_accepted_statement(self) -> None:
