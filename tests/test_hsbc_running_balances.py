@@ -38,6 +38,75 @@ class HsbcRunningBalanceTest(unittest.TestCase):
         self.assertEqual(warnings, [])
         return rows, identities
 
+    def test_deposit_plus_ends_foreign_currency_transactions(self):
+        for active in (False, True):
+            with self.subTest(active=active):
+                words = start("Foreign Currency Savings") + opening(currency="EUR")
+                if active:
+                    words += transaction(currency="EUR")
+                words += (
+                    line(130, (73, "Deposit"), (103, "Plus"))
+                    + line(150, (120, "SYNTHETIC INVESTMENT"), (350, "700.00"))
+                    + line(170, (120, "MATURITY"), (425, "800.00"))
+                )
+                rows, _ = self.parse([words])
+                self.assertEqual(len(rows), int(active))
+                if active:
+                    self.assertEqual(rows[0]["statement_closing_balance"], "110.00")
+
+    def test_notices_end_table_without_erasing_printed_endpoint(self):
+        for heading in ("Total Relationship Balance", "Important Notice"):
+            with self.subTest(heading=heading):
+                rows, _ = self.parse(
+                    [
+                        start()
+                        + opening()
+                        + transaction()
+                        + line(130, (73, heading))
+                        + line(150, (120, "SYNTHETIC FEE NOTICE"), (350, "300.00"))
+                    ]
+                )
+                self.assertEqual(len(rows), 1)
+                self.assertEqual(rows[0]["statement_closing_balance"], "110.00")
+
+    def test_end_heading_stops_balance_scanner_until_next_account(self):
+        rows, _ = self.parse(
+            [
+                start()
+                + opening()
+                + transaction()
+                + line(130, (73, "Deposit Plus"))
+                + opening(150, balance="900.00")
+                + line(170, (120, "C/F BALANCE"), (490, "999.00"))
+                + line(190, (20, "HKD Current"))
+                + line(210, (10, "Date Transaction Details Deposit Withdrawal Balance"))
+                + opening(230)
+                + transaction(250)
+            ]
+        )
+        self.assertEqual(len(rows), 2)
+        for row in rows:
+            self.assertEqual(row["statement_opening_balance"], "100.00")
+            self.assertEqual(row["statement_closing_balance"], "110.00")
+
+    def test_heading_words_in_transaction_description_do_not_end_table(self):
+        rows, _ = self.parse(
+            [
+                start()
+                + opening()
+                + line(
+                    90,
+                    (82, "02 Jan"),
+                    (120, "Deposit Plus"),
+                    (350, "10.00"),
+                    (490, "110.00"),
+                )
+                + transaction(110, balance="120.00")
+            ]
+        )
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[-1]["statement_closing_balance"], "120.00")
+
     def test_printed_endpoint_preserves_wrapped_facts_and_physical_refs(self):
         words = (
             start()
