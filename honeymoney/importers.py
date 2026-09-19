@@ -64,6 +64,7 @@ MAX_PDF_TRANSACTION_ROWS = 100_000
 class _PdfBalanceLine:
     text: str
     is_continuation: bool = False
+    x0: float | None = None
 
 
 @dataclass(frozen=True)
@@ -2042,11 +2043,7 @@ def _pdf_balance_observations(
                 if matched_section:
                     current_section = matched_section
                     in_transaction_table = False
-                elif _pdf_exact_section_heading(
-                    line,
-                    dict.fromkeys(section_settings.get("section_end_markers", [])),
-                    section_settings,
-                ) or (
+                elif _pdf_exact_section_end_heading(line, section_settings) or (
                     _pdf_balance_line_can_change_section(
                         line,
                         section_settings,
@@ -2151,7 +2148,8 @@ def _pdf_balance_line_sources(
         words = page.extract_words(x_tolerance=1, y_tolerance=3) or []
         word_lines.extend(
             _PdfBalanceLine(
-                " ".join(str(word.get("text", "")) for word in line).strip()
+                " ".join(str(word.get("text", "")) for word in line).strip(),
+                x0=min(float(word.get("x0", 0)) for word in line),
             )
             for line in _pdf_word_lines(
                 words, float(pdf_settings.get("word_y_tolerance", 3))
@@ -2349,6 +2347,20 @@ def _pdf_exact_section_heading(
             if normalized_text == " ".join(str(section).casefold().split())
         ),
         "",
+    )
+
+
+def _pdf_exact_section_end_heading(
+    line: _PdfBalanceLine, settings: dict[str, Any]
+) -> bool:
+    description_bounds = settings.get("columns", {}).get("description")
+    return bool(
+        line.x0 is not None
+        and description_bounds
+        and line.x0 < float(description_bounds[0])
+        and _pdf_exact_section_heading(
+            line, dict.fromkeys(settings.get("section_end_markers", [])), settings
+        )
     )
 
 
@@ -2560,9 +2572,10 @@ def _pdf_sectioned_word_source_rows(
                 description_parts = []
                 continue
 
-            if _pdf_exact_section_heading(
-                _PdfBalanceLine(text),
-                dict.fromkeys(settings.get("section_end_markers", [])),
+            if _pdf_exact_section_end_heading(
+                _PdfBalanceLine(
+                    text, x0=min(float(word.get("x0", 0)) for word in line)
+                ),
                 settings,
             ) or (
                 not has_transaction_shape
