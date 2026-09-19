@@ -1,7 +1,9 @@
 import copy
 import unittest
+from unittest.mock import patch
 
-from tests.golden_helpers import load_profile
+from honeymoney.identity import ADAPTER_VERSIONS, extractor_contract_id
+from tests.golden_helpers import REPO_ROOT, load_json, load_profile
 from tests.test_import_profiles import _import_fake_pdf
 
 
@@ -37,6 +39,186 @@ class HsbcRunningBalanceTest(unittest.TestCase):
         )
         self.assertEqual(warnings, [])
         return rows, identities
+
+    def test_changed_section_end_semantics_have_a_new_extractor_contract(self):
+        profile = load_profile("hsbc_one_pdf.json")
+        with patch.dict(ADAPTER_VERSIONS, {4: "pdf-sectioned-v1"}):
+            old_contract = extractor_contract_id(4, profile)
+        self.assertNotEqual(extractor_contract_id(4, profile), old_contract)
+
+    def test_example_profile_matches_bundled_profile(self):
+        self.assertEqual(
+            load_json(REPO_ROOT / "examples/profiles/hsbc_one_pdf.json"),
+            load_profile("hsbc_one_pdf.json"),
+        )
+
+    def test_deposit_plus_ends_foreign_currency_transactions(self):
+        for active in (False, True):
+            with self.subTest(active=active):
+                words = start("Foreign Currency Savings") + opening(currency="EUR")
+                if active:
+                    words += transaction(currency="EUR")
+                words += (
+                    line(130, (73, "Deposit"), (103, "Plus"))
+                    + line(150, (120, "SYNTHETIC INVESTMENT"), (350, "700.00"))
+                    + line(170, (120, "MATURITY"), (425, "800.00"))
+                )
+                rows, _ = self.parse([words])
+                self.assertEqual(len(rows), int(active))
+                if active:
+                    self.assertEqual(rows[0]["statement_closing_balance"], "110.00")
+
+    def test_notices_end_table_without_erasing_printed_endpoint(self):
+        for heading in ("Total Relationship Balance", "Important Notice"):
+            with self.subTest(heading=heading):
+                rows, _ = self.parse(
+                    [
+                        start()
+                        + opening()
+                        + transaction()
+                        + line(130, (73, heading))
+                        + line(150, (120, "SYNTHETIC FEE NOTICE"), (350, "300.00"))
+                    ]
+                )
+                self.assertEqual(len(rows), 1)
+                self.assertEqual(rows[0]["statement_closing_balance"], "110.00")
+
+    def test_end_heading_stops_balance_scanner_until_next_account(self):
+        rows, _ = self.parse(
+            [
+                start()
+                + opening()
+                + transaction()
+                + line(130, (73, "Deposit Plus"))
+                + opening(150, balance="900.00")
+                + line(170, (120, "C/F BALANCE"), (490, "999.00"))
+                + line(190, (20, "HKD Current"))
+                + line(210, (10, "Date Transaction Details Deposit Withdrawal Balance"))
+                + opening(230)
+                + transaction(250)
+            ]
+        )
+        self.assertEqual(len(rows), 2)
+        for row in rows:
+            self.assertEqual(row["statement_opening_balance"], "100.00")
+            self.assertEqual(row["statement_closing_balance"], "110.00")
+
+    def test_exact_end_heading_in_wrapped_description_keeps_transaction(self):
+        for heading in (
+            "Deposit Plus",
+            "Total Relationship Balance",
+            "Important Notice",
+        ):
+            with self.subTest(heading=heading):
+                words = (
+                    start()
+                    + opening()
+                    + line(90, (120, heading))
+                    + line(
+                        110,
+                        (82, "02 Jan"),
+                        (120, "CONTINUED"),
+                        (350, "10.00"),
+                        (490, "110.00"),
+                    )
+                    + line(130, (120, "C/F BALANCE"), (490, "110.00"))
+                )
+                rows, _ = self.parse([words])
+                self.assertEqual(len(rows), 1)
+                self.assertEqual(
+                    rows[0]["original_description"], heading + " CONTINUED"
+                )
+                self.assertEqual(rows[0]["statement_opening_balance"], "100.00")
+                self.assertEqual(rows[0]["statement_closing_balance"], "110.00")
+
+    def test_end_heading_in_pending_transaction_continuation_keeps_transaction(self):
+        rows, _ = self.parse(
+            [
+                start()
+                + opening()
+                + line(90, (82, "02 Jan"), (120, "CARD PURCHASE"))
+                + line(110, (120, "Deposit Plus"))
+                + line(130, (120, "MERCHANT"), (350, "10.00"), (490, "110.00"))
+            ]
+        )
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(
+            rows[0]["original_description"], "CARD PURCHASE Deposit Plus MERCHANT"
+        )
+        self.assertEqual(rows[0]["statement_closing_balance"], "110.00")
+
+    def test_wrapped_heading_keeps_explicit_closing_balance_conflicts(self):
+        rows, _ = self.parse(
+            [
+                start()
+                + opening()
+                + line(90, (120, "Deposit Plus"))
+                + transaction(110)
+                + line(130, (120, "C/F BALANCE"), (490, "120.00"))
+            ]
+        )
+        self.assertEqual(len(rows), 1)
+        self.assertIn("statement_closing_balance_conflict", rows[0]["flags"])
+        self.assertEqual(rows[0]["statement_closing_balance"], "")
+
+    def test_table_end_heading_does_not_contaminate_word_balances(self):
+        rows, warnings, _ = _import_fake_pdf(
+            load_profile("hsbc_one_pdf.json"),
+            words=start() + opening() + transaction(),
+            tables=[
+                [
+                    ["HKD Savings"],
+                    ["Date Transaction Details Deposit Withdrawal Balance"],
+                    ["B/F BALANCE 100.00"],
+                    ["Deposit Plus"],
+                    ["B/F BALANCE 900.00"],
+                    ["C/F BALANCE 999.00"],
+                ]
+            ],
+        )
+        self.assertEqual(warnings, [])
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["statement_opening_balance"], "100.00")
+        self.assertEqual(rows[0]["statement_closing_balance"], "110.00")
+
+    def test_table_description_cells_keep_explicit_balance_evidence(self):
+        for marker_row in (["", "Deposit Plus"], ["CARD PURCHASE\nDeposit Plus"]):
+            with self.subTest(marker_row=marker_row):
+                rows, warnings, _ = _import_fake_pdf(
+                    load_profile("hsbc_one_pdf.json"),
+                    words=start() + opening() + transaction(),
+                    tables=[
+                        [
+                            ["HKD Savings"],
+                            ["Date Transaction Details Deposit Withdrawal Balance"],
+                            ["B/F BALANCE 100.00"],
+                            marker_row,
+                            ["C/F BALANCE 120.00"],
+                        ]
+                    ],
+                )
+                self.assertEqual(warnings, [])
+                self.assertEqual(len(rows), 1)
+                self.assertIn("statement_closing_balance_conflict", rows[0]["flags"])
+                self.assertEqual(rows[0]["statement_closing_balance"], "")
+
+    def test_heading_words_in_transaction_description_do_not_end_table(self):
+        rows, _ = self.parse(
+            [
+                start()
+                + opening()
+                + line(
+                    90,
+                    (82, "02 Jan"),
+                    (120, "Deposit Plus"),
+                    (350, "10.00"),
+                    (490, "110.00"),
+                )
+                + transaction(110, balance="120.00")
+            ]
+        )
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[-1]["statement_closing_balance"], "120.00")
 
     def test_printed_endpoint_preserves_wrapped_facts_and_physical_refs(self):
         words = (
