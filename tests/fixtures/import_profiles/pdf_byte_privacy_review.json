@@ -1,12 +1,12 @@
 {
-  "review_date": "2026-07-25",
+  "review_date": "2026-09-19",
   "review_policy": {
     "embedded_content": "No attachments, images, forms, scripts, actions, encryption, or embedded files are present.",
     "metadata": "The deterministic generator emits no document information or XMP metadata.",
     "provenance": "Every PDF is generated clean-room from the adjacent invented JSON layout fixture.",
     "visible_text": "Every extracted page was manually reviewed as invented statement-like content with no real identity, account identifier, address, transaction, or amount."
   },
-  "version": 2,
+  "version": 3,
   "fixtures": {
     "hsbc_hk_credit_card_pdf/accepted_statement": {
       "contains_private_data": false,
@@ -40,18 +40,18 @@
       "embedded_content_reviewed": true,
       "metadata_reviewed": true,
       "page_count": 1,
-      "sha256": "2db5d70f8c1b6720a4e3544619809d3c1792c0c004a176dc4388754167598a37",
+      "sha256": "39be2e5c1d00b74a02cfbf07872cd8391e5525203f24e6e28f4eddde2df6a0f4",
       "visible_text_reviewed": true,
-      "visible_text_sha256": "7962528bb2ce5c04eab081184029ac21ee3e654a227d4df9fd8c24374ec06a72"
+      "visible_text_sha256": "d341bec640356f8083689b767c86b3371ec1d4183f8f4708c92e269bd6b2d7ef"
     },
     "mox_credit_card_pdf/accepted_statement": {
       "contains_private_data": false,
       "embedded_content_reviewed": true,
       "metadata_reviewed": true,
       "page_count": 1,
-      "sha256": "cd72fae27cb22f240e0452b2785c883ded482c65d98f5281a53fb8f988f71b7a",
+      "sha256": "525dc376a326b6976bf49cccaac8e93d7433e1175dcce16143097381a20f7458",
       "visible_text_reviewed": true,
-      "visible_text_sha256": "9913c677ea1751ad63026a895176676b8907df22145821625e10168dd7ccfdd6"
+      "visible_text_sha256": "fdc1f8bede6b06d8d25bdd735f1315edb3a206d867bed16e18351efbd2d526ae"
     }
   }
 }

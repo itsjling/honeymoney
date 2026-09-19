@@ -25,6 +25,7 @@ from honeymoney.identity import (
 from honeymoney.importers import (
     _import_pdf,
     _import_transactions,
+    _load_profiles,
     _pdf_balance_lines,
     _pdf_balance_observations,
     _validate_profile,
@@ -228,6 +229,64 @@ class MoxBankPdfProfileTest(unittest.TestCase):
             "accepted_statement",
         )
 
+    def test_workspace_profile_rejects_non_string_mox_statement_kind(self) -> None:
+        for invalid_kind in ([], {}):
+            with (
+                self.subTest(invalid_kind=invalid_kind),
+                tempfile.TemporaryDirectory() as tmp,
+            ):
+                profile_path = Path(tmp) / "profile.json"
+                profile = load_profile("mox_bank_pdf.json")
+                profile["pdf"]["mox_statement"] = invalid_kind
+                profile_path.write_text(json.dumps(profile), encoding="utf-8")
+
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "pdf.mox_statement must be bank or credit",
+                ):
+                    _load_profiles({**base_config(), "profiles": [profile_path]})
+
+    def test_workspace_profile_validates_mox_adapter_column_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            profile_path = Path(tmp) / "profile.json"
+            profile = load_profile("mox_bank_pdf.json")
+            canonical_columns = dict(profile["pdf"]["columns"])
+            destinations = list(canonical_columns)
+            for index, destination in enumerate(destinations):
+                missing = load_profile("mox_bank_pdf.json")
+                missing["pdf"]["columns"].pop(destination)
+                profile_path.write_text(json.dumps(missing), encoding="utf-8")
+                with (
+                    self.subTest(kind="missing", destination=destination),
+                    self.assertRaises(ValueError),
+                ):
+                    _load_profiles({**base_config(), "profiles": [profile_path]})
+
+                swapped = load_profile("mox_bank_pdf.json")
+                other = destinations[(index + 1) % len(destinations)]
+                swapped["pdf"]["columns"][destination] = canonical_columns[other]
+                profile_path.write_text(json.dumps(swapped), encoding="utf-8")
+                with (
+                    self.subTest(kind="swapped", destination=destination),
+                    self.assertRaises(ValueError),
+                ):
+                    _load_profiles({**base_config(), "profiles": [profile_path]})
+
+            invalid_word_profile = load_profile("mox_bank_pdf.json")
+            invalid_word_profile["pdf"]["columns"].pop("statement_section")
+            invalid_word_profile["pdf"]["word_rows"] = True
+            profile_path.write_text(json.dumps(invalid_word_profile), encoding="utf-8")
+            with self.assertRaisesRegex(
+                ValueError,
+                "pdf.columns must match the Mox bank adapter contract",
+            ):
+                _load_profiles({**base_config(), "profiles": [profile_path]})
+
+            profile_path.write_text(json.dumps(profile), encoding="utf-8")
+
+            loaded = _load_profiles({**base_config(), "profiles": [profile_path]})
+            self.assertEqual(loaded[0]["pdf"]["columns"], canonical_columns)
+
 
 class MoxCreditCardPdfProfileTest(unittest.TestCase):
     def test_accepted_statement(self) -> None:
@@ -241,6 +300,13 @@ class MoxCreditCardPdfProfileTest(unittest.TestCase):
         rows, warnings, _ = _import_fake_pdf(
             load_profile("mox_credit_card_pdf.json"),
             tables=[[["17 May 18 May SYNTHETIC FOREIGN PURCHASE -10.00 USD -79.80"]]],
+            words=[
+                {
+                    "text": "Statement Period: 01 May 2026 - 31 May 2026",
+                    "x0": 20,
+                    "top": 20,
+                }
+            ],
         )
 
         self.assertEqual(warnings, [])
@@ -487,7 +553,7 @@ class PdfBalanceReconciliationTest(unittest.TestCase):
             },
         )
         rows, warnings, _ = _import_fake_pdf(
-            profile,
+            _legacy_mox_bank_profile(),
             tables=[
                 [
                     ["01 Apr 01 Apr OPENING BALANCE MAIN ACCOUNT HKD 100.00"],
@@ -796,7 +862,7 @@ class PdfBalanceReconciliationTest(unittest.TestCase):
                 )
 
     def test_multi_page_import_attaches_one_opening_and_closing_balance(self) -> None:
-        profile = load_profile("mox_bank_pdf.json")
+        profile = _legacy_mox_bank_profile()
         rows, warnings, _ = _import_fake_pdf(
             profile,
             page_tables=[
@@ -966,7 +1032,7 @@ class PdfBalanceReconciliationTest(unittest.TestCase):
                 )
 
     def test_conflicting_extracted_balances_mark_rows_and_do_not_fail(self) -> None:
-        profile = load_profile("mox_bank_pdf.json")
+        profile = _legacy_mox_bank_profile()
         page_tables = [
             [
                 [
@@ -1065,7 +1131,7 @@ class PdfBalanceReconciliationTest(unittest.TestCase):
         self.assertNotIn("private/", json.dumps(statement["conflicts"]))
 
     def test_balance_scanner_reads_table_rows_alongside_words(self) -> None:
-        profile = load_profile("mox_bank_pdf.json")
+        profile = _legacy_mox_bank_profile()
         words = [
             {"text": "Page", "x0": 20, "top": 10},
             {"text": "1", "x0": 55, "top": 10},
@@ -1622,15 +1688,17 @@ class PdfResourceLimitTest(unittest.TestCase):
                 patch.object(importers, "_pymupdf_page_text_length", return_value=5),
                 self.assertRaisesRegex(ValueError, "PDF extracted text exceeds"),
             ):
+                profile = _legacy_mox_bank_profile()
                 _import_pdf(
                     statement,
-                    load_profile("mox_bank_pdf.json"),
+                    profile,
                     {"base_currency": "HKD", "exchange_rates": {"HKD": 1}},
                     root,
                 )
 
     def test_pdf_rejects_excess_transaction_rows(self) -> None:
         profile = load_profile("mox_credit_card_pdf.json")
+        profile["pdf"].pop("mox_statement")
         tables = [
             [
                 ["17 May 18 May SYNTHETIC PURCHASE ONE -10.00"],
@@ -2445,6 +2513,18 @@ def _pdf_byte_fixtures(generator: Path) -> dict[str, Path]:
     return {
         fixture.review_key: fixture.output_path for fixture in namespace["FIXTURES"]
     }
+
+
+def _legacy_mox_bank_profile() -> dict:
+    profile = load_profile("mox_bank_pdf.json")
+    profile["pdf"].pop("mox_statement")
+    profile["pdf"]["columns"] = {
+        "transaction_date": "transaction_date",
+        "posting_date": "posting_date",
+        "description": "description",
+        "amount": "amount",
+    }
+    return profile
 
 
 def _import_fake_pdf(

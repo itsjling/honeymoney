@@ -15,7 +15,7 @@
       "amount_hkd": "-79.00",
       "account_id": "mox_credit_card",
       "source_page": "1",
-      "source_row": "3"
+      "source_row": "4"
     },
     {
       "date": "2026-05-22",
@@ -31,7 +31,7 @@
       "amount_hkd": "-99.90",
       "account_id": "mox_credit_card",
       "source_page": "1",
-      "source_row": "4"
+      "source_row": "5"
     }
   ]
 }

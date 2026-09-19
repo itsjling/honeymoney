@@ -368,6 +368,8 @@ def _profile_with_test_statement_date_rule(
     *, date_formats: list[str] | None = None
 ) -> dict:
     profile = load_profile("mox_bank_pdf.json")
+    profile["pdf"].pop("mox_statement", None)
+    profile["pdf"]["has_header"] = False
     profile["pdf"]["statement_date"] = {
         "regex": r"^Statement Date: (?P<date>.+)$",
         "date_formats": date_formats or ["%d %B %Y"],
@@ -381,6 +383,8 @@ def _fake_pdf_source_report(
     *,
     filename: str = "statement.pdf",
 ) -> dict:
+    profile = json.loads(json.dumps(profile))
+    profile.get("pdf", {}).pop("mox_statement", None)
     with _fake_pdf(page_lines, filename=filename) as statement:
         _, _, reports = _import_transactions(
             [statement],

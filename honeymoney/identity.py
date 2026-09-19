@@ -67,12 +67,13 @@ EXCLUDED_PROFILE_TOP_LEVEL_KEYS = frozenset(
     }
 )
 
-ADAPTER_COMPONENT_COUNTS = {1: 1, 2: 4, 3: 2, 4: 2}
+ADAPTER_COMPONENT_COUNTS = {1: 1, 2: 4, 3: 2, 4: 2, 5: 2}
 ADAPTER_VERSIONS = {
     1: "csv-v1",
     2: "pdf-table-v1",
     3: "pdf-word-v1",
     4: "pdf-sectioned-v1",
+    5: "pdf-mox-statement-v1",
 }
 
 

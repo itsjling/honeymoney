@@ -2,13 +2,15 @@
   "pages": [
     [
       [
+        ["Statement Period: 01 May 2026 - 31 May 2026"],
         ["Activity date Settlement date Description Amount (HKD)"],
         ["OPENING BALANCE -200.00"],
         [
           "SYNTHETIC SUBSCRIPTION\n1 USD = 7.9000 HKD\n17 May 18 May -10.00 USD -79.00\n1.95% markup"
         ],
         ["SYNTHETIC REWARD 22 May 23 May COFFEE PURCHASE -99.90 5%"],
-        ["CLOSING BALANCE -378.90"]
+        ["-378.90 HKD"],
+        ["Statement Balance"]
       ]
     ]
   ]
