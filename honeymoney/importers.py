@@ -65,6 +65,7 @@ class _PdfBalanceLine:
     text: str
     is_continuation: bool = False
     x0: float | None = None
+    cell_index: int | None = None
 
 
 @dataclass(frozen=True)
@@ -2161,15 +2162,19 @@ def _pdf_balance_line_sources(
             cell_lines = [str(cell or "").splitlines() or [""] for cell in row]
             line_count = max((len(value) for value in cell_lines), default=0)
             for line_index in range(line_count):
-                line = " ".join(
-                    value[line_index].strip()
-                    for value in cell_lines
+                occupied_cells = [
+                    (index, value[line_index].strip())
+                    for index, value in enumerate(cell_lines)
                     if line_index < len(value) and value[line_index].strip()
-                )
-                if not line:
+                ]
+                if not occupied_cells:
                     continue
                 table_lines.append(
-                    _PdfBalanceLine(line, is_continuation=line_index > 0)
+                    _PdfBalanceLine(
+                        " ".join(value for _, value in occupied_cells),
+                        is_continuation=line_index > 0,
+                        cell_index=occupied_cells[0][0],
+                    )
                 )
     return {
         "words": [line for line in word_lines if line.text],
@@ -2355,9 +2360,14 @@ def _pdf_exact_section_end_heading(
 ) -> bool:
     description_bounds = settings.get("columns", {}).get("description")
     return bool(
-        line.x0 is not None
-        and description_bounds
-        and line.x0 < float(description_bounds[0])
+        (
+            line.cell_index == 0
+            or (
+                line.x0 is not None
+                and description_bounds
+                and line.x0 < float(description_bounds[0])
+            )
+        )
         and _pdf_exact_section_heading(
             line, dict.fromkeys(settings.get("section_end_markers", [])), settings
         )

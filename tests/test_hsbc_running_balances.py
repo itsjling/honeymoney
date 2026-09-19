@@ -161,6 +161,47 @@ class HsbcRunningBalanceTest(unittest.TestCase):
         self.assertIn("statement_closing_balance_conflict", rows[0]["flags"])
         self.assertEqual(rows[0]["statement_closing_balance"], "")
 
+    def test_table_end_heading_does_not_contaminate_word_balances(self):
+        rows, warnings, _ = _import_fake_pdf(
+            load_profile("hsbc_one_pdf.json"),
+            words=start() + opening() + transaction(),
+            tables=[
+                [
+                    ["HKD Savings"],
+                    ["Date Transaction Details Deposit Withdrawal Balance"],
+                    ["B/F BALANCE 100.00"],
+                    ["Deposit Plus"],
+                    ["B/F BALANCE 900.00"],
+                    ["C/F BALANCE 999.00"],
+                ]
+            ],
+        )
+        self.assertEqual(warnings, [])
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["statement_opening_balance"], "100.00")
+        self.assertEqual(rows[0]["statement_closing_balance"], "110.00")
+
+    def test_table_description_cells_keep_explicit_balance_evidence(self):
+        for marker_row in (["", "Deposit Plus"], ["CARD PURCHASE\nDeposit Plus"]):
+            with self.subTest(marker_row=marker_row):
+                rows, warnings, _ = _import_fake_pdf(
+                    load_profile("hsbc_one_pdf.json"),
+                    words=start() + opening() + transaction(),
+                    tables=[
+                        [
+                            ["HKD Savings"],
+                            ["Date Transaction Details Deposit Withdrawal Balance"],
+                            ["B/F BALANCE 100.00"],
+                            marker_row,
+                            ["C/F BALANCE 120.00"],
+                        ]
+                    ],
+                )
+                self.assertEqual(warnings, [])
+                self.assertEqual(len(rows), 1)
+                self.assertIn("statement_closing_balance_conflict", rows[0]["flags"])
+                self.assertEqual(rows[0]["statement_closing_balance"], "")
+
     def test_heading_words_in_transaction_description_do_not_end_table(self):
         rows, _ = self.parse(
             [
