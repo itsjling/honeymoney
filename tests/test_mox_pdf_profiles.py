@@ -172,6 +172,39 @@ class MoxBankPdfSectionsTest(unittest.TestCase):
         self.assertEqual(rows[0]["statement_closing_balance"], "102.00")
         self.assertEqual(rows[0]["source_row"], "5")
 
+    def test_date_only_and_time_deposit_description_continuations_are_kept(
+        self,
+    ) -> None:
+        rows, warnings = _import_pdf_case(
+            load_profile("mox_bank_pdf.json"),
+            tables=[],
+            words_pages=[
+                _words(
+                    "Statement Period: 01 Aug 2026 - 31 Aug 2026",
+                    "HKD Mox Account transaction details",
+                    "Activity Settlement Description Corresponding amount (HKD)",
+                    "01 Aug 01 Aug Opening balance 100.00",
+                    "02 Aug 02 Aug",
+                    "SYNTHETIC CREDIT +2.00",
+                    "03 Aug 03 Aug SYNTHETIC",
+                    "Time Deposit Upfront",
+                    "Interest +3.00",
+                    "31 Aug 31 Aug Closing balance 105.00",
+                )
+            ],
+        )
+
+        self.assertEqual(warnings, [])
+        self.assertEqual(
+            [row["original_description"] for row in rows],
+            ["SYNTHETIC CREDIT", "SYNTHETIC Time Deposit Upfront Interest"],
+        )
+        self.assertEqual([row["posted_amount"] for row in rows], ["2.00", "3.00"])
+        self.assertEqual([row["source_page"] for row in rows], ["1", "1"])
+        self.assertEqual([row["source_row"] for row in rows], ["5", "7"])
+        self.assertEqual(rows[0]["statement_opening_balance"], "100.00")
+        self.assertEqual(rows[-1]["statement_closing_balance"], "105.00")
+
     def test_corresponding_currency_and_header_words_remain_transaction_facts(
         self,
     ) -> None:
@@ -223,6 +256,21 @@ class MoxBankPdfSectionsTest(unittest.TestCase):
                         )
                     ],
                 )
+
+        with self.assertRaisesRegex(ValueError, "transaction row is incomplete"):
+            _import_pdf_case(
+                load_profile("mox_bank_pdf.json"),
+                tables=[],
+                words_pages=[
+                    _words(
+                        "Statement Period: 01 Aug 2026 - 31 Aug 2026",
+                        "HKD Mox Account transaction details",
+                        "Activity Settlement Description Corresponding amount",
+                        "02 Aug 02 Aug SYNTHETIC",
+                        "Time Deposit - 100000000003",
+                    )
+                ],
+            )
 
     def test_dormant_deposit_does_not_fabricate_a_transaction(self) -> None:
         reference = "100000000009"

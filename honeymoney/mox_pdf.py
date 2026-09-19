@@ -34,6 +34,10 @@ _TIME_DEPOSIT_HEADING = re.compile(
     r"^Time\s+Deposit\b.*?\-\s*(?P<reference>\d{6,})\s*$",
     flags=re.IGNORECASE,
 )
+_ANY_TIME_DEPOSIT_HEADING = re.compile(
+    r"^Time\s+Deposit\b.*?\-\s*\S+\s*$",
+    flags=re.IGNORECASE,
+)
 _PRINCIPAL_CURRENCY = re.compile(
     r"\bPrincipal\s+Amount\b.*?\b(?P<currency>[A-Z]{3})\b",
     flags=re.IGNORECASE,
@@ -50,7 +54,9 @@ _TRANSACTION_ROW = re.compile(
     r"(?P<original_currency>[A-Z]{3})\s+)?"
     r"(?P<amount>[+\-]?\d[\d,]*\.\d{2})$",
 )
-_TRANSACTION_START = re.compile(r"^\d{1,2}\s+[A-Za-z]{3}\s+\d{1,2}\s+[A-Za-z]{3}\s+")
+_TRANSACTION_START = re.compile(
+    r"^\d{1,2}\s+[A-Za-z]{3}\s+\d{1,2}\s+[A-Za-z]{3}(?:\s+|$)"
+)
 _SUMMARY_AMOUNT = re.compile(
     r"^\s*(?P<balance>[+\-]?\d[\d,]*\.\d{2})\s+HKD\b",
     flags=re.IGNORECASE,
@@ -147,7 +153,29 @@ def mox_bank_source_rows(
     for page_number, lines in enumerate(page_lines, start=1):
         for line_number, line in enumerate(lines, start=1):
             text = _line_text(line)
-            account_match = _BANK_ACCOUNT_HEADING.match(text)
+            header_text = _undouble_header_text(text)
+            folded_text = header_text.casefold()
+            transaction_line = _TRANSACTION_START.match(text) is not None
+            activity_header = "settlement" in folded_text and (
+                "transaction" in folded_text or "activity" in folded_text
+            )
+            pending_header_boundary = activity_header and "amount" in folded_text
+            pending_completed = False
+            if (
+                pending_row
+                and not transaction_line
+                and _BANK_ACCOUNT_HEADING.match(text) is None
+                and _ANY_BANK_ACCOUNT_HEADING.match(text) is None
+                and _ANY_TIME_DEPOSIT_HEADING.match(text) is None
+                and not pending_header_boundary
+            ):
+                pending_row = f"{pending_row} {text}"
+                if _TRANSACTION_ROW.match(pending_row) is None:
+                    continue
+                pending_completed = True
+            account_match = (
+                None if pending_completed else _BANK_ACCOUNT_HEADING.match(text)
+            )
             if account_match is not None:
                 _reject_pending_row(pending_row)
                 section = _bank_account_section(account_match.group("currency"))
@@ -155,9 +183,12 @@ def mox_bank_source_rows(
                 pending_location = None
                 in_activity = False
                 continue
-            if _ANY_BANK_ACCOUNT_HEADING.match(text) is not None:
+            if (
+                not pending_completed
+                and _ANY_BANK_ACCOUNT_HEADING.match(text) is not None
+            ):
                 raise ValueError("Unsupported Mox bank account section")
-            if text.casefold().startswith("time deposit"):
+            if not pending_completed and text.casefold().startswith("time deposit"):
                 _reject_pending_row(pending_row)
                 deposit_match = _TIME_DEPOSIT_HEADING.match(text)
                 if deposit_match is None:
@@ -169,7 +200,7 @@ def mox_bank_source_rows(
                 continue
             if section is None:
                 continue
-            if section.time_deposit:
+            if section.time_deposit and not pending_completed:
                 currency_match = _PRINCIPAL_CURRENCY.search(text)
                 if currency_match is not None:
                     section = _MoxAccountSection(
@@ -181,13 +212,7 @@ def mox_bank_source_rows(
                     )
                     continue
 
-            header_text = _undouble_header_text(text)
-            folded_text = header_text.casefold()
-            transaction_line = _TRANSACTION_START.match(text) is not None
-            if not transaction_line and (
-                "settlement" in folded_text
-                and ("transaction" in folded_text or "activity" in folded_text)
-            ):
+            if not pending_completed and not transaction_line and activity_header:
                 _reject_pending_row(pending_row)
                 header_currency = _TABLE_CURRENCY.search(header_text)
                 if header_currency is not None:
@@ -206,7 +231,9 @@ def mox_bank_source_rows(
                     continue
                 in_activity = True
             header_currency = (
-                None if transaction_line else _TABLE_CURRENCY.search(header_text)
+                None
+                if transaction_line or pending_completed
+                else _TABLE_CURRENCY.search(header_text)
             )
             if header_currency is not None:
                 section = _section_with_currency(
@@ -214,7 +241,9 @@ def mox_bank_source_rows(
                 )
                 continue
 
-            if _TRANSACTION_START.match(text):
+            if pending_completed:
+                pass
+            elif _TRANSACTION_START.match(text):
                 _reject_pending_row(pending_row)
                 pending_row = text
                 pending_location = (page_number, line_number)

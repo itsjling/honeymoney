@@ -65,22 +65,20 @@ MAX_PDF_INPUT_BYTES = 64 * 1024 * 1024
 MAX_PDF_PAGES = 500
 MAX_PDF_EXTRACTED_TEXT_CHARS = 20_000_000
 MAX_PDF_TRANSACTION_ROWS = 100_000
-_MOX_BANK_SOURCE_FIELDS = frozenset(
-    {
-        "account",
-        "account_id",
-        "amount",
-        "currency",
-        "description",
-        "original_amount",
-        "original_currency",
-        "posting_date",
-        "statement_closing_balance",
-        "statement_opening_balance",
-        "statement_section",
-        "transaction_date",
-    }
-)
+_MOX_BANK_COLUMNS = {
+    "account": "account",
+    "account_id": "account_id",
+    "amount": "original_amount",
+    "description": "description",
+    "original_currency": "original_currency",
+    "posted_amount": "amount",
+    "posted_currency": "currency",
+    "posting_date": "posting_date",
+    "statement_closing_balance": "statement_closing_balance",
+    "statement_opening_balance": "statement_opening_balance",
+    "statement_section": "statement_section",
+    "transaction_date": "transaction_date",
+}
 
 
 @dataclass(frozen=True)
@@ -640,15 +638,9 @@ def _validate_pdf_profile(profile_id: str, settings: dict[str, Any]) -> None:
             f"Profile {profile_id} field pdf.word_rows must be a boolean or sectioned"
         )
     if mox_statement == "bank":
-        unknown_sources = sorted(
-            str(source)
-            for source in settings["columns"].values()
-            if not isinstance(source, str) or source not in _MOX_BANK_SOURCE_FIELDS
-        )
-        if unknown_sources:
+        if settings["columns"] != _MOX_BANK_COLUMNS:
             raise ValueError(
-                f"Profile {profile_id} pdf.columns map unknown Mox bank fields: "
-                + ", ".join(unknown_sources)
+                f"Profile {profile_id} pdf.columns must match the Mox bank adapter contract"
             )
     if word_rows is True:
         _validate_pdf_bounds_map(

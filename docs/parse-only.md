@@ -97,6 +97,22 @@ current row-based contract cannot report a separate balance check for a dormant
 Time Deposit that has opening and closing balances but no nonzero activity. The
 parser does not make up a zero-value row for that section.
 
+A custom PDF profile with `mox_statement: "bank"` must use the same complete
+column map as the bundled profile:
+
+```text
+transaction_date=transaction_date  posting_date=posting_date
+description=description             amount=original_amount
+posted_amount=amount                account_id=account_id
+account=account                     statement_section=statement_section
+original_currency=original_currency posted_currency=currency
+statement_opening_balance=statement_opening_balance
+statement_closing_balance=statement_closing_balance
+```
+
+The parser rejects missing, changed, or extra mappings because this adapter
+owns the source-row shape.
+
 A successful parse proposes rows but does not claim that each row is complete
 or correct. A matched balance alone cannot prove completeness. Keep page and
 row evidence, expose warnings and gaps, detect overlaps, and preserve later

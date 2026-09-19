@@ -250,42 +250,42 @@ class MoxBankPdfProfileTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             profile_path = Path(tmp) / "profile.json"
             profile = load_profile("mox_bank_pdf.json")
-            profile["pdf"]["columns"]["description"] = "bogus"
-            profile_path.write_text(json.dumps(profile), encoding="utf-8")
+            canonical_columns = dict(profile["pdf"]["columns"])
+            destinations = list(canonical_columns)
+            for index, destination in enumerate(destinations):
+                missing = load_profile("mox_bank_pdf.json")
+                missing["pdf"]["columns"].pop(destination)
+                profile_path.write_text(json.dumps(missing), encoding="utf-8")
+                with (
+                    self.subTest(kind="missing", destination=destination),
+                    self.assertRaises(ValueError),
+                ):
+                    _load_profiles({**base_config(), "profiles": [profile_path]})
 
+                swapped = load_profile("mox_bank_pdf.json")
+                other = destinations[(index + 1) % len(destinations)]
+                swapped["pdf"]["columns"][destination] = canonical_columns[other]
+                profile_path.write_text(json.dumps(swapped), encoding="utf-8")
+                with (
+                    self.subTest(kind="swapped", destination=destination),
+                    self.assertRaises(ValueError),
+                ):
+                    _load_profiles({**base_config(), "profiles": [profile_path]})
+
+            invalid_word_profile = load_profile("mox_bank_pdf.json")
+            invalid_word_profile["pdf"]["columns"].pop("statement_section")
+            invalid_word_profile["pdf"]["word_rows"] = True
+            profile_path.write_text(json.dumps(invalid_word_profile), encoding="utf-8")
             with self.assertRaisesRegex(
                 ValueError,
-                "pdf.columns map unknown Mox bank fields: bogus",
+                "pdf.columns must match the Mox bank adapter contract",
             ):
                 _load_profiles({**base_config(), "profiles": [profile_path]})
 
-            profile["pdf"]["word_rows"] = True
-            profile_path.write_text(json.dumps(profile), encoding="utf-8")
-            with self.assertRaisesRegex(
-                ValueError,
-                "pdf.columns map unknown Mox bank fields: bogus",
-            ):
-                _load_profiles({**base_config(), "profiles": [profile_path]})
-            profile["pdf"].pop("word_rows")
-
-            profile["pdf"]["columns"] = {
-                "transaction_date": "transaction_date",
-                "posting_date": "posting_date",
-                "description": "description",
-                "amount": "original_amount",
-                "posted_amount": "amount",
-                "account_id": "account_id",
-                "account": "account",
-                "statement_section": "statement_section",
-                "original_currency": "original_currency",
-                "posted_currency": "currency",
-                "statement_opening_balance": "statement_opening_balance",
-                "statement_closing_balance": "statement_closing_balance",
-            }
             profile_path.write_text(json.dumps(profile), encoding="utf-8")
 
             loaded = _load_profiles({**base_config(), "profiles": [profile_path]})
-            self.assertEqual(loaded[0]["pdf"]["columns"], profile["pdf"]["columns"])
+            self.assertEqual(loaded[0]["pdf"]["columns"], canonical_columns)
 
 
 class MoxCreditCardPdfProfileTest(unittest.TestCase):
