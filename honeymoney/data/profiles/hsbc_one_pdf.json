@@ -43,7 +43,7 @@
           "currency_from_row": true
         }
       },
-      "section_end_markers": [],
+      "section_end_markers": ["Deposit Plus", "Total Relationship Balance", "Important Notice"],
       "header_markers": [
         "Date",
         "Transaction",

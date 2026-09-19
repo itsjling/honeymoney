@@ -2042,12 +2042,19 @@ def _pdf_balance_observations(
                 if matched_section:
                     current_section = matched_section
                     in_transaction_table = False
-                elif _pdf_balance_line_can_change_section(
+                elif _pdf_exact_section_heading(
                     line,
+                    dict.fromkeys(section_settings.get("section_end_markers", [])),
                     section_settings,
-                    in_transaction_table=in_transaction_table,
-                ) and _pdf_line_has_marker(
-                    folded, section_settings.get("section_end_markers", [])
+                ) or (
+                    _pdf_balance_line_can_change_section(
+                        line,
+                        section_settings,
+                        in_transaction_table=in_transaction_table,
+                    )
+                    and _pdf_line_has_marker(
+                        folded, section_settings.get("section_end_markers", [])
+                    )
                 ):
                     current_section = ""
                     in_transaction_table = False
@@ -2553,8 +2560,15 @@ def _pdf_sectioned_word_source_rows(
                 description_parts = []
                 continue
 
-            if not has_transaction_shape and _pdf_line_has_marker(
-                folded, settings.get("section_end_markers", [])
+            if _pdf_exact_section_heading(
+                _PdfBalanceLine(text),
+                dict.fromkeys(settings.get("section_end_markers", [])),
+                settings,
+            ) or (
+                not has_transaction_shape
+                and _pdf_line_has_marker(
+                    folded, settings.get("section_end_markers", [])
+                )
             ):
                 current_account = None
                 current_currency = ""

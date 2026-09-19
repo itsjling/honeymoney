@@ -27,6 +27,10 @@ Some bundled profiles use a fixed statement year when dates omit their year.
 The result warns when a profile has this fixed-year assumption. Check all dates
 against the original statement.
 
+The HSBC One profile stops transaction and balance scanning at Deposit Plus,
+Total Relationship Balance, and Important Notice headings. Amounts in those
+sections do not become savings transactions or replace the final running balance.
+
 The HSBC One profile reads the statement date from the PDF text when present.
 If that date is absent, it can read an `eStatementFile_YYYYMMDD` date from the
 input filename. Keep that filename when you need to reproduce the result. The
