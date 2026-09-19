@@ -23,7 +23,7 @@ class PythonSupportPolicyTest(unittest.TestCase):
         )
         constraints = (REPO_ROOT / "constraints/dev.txt").read_text(encoding="utf-8")
 
-        self.assertIn('version = "0.2.0"', pyproject)
+        self.assertIn('version = "0.2.4"', pyproject)
         self.assertIn('requires-python = ">=3.14,<3.15"', pyproject)
         self.assertIn('target-version = "py314"', pyproject)
         self.assertIn('python_version = "3.14"', pyproject)
@@ -89,12 +89,12 @@ class PythonSupportPolicyTest(unittest.TestCase):
 
 
 class DistributionPayloadTest(unittest.TestCase):
-    def test_release_metadata_requires_the_0_2_0_python_contract(self) -> None:
-        artifact = Path("honeymoney-0.2.0-py3-none-any.whl")
+    def test_release_metadata_requires_the_0_2_4_python_contract(self) -> None:
+        artifact = Path("honeymoney-0.2.4-py3-none-any.whl")
         metadata = (
             "Metadata-Version: 2.4\n"
             "Name: honeymoney\n"
-            "Version: 0.2.0\n"
+            "Version: 0.2.4\n"
             "Requires-Python: >=3.14,<3.15\n"
         )
 
@@ -105,7 +105,7 @@ class DistributionPayloadTest(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "release version"):
             check_distribution._assert_release_metadata(
-                metadata.replace("Version: 0.2.0", "Version: 0.2.1"), artifact
+                metadata.replace("Version: 0.2.4", "Version: 0.2.5"), artifact
             )
         with self.assertRaisesRegex(ValueError, "requires-python"):
             check_distribution._assert_release_metadata(
@@ -114,10 +114,10 @@ class DistributionPayloadTest(unittest.TestCase):
 
     def test_wheel_payload_requires_console_script_and_all_profiles(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            wheel = Path(tmp) / "honeymoney-0.2.0-py3-none-any.whl"
+            wheel = Path(tmp) / "honeymoney-0.2.4-py3-none-any.whl"
             with zipfile.ZipFile(wheel, "w") as archive:
                 archive.writestr(
-                    "honeymoney-0.2.0.dist-info/entry_points.txt",
+                    "honeymoney-0.2.4.dist-info/entry_points.txt",
                     "[console_scripts]\nhoneymoney = honeymoney.cli:run\n",
                 )
                 for profile in check_distribution.EXPECTED_BUNDLED_PROFILES:
@@ -130,7 +130,7 @@ class DistributionPayloadTest(unittest.TestCase):
 
             with zipfile.ZipFile(wheel, "w") as archive:
                 archive.writestr(
-                    "honeymoney-0.2.0.dist-info/entry_points.txt",
+                    "honeymoney-0.2.4.dist-info/entry_points.txt",
                     "[console_scripts]\nhoneymoney = honeymoney.cli:run\n",
                 )
 
@@ -142,12 +142,12 @@ class DistributionPayloadTest(unittest.TestCase):
     ) -> None:
         def add_text(archive: tarfile.TarFile, name: str, content: str) -> None:
             data = content.encode("utf-8")
-            member = tarfile.TarInfo(f"honeymoney-0.2.0/{name}")
+            member = tarfile.TarInfo(f"honeymoney-0.2.4/{name}")
             member.size = len(data)
             archive.addfile(member, io.BytesIO(data))
 
         with tempfile.TemporaryDirectory() as tmp:
-            source_archive = Path(tmp) / "honeymoney-0.2.0.tar.gz"
+            source_archive = Path(tmp) / "honeymoney-0.2.4.tar.gz"
             with tarfile.open(source_archive, "w:gz") as archive:
                 add_text(
                     archive,

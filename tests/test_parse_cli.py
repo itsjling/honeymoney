@@ -55,7 +55,16 @@ class ParseCliTest(unittest.TestCase):
             self.assertEqual(payload["errors"], [])
             data = payload["data"]
             self.assertEqual(data["parse_schema_version"], 1)
-            self.assertEqual(data["engine"], {"name": "honeymoney", "version": "0.2.0"})
+            self.assertEqual(data["engine"], {"name": "honeymoney", "version": "0.2.4"})
+            self.assertEqual(
+                data["statement_metadata"],
+                {
+                    "statement_date": None,
+                    "period_start": None,
+                    "period_end": None,
+                    "source_page": None,
+                },
+            )
             self.assertEqual(len(data["profile_sha256"]), 64)
             self.assertEqual(
                 data["source_sha256"], hashlib.sha256(source.read_bytes()).hexdigest()
@@ -91,6 +100,7 @@ class ParseCliTest(unittest.TestCase):
                     profile_id,
                 )
                 self.assertGreater(result["page_count"], 0)
+                self.assertIn("statement_metadata", result)
                 self.assertGreater(len(result["rows"]), 0)
                 self.assertTrue(result["balance_checks"])
                 self.assertTrue(

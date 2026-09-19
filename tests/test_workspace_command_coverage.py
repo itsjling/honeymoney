@@ -651,7 +651,7 @@ class WorkspaceCommandCoverageTest(unittest.TestCase):
     def test_cli_errors_help_and_rate_fetch_are_bounded(self) -> None:
         code, output, errors = self._run_main()
         self.assertEqual(code, 0, errors)
-        self.assertIn("Honeymoney 0.2.0", output)
+        self.assertIn("Honeymoney 0.2.4", output)
 
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary) / "money"

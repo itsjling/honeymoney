@@ -137,6 +137,10 @@ categorization, valuation, and publication. Its explicit JSON output includes
 financial facts. Human output and errors remain value-free. See
 [the parse-only contract](parse-only.md).
 
+`statement-metadata PATH --json` reads the same explicit statement date and
+period object without choosing a profile or requiring transaction rows. It
+uses no workspace state. See [the parse-only contract](parse-only.md).
+
 `import PATH` accepts one file or folder. `imports list` shows safe labels,
 readiness, and statement-transaction counts. `imports show` shows current state
 and bounded complete attempt history without values or raw paths.
