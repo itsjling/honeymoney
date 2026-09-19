@@ -35,6 +35,24 @@ the date on their imported document and use the page list to locate its source.
 Honeymoney's workspace import service does not save these fields in its durable
 import records.
 
+The public `parse` command also returns `statement_metadata`:
+
+```json
+{
+  "statement_date": "2026-08-17",
+  "period_start": "2026-07-17",
+  "period_end": "2026-08-16",
+  "source_page": 1
+}
+```
+
+This object uses built-in layout rules rather than profile settings. The
+profile-free `statement-metadata PATH --json` command returns the same object,
+including for a recognized header with no supported transaction profile or no
+transaction rows. The source page is present only when one page supports all
+returned fields. Mox credit-card ranges supply only the period. Honeymoney
+never copies a period end into `statement_date`.
+
 The per-source reports from `_import_transactions` also include both fields.
 Its failed and skipped reports use `null` and an empty page list.
 `parse_statement` raises on parse failure, as the existing preview does.

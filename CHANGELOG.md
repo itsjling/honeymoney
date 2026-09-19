@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.4
+
+- Add explicit statement dates and periods to parse JSON.
+- Add a profile-free `statement-metadata` command for unsupported and
+  zero-transaction PDFs.
+
 ## 0.2.0
 
 ### Breaking changes

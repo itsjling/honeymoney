@@ -10,7 +10,11 @@ from pathlib import Path
 
 from honeymoney import importers
 from honeymoney.reconciliation import statement_balance_reconciliation
-from honeymoney.workspace_index import HONEYMONEY_VERSION
+from honeymoney.statement_metadata import (
+    ENGINE_VERSION,
+    empty_statement_metadata,
+    statement_metadata_from_snapshot,
+)
 
 PARSE_SCHEMA_VERSION = 1
 FACT_FIELDS = (
@@ -72,6 +76,12 @@ def parse_statement(input_path: Path, profile_id: str) -> dict[str, object]:
         if snapshot.resolved_path != expected_path:
             raise ParseError("parse_invalid_source", "Source must be a regular file.")
         metadata: dict[str, int] = {}
+        statement_metadata = empty_statement_metadata()
+        if suffix == ".pdf":
+            page_count, statement_metadata = statement_metadata_from_snapshot(
+                snapshot.source_bytes
+            )
+            metadata["page_count"] = page_count
         rows, warnings = importers.preview_profile_input(
             profile,
             profile_id,
@@ -124,7 +134,7 @@ def parse_statement(input_path: Path, profile_id: str) -> dict[str, object]:
         )
     return {
         "parse_schema_version": PARSE_SCHEMA_VERSION,
-        "engine": {"name": "honeymoney", "version": HONEYMONEY_VERSION},
+        "engine": {"name": "honeymoney", "version": ENGINE_VERSION},
         "profile_id": profile_id,
         "profile_sha256": hashlib.sha256(
             json.dumps(
@@ -133,6 +143,7 @@ def parse_statement(input_path: Path, profile_id: str) -> dict[str, object]:
         ).hexdigest(),
         "source_sha256": hashlib.sha256(snapshot.source_bytes).hexdigest(),
         "page_count": metadata.get("page_count"),
+        "statement_metadata": statement_metadata,
         "rows": [
             {field: row.get(field, "") for field in FACT_FIELDS} for row in fact_rows
         ],

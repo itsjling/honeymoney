@@ -41,7 +41,7 @@ Source warnings live in `data.warnings`. The envelope's `warnings` stays empty.
 
 The data contract has `parse_schema_version: 1` and these fields:
 
-- `engine` contains the name `honeymoney` and package version `0.2.0`.
+- `engine` contains the name `honeymoney` and package version `0.2.4`.
 - `profile_id` and `profile_sha256` identify the bundled profile. The digest
   covers its validated JSON with sorted keys, compact separators, UTF-8
   encoding, and unescaped Unicode.
@@ -49,6 +49,10 @@ The data contract has `parse_schema_version: 1` and these fields:
   one bounded, stable source snapshot and parses those bytes.
 - `page_count` gives the total PDF page count, including pages without
   transactions. Its value is `null` for CSV.
+- `statement_metadata` contains an explicit printed statement date, statement
+  period, and the one-based page that supports all returned dates. Missing
+  fields use JSON `null`. Honeymoney does not turn a period end date into a
+  statement date.
 - `rows` contains normalized source facts in parser order.
 - `warnings` contains source-data warnings and parser warnings.
 - `balance_checks` contains source-level statement balance checks grouped by
@@ -101,3 +105,23 @@ codes: `parse_unknown_profile`, `parse_unsupported_type`,
 `parse_invalid_source`, `parse_profile_type_mismatch`,
 `parse_dependency_missing`, `parse_failed`, and `parse_no_rows`. Invalid
 command syntax keeps the existing `usage_error` code.
+
+## Read dates without a parser profile
+
+```bash
+honeymoney statement-metadata statement.pdf --json
+```
+
+`statement-metadata` reads the same `statement_metadata` object used by
+`parse`. It does not select a profile or require transaction rows, so it also
+works for recognized statement headers that Honeymoney cannot import. Its data
+object contains `source_sha256`, `page_count`, `engine`, and
+`statement_metadata`. It uses the schema 3 envelope with
+`command: "statement-metadata"`.
+
+The command accepts text-based PDFs only. It reads explicit issue dates and
+period labels from known HSBC, Mox, and Hang Seng layouts. It does not use a
+filename, transaction date, payment due date, or inferred period end. Human
+output contains no dates. Errors use
+`statement_metadata_unsupported_type`, `statement_metadata_invalid_source`,
+`statement_metadata_dependency_missing`, or `statement_metadata_failed`.
