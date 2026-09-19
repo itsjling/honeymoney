@@ -120,7 +120,9 @@ object contains `source_sha256`, `page_count`, `engine`, and
 `command: "statement-metadata"`.
 
 The command accepts text-based PDFs only. It reads explicit issue dates and
-period labels from known HSBC, Mox, and Hang Seng layouts. It does not use a
+period labels. An explicit `Statement date` label is supported for any issuer;
+unlabeled dates and billing periods require known HSBC, Mox, or Hang Seng
+header layouts. It does not use a
 filename, transaction date, payment due date, or inferred period end. Human
 output contains no dates. Errors use
 `statement_metadata_unsupported_type`, `statement_metadata_invalid_source`,

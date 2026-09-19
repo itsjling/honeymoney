@@ -172,6 +172,19 @@ class StatementMetadataExtractionTest(unittest.TestCase):
                 self.assertEqual(metadata["period_start"], "2026-07-17")
                 self.assertEqual(metadata["period_end"], "2026-08-16")
 
+    def test_hsbc_header_does_not_use_payment_due_date(self) -> None:
+        metadata = extract_statement_metadata(
+            ["HSBC One Page 1 of 1\nPayment due date 19 August 2026"]
+        )
+        self.assertIsNone(metadata["statement_date"])
+
+    def test_explicit_statement_date_label_supports_other_issuers(self) -> None:
+        metadata = extract_statement_metadata(
+            ["Random issuer\nStatement date: 17 August 2026"]
+        )
+        self.assertEqual(metadata["statement_date"], "2026-08-17")
+        self.assertEqual(metadata["source_page"], 1)
+
 
 class StatementMetadataCliTest(unittest.TestCase):
     def test_metadata_only_command_handles_an_unsupported_zero_row_pdf(self) -> None:

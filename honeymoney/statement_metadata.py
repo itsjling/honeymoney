@@ -112,7 +112,7 @@ def statement_metadata_from_snapshot(
 
 
 def extract_statement_metadata(page_texts: Iterable[str]) -> StatementMetadata:
-    """Extract only dates tied to known statement header layouts."""
+    """Extract explicit statement-date labels and known header layouts."""
     observations: dict[str, list[tuple[str, int]]] = {
         "statement_date": [],
         "period_start": [],
@@ -181,7 +181,8 @@ def _page_observations(text: str) -> list[dict[str, str]]:
 
     hsbc_page_dates = re.finditer(
         rf"(?im)^[^\n]*\bHSBC\s+(?:One|Premier)\b[^\n]*\bPage\s+1\s+of\s+\d+\s*$\n"
-        rf"(?:[^\n]*\n){{0,2}}[^\n]*?(?P<date>{_DATE_4})\s*$",
+        rf"(?:[^\n]*\n){{0,2}}(?![^\n]*\b(?:payment|due)\b)"
+        rf"[^\n]*?(?P<date>{_DATE_4})\s*$",
         text,
     )
     _append_statement_dates(observations, hsbc_page_dates)

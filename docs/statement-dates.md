@@ -46,7 +46,8 @@ The public `parse` command also returns `statement_metadata`:
 }
 ```
 
-This object uses built-in layout rules rather than profile settings. The
+This object reads explicit `Statement date` labels for any issuer and uses
+built-in layout rules for other headers rather than profile settings. The
 profile-free `statement-metadata PATH --json` command returns the same object,
 including for a recognized header with no supported transaction profile or no
 transaction rows. The source page is present only when one page supports all
