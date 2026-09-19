@@ -25,6 +25,7 @@ from honeymoney.identity import (
 from honeymoney.importers import (
     _import_pdf,
     _import_transactions,
+    _load_profiles,
     _pdf_balance_lines,
     _pdf_balance_observations,
     _validate_profile,
@@ -227,6 +228,23 @@ class MoxBankPdfProfileTest(unittest.TestCase):
             load_profile("mox_bank_pdf.json"),
             "accepted_statement",
         )
+
+    def test_workspace_profile_rejects_non_string_mox_statement_kind(self) -> None:
+        for invalid_kind in ([], {}):
+            with (
+                self.subTest(invalid_kind=invalid_kind),
+                tempfile.TemporaryDirectory() as tmp,
+            ):
+                profile_path = Path(tmp) / "profile.json"
+                profile = load_profile("mox_bank_pdf.json")
+                profile["pdf"]["mox_statement"] = invalid_kind
+                profile_path.write_text(json.dumps(profile), encoding="utf-8")
+
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "pdf.mox_statement must be bank or credit",
+                ):
+                    _load_profiles({**base_config(), "profiles": [profile_path]})
 
 
 class MoxCreditCardPdfProfileTest(unittest.TestCase):

@@ -590,7 +590,9 @@ def _validate_pdf_profile(profile_id: str, settings: dict[str, Any]) -> None:
     if "parser" in settings and settings.get("parser") != "pdfplumber":
         raise ValueError(f"Profile {profile_id} field pdf.parser must be pdfplumber")
     mox_statement = settings.get("mox_statement")
-    if mox_statement is not None and mox_statement not in {"bank", "credit"}:
+    if mox_statement is not None and (
+        not isinstance(mox_statement, str) or mox_statement not in {"bank", "credit"}
+    ):
         raise ValueError(
             f"Profile {profile_id} field pdf.mox_statement must be bank or credit"
         )

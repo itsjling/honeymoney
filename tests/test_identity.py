@@ -220,6 +220,40 @@ class IdentityCoreTest(unittest.TestCase):
         with self.assertRaises(IdentityError):
             canonical_profile_json({"e\u0301": 1, "é": 2})
 
+    def test_mox_pdf_locator_and_generated_identity_are_pinned(self) -> None:
+        profile = {
+            "id": "mox_bank_pdf",
+            "account_id": "mox_bank_main",
+            "pdf": {"mox_statement": "bank"},
+        }
+        namespace = source_namespace_id("workspace", "statements/mox.pdf")
+        source = source_id(namespace)
+        revision = source_revision(b"synthetic mox statement\n")
+        contract = extractor_contract_id(5, profile)
+        origin = AllocationOrigin(
+            revision,
+            contract,
+            AllocationLocator(5, (3, 7)),
+            1,
+        )
+        fingerprint = "fp_" + "a" * 64
+
+        self.assertEqual(
+            allocation_locator_bytes(origin.locator),
+            b"honeymoney.record-locator-v1\x00"
+            + b"\x05\x02"
+            + struct.pack(">Q", 3)
+            + struct.pack(">Q", 7),
+        )
+        self.assertEqual(
+            contract,
+            "ext_ff2145eb3468c3588c6155b92ecaecef8dfcbb5179b454c7b6a62f6e9ba30bdc",
+        )
+        self.assertEqual(
+            source_record_id(source, origin, fingerprint),
+            "rec_923647e0f819a71d44eb63023bce48d3149e043277861796010ce89ccd3a8c2a",
+        )
+
     def test_manifest_serialization_sorts_and_does_not_store_private_inputs(
         self,
     ) -> None:

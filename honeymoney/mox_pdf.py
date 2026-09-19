@@ -1,5 +1,3 @@
-"""Mox statement layout parsing."""
-
 from __future__ import annotations
 
 import hashlib
@@ -143,6 +141,7 @@ def mox_bank_source_rows(
     balances: dict[str, dict[str, str]] = {}
     section: _MoxAccountSection | None = None
     pending_row = ""
+    pending_location: tuple[int, int] | None = None
     in_activity = False
 
     for page_number, lines in enumerate(page_lines, start=1):
@@ -153,6 +152,7 @@ def mox_bank_source_rows(
                 _reject_pending_row(pending_row)
                 section = _bank_account_section(account_match.group("currency"))
                 pending_row = ""
+                pending_location = None
                 in_activity = False
                 continue
             if _ANY_BANK_ACCOUNT_HEADING.match(text) is not None:
@@ -164,6 +164,7 @@ def mox_bank_source_rows(
                     raise ValueError("Unsupported Mox Time Deposit section")
                 section = _time_deposit_section(deposit_match.group("reference"))
                 pending_row = ""
+                pending_location = None
                 in_activity = False
                 continue
             if section is None:
@@ -195,6 +196,7 @@ def mox_bank_source_rows(
                     )
                 in_activity = True
                 pending_row = ""
+                pending_location = None
                 continue
             if not in_activity:
                 first_row = _TRANSACTION_ROW.match(text)
@@ -215,6 +217,7 @@ def mox_bank_source_rows(
             if _TRANSACTION_START.match(text):
                 _reject_pending_row(pending_row)
                 pending_row = text
+                pending_location = (page_number, line_number)
             elif pending_row:
                 pending_row = f"{pending_row} {text}"
             else:
@@ -223,6 +226,10 @@ def mox_bank_source_rows(
             if match is None:
                 continue
             pending_row = ""
+            if pending_location is None:
+                raise ValueError("Mox transaction row location is unavailable")
+            row_page, row_line = pending_location
+            pending_location = None
             if not section.currency:
                 raise ValueError("Mox Time Deposit currency is unavailable")
             fields = match.groupdict()
@@ -263,7 +270,7 @@ def mox_bank_source_rows(
                 },
                 period,
             )
-            rows.append((source_row, page_number, line_number))
+            rows.append((source_row, row_page, row_line))
             row_groups.setdefault(section.account_id, []).append(source_row)
 
     _reject_pending_row(pending_row)

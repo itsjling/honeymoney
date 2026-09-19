@@ -159,6 +159,7 @@ class MoxBankPdfSectionsTest(unittest.TestCase):
         self.assertEqual(rows[0]["posted_currency"], "USD")
         self.assertEqual(rows[0]["statement_opening_balance"], "100.00")
         self.assertEqual(rows[0]["statement_closing_balance"], "102.00")
+        self.assertEqual(rows[0]["source_row"], "5")
 
     def test_corresponding_currency_and_header_words_remain_transaction_facts(
         self,

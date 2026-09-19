@@ -89,11 +89,13 @@ complete parsed rows and the parser's account and currency sections. It does
 not run whole-workspace transfer reconciliation.
 
 The Mox bank profile reports each active currency account and Time Deposit as
-a separate account section. It uses a stable digest for each Time Deposit and
-does not expose the printed deposit reference. The current row-based contract
-cannot report a separate balance check for a dormant Time Deposit that has
-opening and closing balances but no nonzero activity. The parser does not make
-up a zero-value row for that section.
+a separate account section. It replaces each printed Time Deposit reference
+with a stable digest, so the raw reference does not appear in the output. This
+digest is a pseudonym, not a secret: a low-entropy reference can be found by
+enumeration. Protect these account IDs and the JSON as financial data. The
+current row-based contract cannot report a separate balance check for a dormant
+Time Deposit that has opening and closing balances but no nonzero activity. The
+parser does not make up a zero-value row for that section.
 
 A successful parse proposes rows but does not claim that each row is complete
 or correct. A matched balance alone cannot prove completeness. Keep page and
