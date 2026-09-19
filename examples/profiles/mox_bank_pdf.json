@@ -8,10 +8,10 @@
   "account_currency": "HKD",
   "owner": "Household",
   "payment_method": "Bank Account",
-  "date_formats": ["%d %b"],
-  "statement_year": 2026,
+  "date_formats": ["%Y-%m-%d"],
   "pdf": {
     "parser": "pdfplumber",
+    "mox_statement": "bank",
     "statement_date": {
       "regex": "^[ \\t]*Statement[ \\t]+Date[ \\t]*:?[ \\t]*(?P<date>[A-Za-z0-9][A-Za-z0-9,/-]*(?:[ \\t]+[A-Za-z0-9][A-Za-z0-9,/-]*){0,2})",
       "date_formats": ["%Y-%m-%d", "%d/%m/%Y", "%d %b %Y", "%d %B %Y", "%d %b, %Y", "%d %B, %Y", "%d%b%Y"]
@@ -30,7 +30,14 @@
       "transaction_date": "transaction_date",
       "posting_date": "posting_date",
       "description": "description",
-      "amount": "amount"
+      "amount": "original_amount",
+      "posted_amount": "amount",
+      "account_id": "account_id",
+      "account": "account",
+      "original_currency": "original_currency",
+      "posted_currency": "currency",
+      "statement_opening_balance": "statement_opening_balance",
+      "statement_closing_balance": "statement_closing_balance"
     }
   }
 }

@@ -241,6 +241,13 @@ class MoxCreditCardPdfProfileTest(unittest.TestCase):
         rows, warnings, _ = _import_fake_pdf(
             load_profile("mox_credit_card_pdf.json"),
             tables=[[["17 May 18 May SYNTHETIC FOREIGN PURCHASE -10.00 USD -79.80"]]],
+            words=[
+                {
+                    "text": "Statement Period: 01 May 2026 - 31 May 2026",
+                    "x0": 20,
+                    "top": 20,
+                }
+            ],
         )
 
         self.assertEqual(warnings, [])
@@ -487,7 +494,7 @@ class PdfBalanceReconciliationTest(unittest.TestCase):
             },
         )
         rows, warnings, _ = _import_fake_pdf(
-            profile,
+            _legacy_mox_bank_profile(),
             tables=[
                 [
                     ["01 Apr 01 Apr OPENING BALANCE MAIN ACCOUNT HKD 100.00"],
@@ -796,7 +803,7 @@ class PdfBalanceReconciliationTest(unittest.TestCase):
                 )
 
     def test_multi_page_import_attaches_one_opening_and_closing_balance(self) -> None:
-        profile = load_profile("mox_bank_pdf.json")
+        profile = _legacy_mox_bank_profile()
         rows, warnings, _ = _import_fake_pdf(
             profile,
             page_tables=[
@@ -966,7 +973,7 @@ class PdfBalanceReconciliationTest(unittest.TestCase):
                 )
 
     def test_conflicting_extracted_balances_mark_rows_and_do_not_fail(self) -> None:
-        profile = load_profile("mox_bank_pdf.json")
+        profile = _legacy_mox_bank_profile()
         page_tables = [
             [
                 [
@@ -1065,7 +1072,7 @@ class PdfBalanceReconciliationTest(unittest.TestCase):
         self.assertNotIn("private/", json.dumps(statement["conflicts"]))
 
     def test_balance_scanner_reads_table_rows_alongside_words(self) -> None:
-        profile = load_profile("mox_bank_pdf.json")
+        profile = _legacy_mox_bank_profile()
         words = [
             {"text": "Page", "x0": 20, "top": 10},
             {"text": "1", "x0": 55, "top": 10},
@@ -1622,15 +1629,17 @@ class PdfResourceLimitTest(unittest.TestCase):
                 patch.object(importers, "_pymupdf_page_text_length", return_value=5),
                 self.assertRaisesRegex(ValueError, "PDF extracted text exceeds"),
             ):
+                profile = _legacy_mox_bank_profile()
                 _import_pdf(
                     statement,
-                    load_profile("mox_bank_pdf.json"),
+                    profile,
                     {"base_currency": "HKD", "exchange_rates": {"HKD": 1}},
                     root,
                 )
 
     def test_pdf_rejects_excess_transaction_rows(self) -> None:
         profile = load_profile("mox_credit_card_pdf.json")
+        profile["pdf"].pop("mox_statement")
         tables = [
             [
                 ["17 May 18 May SYNTHETIC PURCHASE ONE -10.00"],
@@ -2445,6 +2454,18 @@ def _pdf_byte_fixtures(generator: Path) -> dict[str, Path]:
     return {
         fixture.review_key: fixture.output_path for fixture in namespace["FIXTURES"]
     }
+
+
+def _legacy_mox_bank_profile() -> dict:
+    profile = load_profile("mox_bank_pdf.json")
+    profile["pdf"].pop("mox_statement")
+    profile["pdf"]["columns"] = {
+        "transaction_date": "transaction_date",
+        "posting_date": "posting_date",
+        "description": "description",
+        "amount": "amount",
+    }
+    return profile
 
 
 def _import_fake_pdf(

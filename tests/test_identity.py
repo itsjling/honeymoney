@@ -187,7 +187,7 @@ class IdentityCoreTest(unittest.TestCase):
         with self.assertRaises(IdentityError):
             AllocationLocator(2, (1, 2, 3))
         with self.assertRaises(IdentityError):
-            AllocationLocator(5, (1,))
+            AllocationLocator(6, (1,))
 
     def test_extractor_contract_canonicalizes_json_and_excludes_only_closed_top_level_keys(
         self,

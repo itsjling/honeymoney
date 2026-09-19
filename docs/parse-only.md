@@ -24,8 +24,10 @@ The command does not select a profile or load a local profile for you. It
 rejects a profile that does not support the input type. A profile describes a
 known statement layout. Selecting it does not prove that the file matches.
 Some bundled profiles use a fixed statement year when dates omit their year.
-The result warns when a profile has this fixed-year assumption. Check all dates
-against the original statement.
+The result warns when a profile has this fixed-year assumption. The Mox PDF
+profiles resolve yearless transaction dates from the printed statement period,
+including periods that cross a year boundary. Check all dates against the
+original statement.
 
 The HSBC One profile reads the statement date from the PDF text when present.
 If that date is absent, it can read an `eStatementFile_YYYYMMDD` date from the
@@ -85,6 +87,13 @@ Balance results distinguish `matched`, `mismatched`, and missing or conflicting
 evidence. An unavailable check does not count as a match. The calculation uses
 complete parsed rows and the parser's account and currency sections. It does
 not run whole-workspace transfer reconciliation.
+
+The Mox bank profile reports each active currency account and Time Deposit as
+a separate account section. It uses a stable digest for each Time Deposit and
+does not expose the printed deposit reference. The current row-based contract
+cannot report a separate balance check for a dormant Time Deposit that has
+opening and closing balances but no nonzero activity. The parser does not make
+up a zero-value row for that section.
 
 A successful parse proposes rows but does not claim that each row is complete
 or correct. A matched balance alone cannot prove completeness. Keep page and

@@ -133,6 +133,105 @@ class MoxBankPdfSectionsTest(unittest.TestCase):
         self.assertEqual(rows[0]["statement_opening_balance"], "100.00")
         self.assertEqual(rows[0]["statement_closing_balance"], "110.00")
 
+    def test_doubled_header_and_wrapped_interest_keep_all_activity(self) -> None:
+        lines = [
+            "Statement Period: 01 Aug 2026 - 31 Aug 2026",
+            "USD Mox Account transaction details",
+            "AAccttiivviittyy SSeettttlleemmeenntt DDeessccrriippttiioonn "
+            "CCoorrrreessppoonnddiinngg AAmmoouunntt ((UUSSDD))",
+            "01 Aug 01 Aug Opening balance synthetic 100.00",
+            "02 Aug 02 Aug Time Deposit Upfront Interest",
+            "+2.00",
+            "31 Aug 31 Aug Closing balance synthetic 102.00",
+        ]
+
+        rows, warnings = _import_pdf_case(
+            load_profile("mox_bank_pdf.json"),
+            tables=[],
+            words_pages=[_words(*lines)],
+        )
+
+        self.assertEqual(warnings, [])
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(
+            rows[0]["original_description"], "Time Deposit Upfront Interest"
+        )
+        self.assertEqual(rows[0]["posted_currency"], "USD")
+        self.assertEqual(rows[0]["statement_opening_balance"], "100.00")
+        self.assertEqual(rows[0]["statement_closing_balance"], "102.00")
+
+    def test_corresponding_currency_and_header_words_remain_transaction_facts(
+        self,
+    ) -> None:
+        rows, warnings = _import_pdf_case(
+            load_profile("mox_bank_pdf.json"),
+            tables=[],
+            words_pages=[
+                _words(
+                    "Statement Period: 01 Aug 2026 - 31 Aug 2026",
+                    "HKD Mox Account transaction details",
+                    "Activity Settlement Description Corresponding amount (HKD)",
+                    "02 Aug 02 Aug ACTIVITY SETTLEMENT AMOUNT (USD) -10.00 USD -78.00",
+                )
+            ],
+        )
+
+        self.assertEqual(warnings, [])
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["original_amount"], "-10.00")
+        self.assertEqual(rows[0]["original_currency"], "USD")
+        self.assertEqual(rows[0]["posted_amount"], "-78.00")
+        self.assertEqual(rows[0]["posted_currency"], "HKD")
+        self.assertEqual(
+            rows[0]["original_description"], "ACTIVITY SETTLEMENT AMOUNT (USD)"
+        )
+
+    def test_unknown_or_malformed_section_fails_closed(self) -> None:
+        cases = (
+            "EUR Mox Account transaction details",
+            "Time Deposit - missing-reference",
+        )
+        for heading in cases:
+            with (
+                self.subTest(heading=heading),
+                self.assertRaisesRegex(ValueError, "Unsupported Mox"),
+            ):
+                _import_pdf_case(
+                    load_profile("mox_bank_pdf.json"),
+                    tables=[],
+                    words_pages=[
+                        _words(
+                            "Statement Period: 01 Aug 2026 - 31 Aug 2026",
+                            "HKD Mox Account transaction details",
+                            "Activity Settlement Description Corresponding amount",
+                            "01 Aug 01 Aug SYNTHETIC CREDIT +1.00",
+                            heading,
+                            "Activity Settlement Description Corresponding amount",
+                            "02 Aug 02 Aug SYNTHETIC CREDIT +2.00",
+                        )
+                    ],
+                )
+
+    def test_dormant_deposit_does_not_fabricate_a_transaction(self) -> None:
+        reference = "100000000009"
+        rows, warnings = _import_pdf_case(
+            load_profile("mox_bank_pdf.json"),
+            tables=[],
+            words_pages=[
+                _words(
+                    "Statement Period: 01 Jun 2026 - 30 Jun 2026",
+                    f"Time Deposit - {reference}",
+                    "Principal Amount: 80.00 USD",
+                    "Activity Settlement Description Corresponding amount (USD)",
+                    "01 Jun 01 Jun Opening balance 80.00",
+                    "30 Jun 30 Jun Closing balance 80.00",
+                )
+            ],
+        )
+
+        self.assertEqual(warnings, [])
+        self.assertEqual(rows, [])
+
 
 class MoxCreditCardPdfPeriodTest(unittest.TestCase):
     def test_cross_year_dates_and_balance_before_label_use_printed_facts(self) -> None:
@@ -170,6 +269,63 @@ class MoxCreditCardPdfPeriodTest(unittest.TestCase):
         )
         self.assertEqual(rows[0]["statement_opening_balance"], "")
         self.assertEqual(rows[-1]["statement_closing_balance"], "30.00")
+
+    def test_signed_closing_balance_is_preserved(self) -> None:
+        rows, _ = _import_pdf_case(
+            load_profile("mox_credit_card_pdf.json"),
+            tables=[[[["02 Jan 02 Jan SYNTHETIC PURCHASE -20.00"]]]],
+            words_pages=[
+                _words(
+                    "Statement Period: 01 Jan 2026 - 31 Jan 2026",
+                    "-20.00 HKD",
+                    "Statement Balance",
+                )
+            ],
+        )
+
+        self.assertEqual(rows[-1]["statement_closing_balance"], "-20.00")
+
+    def test_posting_date_after_period_is_rejected(self) -> None:
+        with self.assertRaisesRegex(ValueError, "period"):
+            _import_pdf_case(
+                load_profile("mox_credit_card_pdf.json"),
+                tables=[[[["31 Jan 02 Feb SYNTHETIC PURCHASE -20.00"]]]],
+                words_pages=[_words("Statement Period: 02 Jan 2026 - 01 Feb 2026")],
+            )
+
+    def test_transaction_text_cannot_supply_period_or_closing_balance(self) -> None:
+        with self.assertRaisesRegex(ValueError, "statement period"):
+            _import_pdf_case(
+                load_profile("mox_credit_card_pdf.json"),
+                tables=[
+                    [
+                        [
+                            [
+                                "02 Jan 02 Jan SYNTHETIC Statement period: "
+                                "01 Jan 2026 - 31 Jan 2026 Statement Balance -20.00"
+                            ]
+                        ]
+                    ]
+                ],
+                words_pages=[
+                    _words(
+                        "02 Jan 02 Jan SYNTHETIC Statement period: "
+                        "01 Jan 2026 - 31 Jan 2026"
+                    )
+                ],
+            )
+
+        rows, _ = _import_pdf_case(
+            load_profile("mox_credit_card_pdf.json"),
+            tables=[[[["02 Jan 02 Jan SYNTHETIC Statement Balance -20.00"]]]],
+            words_pages=[
+                _words(
+                    "Statement Period: 01 Jan 2026 - 31 Jan 2026",
+                    "02 Jan 02 Jan SYNTHETIC Statement Balance -20.00",
+                )
+            ],
+        )
+        self.assertEqual(rows[-1]["statement_closing_balance"], "")
 
 
 if __name__ == "__main__":

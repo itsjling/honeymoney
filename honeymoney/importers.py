@@ -34,6 +34,13 @@ from honeymoney.identity import (
     source_namespace_id,
     source_revision,
 )
+from honeymoney.mox_pdf import (
+    MoxStatementPeriod,
+    mox_bank_source_rows,
+    mox_credit_closing_balance,
+    mox_statement_period,
+    resolve_mox_source_dates,
+)
 from honeymoney.normalization import (
     _append_flag,
     _clean_text,
@@ -582,6 +589,11 @@ def _validate_csv_profile(profile_id: str, settings: dict[str, Any]) -> None:
 def _validate_pdf_profile(profile_id: str, settings: dict[str, Any]) -> None:
     if "parser" in settings and settings.get("parser") != "pdfplumber":
         raise ValueError(f"Profile {profile_id} field pdf.parser must be pdfplumber")
+    mox_statement = settings.get("mox_statement")
+    if mox_statement is not None and mox_statement not in {"bank", "credit"}:
+        raise ValueError(
+            f"Profile {profile_id} field pdf.mox_statement must be bank or credit"
+        )
     for field in ("has_header", "word_rows_only", "split_multiline_rows"):
         if field in settings and not isinstance(settings[field], bool):
             raise ValueError(
@@ -636,7 +648,7 @@ def _validate_pdf_profile(profile_id: str, settings: dict[str, Any]) -> None:
             )
     elif word_rows == "sectioned":
         _validate_sectioned_pdf_profile(profile_id, settings.get("sectioned_word_rows"))
-    elif compiled_row_regex is not None:
+    elif compiled_row_regex is not None and mox_statement != "bank":
         join_fields = settings.get("join_fields", {})
         if not isinstance(join_fields, dict):
             raise ValueError(
@@ -1415,6 +1427,8 @@ def _identity_diagnostic_warning(diagnostic: Any) -> str:
 
 def _pdf_adapter_tag(profile: dict[str, Any]) -> int:
     pdf_settings = profile.get("pdf", {})
+    if pdf_settings.get("mox_statement") == "bank":
+        return 5
     if pdf_settings.get("word_rows") == "sectioned":
         return 4
     if pdf_settings.get("word_rows"):
@@ -1762,6 +1776,46 @@ def _import_pdf(
                 )
                 source_report["statement_date"] = statement_date
                 source_report["statement_date_source_pages"] = source_pages
+            mox_kind = pdf_settings.get("mox_statement")
+            page_lines: list[list[list[dict[str, Any]]]] = []
+            mox_period: MoxStatementPeriod | None = None
+            if mox_kind in {"bank", "credit"}:
+                page_lines = [
+                    _pdf_word_lines(
+                        page.extract_words(x_tolerance=1, y_tolerance=3) or [],
+                        float(pdf_settings.get("word_y_tolerance", 3)),
+                    )
+                    for page in cached_pdf.pages
+                ]
+                mox_period = mox_statement_period(page_lines)
+            if mox_kind == "bank":
+                source_rows = mox_bank_source_rows(page_lines, mox_period)
+                for source_row, page_number, row_number in source_rows:
+                    normalized = _normalized_row(
+                        source_row=source_row,
+                        row_number=row_number,
+                        profile=profile,
+                        config=config,
+                        columns=columns,
+                        source_file=_relative_source(pdf_path, input_root),
+                        source_page=str(page_number),
+                    )
+                    if value_rows:
+                        value_transaction(normalized, config)
+                    if _row_is_skipped(normalized, skip_patterns):
+                        continue
+                    budget.record_transaction()
+                    rows.append(normalized)
+                    if include_identity_records:
+                        identity_records.append(
+                            IncomingRecordIdentity(
+                                normalized,
+                                AllocationLocator(5, (page_number, row_number)),
+                            )
+                        )
+                if include_identity_records:
+                    return rows, warnings, tuple(identity_records)
+                return rows, warnings
             balance_observations = _pdf_balance_observations(cached_pdf, pdf_settings)
             if pdf_settings.get("word_rows") == "sectioned":
                 source_rows = _pdf_sectioned_word_source_rows(
@@ -1898,6 +1952,10 @@ def _import_pdf(
                             source_row = _apply_pdf_row_regex(source_row, pdf_settings)
                             if source_row is None:
                                 continue
+                            if mox_period is not None:
+                                source_row = resolve_mox_source_dates(
+                                    source_row, mox_period
+                                )
                             normalized = _normalized_row(
                                 source_row=source_row,
                                 row_number=row_number,
@@ -1929,6 +1987,12 @@ def _import_pdf(
                                     )
                                 )
     _attach_pdf_balances(rows, balance_observations)
+    if pdf_settings.get("mox_statement") == "credit" and rows:
+        closing_balance = mox_credit_closing_balance(page_lines)
+        if closing_balance:
+            rows[-1]["statement_closing_balance"] = _format_decimal(
+                _strict_pdf_balance(closing_balance)
+            )
     if pdf_settings.get("word_rows_only", False) and not rows:
         warnings.append(f"No word transaction table found in {pdf_path.name}")
     if include_identity_records:
