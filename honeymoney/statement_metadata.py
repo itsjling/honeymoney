@@ -125,7 +125,6 @@ def extract_statement_metadata(page_texts: Iterable[str]) -> StatementMetadata:
                 observations[field].append((value, page_number))
 
     result = empty_statement_metadata()
-    evidence_page_sets: list[set[int]] = []
     for field in ("statement_date", "period_start", "period_end"):
         field_observations = observations[field]
         distinct_values = {value for value, _page in field_observations}
@@ -137,9 +136,6 @@ def extract_statement_metadata(page_texts: Iterable[str]) -> StatementMetadata:
                 result["period_start"] = value
             else:
                 result["period_end"] = value
-            evidence_page_sets.append(
-                {page for observed, page in field_observations if observed == value}
-            )
 
     start = result["period_start"]
     end = result["period_end"]
@@ -156,6 +152,11 @@ def extract_statement_metadata(page_texts: Iterable[str]) -> StatementMetadata:
             result["period_end"],
         )
     ):
+        evidence_page_sets = [
+            {page for observed, page in observations[field] if observed == value}
+            for field, value in result.items()
+            if field != "source_page" and value is not None
+        ]
         common_pages = set.intersection(*evidence_page_sets)
         if common_pages:
             result["source_page"] = min(common_pages)
@@ -242,11 +243,12 @@ def _mox_bank_observations(text: str) -> list[dict[str, str]]:
         return []
 
     compact = text.replace("\n", " ")
-    range_match = re.search(_RANGE_4, compact, flags=re.IGNORECASE)
-    if range_match is None:
-        return []
-    period = _period_values(range_match)
-    if period is None:
+    periods = [
+        period
+        for match in re.finditer(_RANGE_4, compact, flags=re.IGNORECASE)
+        if (period := _period_values(match)) is not None
+    ]
+    if not periods:
         return []
 
     direct_date = re.search(
@@ -266,10 +268,9 @@ def _mox_bank_observations(text: str) -> list[dict[str, str]]:
         if headers_then_values is not None:
             statement_date = _parse_printed_date(headers_then_values.group("date"))
 
-    values = dict(period)
     if statement_date is not None:
-        values["statement_date"] = statement_date.isoformat()
-    return [values]
+        periods.append({"statement_date": statement_date.isoformat()})
+    return periods
 
 
 def _mox_credit_observations(text: str) -> list[dict[str, str]]:
@@ -279,11 +280,11 @@ def _mox_credit_observations(text: str) -> list[dict[str, str]]:
     )
     if title is None:
         return []
-    range_match = re.search(_RANGE_4, text[title.end() :], flags=re.IGNORECASE)
-    if range_match is None:
-        return []
-    period = _period_values(range_match)
-    return [period] if period is not None else []
+    return [
+        period
+        for match in re.finditer(_RANGE_4, text[title.end() :], flags=re.IGNORECASE)
+        if (period := _period_values(match)) is not None
+    ]
 
 
 def _period_values(match: re.Match[str]) -> dict[str, str] | None:

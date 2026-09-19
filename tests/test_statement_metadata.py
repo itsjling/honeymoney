@@ -121,6 +121,36 @@ class StatementMetadataExtractionTest(unittest.TestCase):
         self.assertEqual(metadata["period_start"], "2026-07-17")
         self.assertIsNone(metadata["source_page"])
 
+    def test_conflicting_ranges_on_one_page_are_unknown(self) -> None:
+        for header in (
+            "Mox Credit Card Statement",
+            "Mox Bank Statement\nStatement period\nStatement date: 17 August 2026",
+        ):
+            with self.subTest(header=header):
+                metadata = extract_statement_metadata(
+                    [header + "\n17 Jul 2026 - 16 Aug 2026\n17 Jul 2026 - 15 Aug 2026"]
+                )
+                self.assertIsNone(metadata["period_start"])
+                self.assertIsNone(metadata["period_end"])
+
+    def test_discarded_period_does_not_hide_statement_date_evidence(self) -> None:
+        metadata = extract_statement_metadata(
+            [
+                "Statement date: 17 August 2026",
+                "Mox Credit Card Statement\n17 Jul 2026 - 16 Aug 2026",
+                "Mox Credit Card Statement\n17 Jul 2026 - 15 Aug 2026",
+            ]
+        )
+        self.assertEqual(
+            metadata,
+            {
+                "statement_date": "2026-08-17",
+                "period_start": None,
+                "period_end": None,
+                "source_page": 1,
+            },
+        )
+
 
 class StatementMetadataCliTest(unittest.TestCase):
     def test_metadata_only_command_handles_an_unsupported_zero_row_pdf(self) -> None:
