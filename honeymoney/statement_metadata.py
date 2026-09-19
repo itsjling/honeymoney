@@ -180,7 +180,7 @@ def _page_observations(text: str) -> list[dict[str, str]]:
     _append_statement_dates(observations, direct_statement_dates)
 
     hsbc_page_dates = re.finditer(
-        rf"(?im)^.*\bPage\s+1\s+of\s+\d+\s*$\n"
+        rf"(?im)^[^\n]*\bHSBC\s+(?:One|Premier)\b[^\n]*\bPage\s+1\s+of\s+\d+\s*$\n"
         rf"(?:[^\n]*\n){{0,2}}[^\n]*?(?P<date>{_DATE_4})\s*$",
         text,
     )
@@ -243,9 +243,12 @@ def _mox_bank_observations(text: str) -> list[dict[str, str]]:
         return []
 
     compact = text.replace("\n", " ")
+    period_header = re.search(r"(?i)\bStatement\s+period\b", text)
+    assert period_header is not None
+    period_text = _period_header_text(text[period_header.end() :])
     periods = [
         period
-        for match in re.finditer(_RANGE_4, compact, flags=re.IGNORECASE)
+        for match in re.finditer(_RANGE_4, period_text, flags=re.IGNORECASE)
         if (period := _period_values(match)) is not None
     ]
     if not periods:
@@ -282,9 +285,24 @@ def _mox_credit_observations(text: str) -> list[dict[str, str]]:
         return []
     return [
         period
-        for match in re.finditer(_RANGE_4, text[title.end() :], flags=re.IGNORECASE)
+        for match in re.finditer(
+            _RANGE_4, _period_header_text(text[title.end() :]), flags=re.IGNORECASE
+        )
         if (period := _period_values(match)) is not None
     ]
+
+
+def _period_header_text(text: str) -> str:
+    lines: list[str] = []
+    for line in text.strip().splitlines():
+        if not re.match(
+            rf"(?i)^(?:{_DATE_4}|Statement\s+(?:date|period)\b|"
+            r"(?:Credit\s+Card\s+Statement|信用卡月結單)\s*$)",
+            line.strip(),
+        ):
+            break
+        lines.append(line)
+    return "\n".join(lines)
 
 
 def _period_values(match: re.Match[str]) -> dict[str, str] | None:

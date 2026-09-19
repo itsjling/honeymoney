@@ -151,6 +151,27 @@ class StatementMetadataExtractionTest(unittest.TestCase):
             },
         )
 
+    def test_non_hsbc_page_header_does_not_supply_issue_date(self) -> None:
+        metadata = extract_statement_metadata(
+            [
+                "Random issuer Page 1 of 1\nSynthetic name\nPayment due date 19 August 2026"
+            ]
+        )
+        self.assertIsNone(metadata["statement_date"])
+
+    def test_mox_period_ignores_ranges_outside_header(self) -> None:
+        for header in (
+            "Mox Credit Card Statement\n17 Jul 2026 - 16 Aug 2026",
+            "Mox Bank Statement\nStatement period Statement date\n"
+            "17 Jul 2026 - 16 Aug 2026 17 Aug 2026",
+        ):
+            with self.subTest(header=header):
+                metadata = extract_statement_metadata(
+                    [header + "\nPromotion\n01 Aug 2026 - 02 Aug 2026"]
+                )
+                self.assertEqual(metadata["period_start"], "2026-07-17")
+                self.assertEqual(metadata["period_end"], "2026-08-16")
+
 
 class StatementMetadataCliTest(unittest.TestCase):
     def test_metadata_only_command_handles_an_unsupported_zero_row_pdf(self) -> None:
