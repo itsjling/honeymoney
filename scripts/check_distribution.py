@@ -31,6 +31,8 @@ EXPECTED_BASE_RANGES = {
 }
 EXPECTED_BUNDLED_PROFILES = frozenset(
     {
+        "hang_seng_bank_pdf.json",
+        "hang_seng_credit_card_pdf.json",
         "hsbc_hk_credit_card_pdf.json",
         "hsbc_one_pdf.json",
         "mox_bank_pdf.json",

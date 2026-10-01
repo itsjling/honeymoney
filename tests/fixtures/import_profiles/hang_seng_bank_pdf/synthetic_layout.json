@@ -1,0 +1,92 @@
+[
+  [
+    [
+      414,
+      "Date :05 January 2027"
+    ]
+  ],
+  [
+    [
+      74,
+      "Date Transaction Details Deposit Withdrawal Balance in HKD"
+    ]
+  ],
+  [
+    [
+      74,
+      "01 Dec"
+    ],
+    [
+      108,
+      "B /F Balance"
+    ],
+    [
+      495,
+      "0.00"
+    ]
+  ],
+  [
+    [
+      74,
+      "31 Dec"
+    ],
+    [
+      108,
+      "SYNTHETIC TRANSFER"
+    ],
+    [
+      319,
+      "30.00"
+    ]
+  ],
+  [
+    [
+      108,
+      "REFERENCE ALPHA"
+    ]
+  ],
+  [
+    [
+      74,
+      "02 Jan"
+    ],
+    [
+      108,
+      "SYNTHETIC REPAYMENT"
+    ],
+    [
+      400,
+      "30.00"
+    ],
+    [
+      495,
+      "0.00"
+    ]
+  ],
+  [
+    [
+      108,
+      "REFERENCE BETA"
+    ]
+  ],
+  [
+    [
+      74,
+      "05 Jan"
+    ],
+    [
+      108,
+      "C/F Balance"
+    ],
+    [
+      495,
+      "0.00"
+    ]
+  ],
+  [
+    [
+      108,
+      "Transaction Summary"
+    ]
+  ]
+]

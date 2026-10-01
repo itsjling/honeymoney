@@ -257,6 +257,8 @@ class MoxCreditCardPdfProfileTest(unittest.TestCase):
 class AccountSemanticsTest(unittest.TestCase):
     def test_bundled_bank_and_card_profiles_declare_account_types(self) -> None:
         expected = {
+            "hang_seng_bank_pdf.json": "bank",
+            "hang_seng_credit_card_pdf.json": "credit_card",
             "hsbc_one_pdf.json": "bank",
             "hsbc_hk_credit_card_pdf.json": "credit_card",
             "mox_bank_pdf.json": "bank",
