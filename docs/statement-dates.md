@@ -54,6 +54,10 @@ transaction rows. The source page is present only when one page supports all
 returned fields. Mox credit-card ranges supply only the period. Honeymoney
 never copies a period end into `statement_date`.
 
+All matching header dates must agree. A Hang Seng card header must have both
+date cells in its value row to identify the closing date. A missing or unreadable
+closing-date cell leaves `statement_date` unknown.
+
 The per-source reports from `_import_transactions` also include both fields.
 Its failed and skipped reports use `null` and an empty page list.
 `parse_statement` raises on parse failure, as the existing preview does.

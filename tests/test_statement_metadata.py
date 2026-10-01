@@ -178,6 +178,98 @@ class StatementMetadataExtractionTest(unittest.TestCase):
         )
         self.assertIsNone(metadata["statement_date"])
 
+    def test_hsbc_header_does_not_use_split_payment_due_date(self) -> None:
+        for label in ("Payment due date", "Payment\ndue date"):
+            with self.subTest(label=label):
+                metadata = extract_statement_metadata(
+                    [f"HSBC One Page 1 of 1\n{label}\n19 August 2026"]
+                )
+
+                self.assertIsNone(metadata["statement_date"])
+                self.assertIsNone(metadata["source_page"])
+
+    def test_hsbc_issue_date_before_payment_due_date_is_preserved(self) -> None:
+        metadata = extract_statement_metadata(
+            ["HSBC One Page 1 of 1\n19 August 2026\nPayment due date\n7 September 2026"]
+        )
+
+        self.assertEqual(metadata["statement_date"], "2026-08-19")
+        self.assertEqual(metadata["source_page"], 1)
+
+    def test_hang_seng_missing_closing_date_does_not_use_payment_due_date(
+        self,
+    ) -> None:
+        for closing_date in ("--", "", "unreadable", "40 AUG 26"):
+            with self.subTest(closing_date=closing_date):
+                metadata = extract_statement_metadata(
+                    [
+                        "ACCOUNT NO. CREDIT LIMIT CLOSING DATE PAYMENT DUE DATE\n"
+                        f"123456789012 100,000.00 {closing_date} 7 SEP 26"
+                    ]
+                )
+
+                self.assertIsNone(metadata["statement_date"])
+                self.assertIsNone(metadata["source_page"])
+
+    def test_hang_seng_closing_date_uses_complete_header_value_row(self) -> None:
+        for closing_date in ("19 AUG 26", "19 August 2026"):
+            with self.subTest(closing_date=closing_date):
+                metadata = extract_statement_metadata(
+                    [
+                        "ACCOUNT NO. CREDIT LIMIT CLOSING DATE PAYMENT DUE DATE\n"
+                        f"123456789012 100,000.00 {closing_date} 7 SEP 26"
+                    ]
+                )
+
+                self.assertEqual(metadata["statement_date"], "2026-08-19")
+                self.assertEqual(metadata["source_page"], 1)
+
+    def test_repeated_mox_headers_with_conflicting_statement_dates_are_unknown(
+        self,
+    ) -> None:
+        metadata = extract_statement_metadata(
+            [
+                "Mox Bank Statement\nStatement period Statement date\n"
+                "17 Jul 2026 - 16 Aug 2026 17 Aug 2026\n"
+                "Mox Bank Statement\nStatement period Statement date\n"
+                "17 Jul 2026 - 16 Aug 2026 18 Aug 2026"
+            ]
+        )
+
+        self.assertEqual(
+            metadata,
+            {
+                "statement_date": None,
+                "period_start": "2026-07-17",
+                "period_end": "2026-08-16",
+                "source_page": 1,
+            },
+        )
+
+    def test_repeated_mox_headers_with_matching_statement_dates_agree(self) -> None:
+        header = (
+            "Mox Bank Statement\nStatement period Statement date\n"
+            "17 Jul 2026 - 16 Aug 2026 17 Aug 2026"
+        )
+        metadata = extract_statement_metadata([f"{header}\n{header}"])
+
+        self.assertEqual(metadata["statement_date"], "2026-08-17")
+        self.assertEqual(metadata["source_page"], 1)
+
+    def test_mox_direct_date_does_not_hide_conflicting_column_date(self) -> None:
+        metadata = extract_statement_metadata(
+            [
+                "Mox Bank Statement\nStatement date: 17 August 2026\n"
+                "Statement period Statement date\n"
+                "17 Jul 2026 - 16 Aug 2026 18 Aug 2026"
+            ]
+        )
+
+        self.assertIsNone(metadata["statement_date"])
+        self.assertEqual(metadata["period_start"], "2026-07-17")
+        self.assertEqual(metadata["period_end"], "2026-08-16")
+        self.assertEqual(metadata["source_page"], 1)
+
     def test_explicit_statement_date_label_supports_other_issuers(self) -> None:
         metadata = extract_statement_metadata(
             ["Random issuer\nStatement date: 17 August 2026"]
@@ -187,6 +279,52 @@ class StatementMetadataExtractionTest(unittest.TestCase):
 
 
 class StatementMetadataCliTest(unittest.TestCase):
+    def test_metadata_only_command_rejects_untrusted_header_dates(self) -> None:
+        cases = {
+            "hsbc_split_payment_label": (
+                ("HSBC One Page 1 of 1", "Payment due date", "19 August 2026"),
+                (None, None, None, None),
+            ),
+            "hang_seng_missing_closing_date": (
+                (
+                    "ACCOUNT NO. CREDIT LIMIT CLOSING DATE PAYMENT DUE DATE",
+                    "123456789012 100,000.00 -- 7 SEP 26",
+                ),
+                (None, None, None, None),
+            ),
+            "mox_conflicting_statement_dates": (
+                (
+                    "Mox Bank Statement",
+                    "Statement period Statement date",
+                    "17 Jul 2026 - 16 Aug 2026 17 Aug 2026",
+                    "Mox Bank Statement",
+                    "Statement period Statement date",
+                    "17 Jul 2026 - 16 Aug 2026 18 Aug 2026",
+                ),
+                (None, "2026-07-17", "2026-08-16", 1),
+            ),
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary) / "statement.pdf"
+            for name, (lines, expected) in cases.items():
+                with self.subTest(case=name):
+                    source.write_bytes(_synthetic_text_pdf(*lines))
+                    with redirect_stdout(io.StringIO()) as output:
+                        code = cli.main(["statement-metadata", str(source), "--json"])
+
+                    self.assertEqual(code, 0)
+                    payload = json.loads(output.getvalue())
+                    metadata = payload["data"]["statement_metadata"]
+                    self.assertEqual(
+                        (
+                            metadata["statement_date"],
+                            metadata["period_start"],
+                            metadata["period_end"],
+                            metadata["source_page"],
+                        ),
+                        expected,
+                    )
+
     def test_metadata_only_command_handles_an_unsupported_zero_row_pdf(self) -> None:
         pdf_bytes = _synthetic_text_pdf(
             "Consolidated statement for savings account",

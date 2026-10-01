@@ -181,8 +181,8 @@ def _page_observations(text: str) -> list[dict[str, str]]:
 
     hsbc_page_dates = re.finditer(
         rf"(?im)^[^\n]*\bHSBC\s+(?:One|Premier)\b[^\n]*\bPage\s+1\s+of\s+\d+\s*$\n"
-        rf"(?:[^\n]*\n){{0,2}}(?![^\n]*\b(?:payment|due)\b)"
-        rf"[^\n]*?(?P<date>{_DATE_4})\s*$",
+        rf"(?:(?![^\n]*\b(?:payment|due)\b)[^\n]*\n){{0,2}}"
+        rf"(?![^\n]*\b(?:payment|due)\b)[^\n]*?(?P<date>{_DATE_4})\s*$",
         text,
     )
     _append_statement_dates(observations, hsbc_page_dates)
@@ -195,8 +195,10 @@ def _page_observations(text: str) -> list[dict[str, str]]:
     _append_statement_dates(observations, hsbc_card_dates)
 
     hang_seng_card_dates = re.finditer(
-        rf"(?is)\bACCOUNT\s+NO\.?\s+CREDIT\s+LIMIT\s+CLOSING\s+DATE\s+"
-        rf"PAYMENT\s+DUE\s+DATE\b.{{0,240}}?(?P<date>{_NAMED_DATE_2}|{_DATE_4})",
+        rf"(?im)^ACCOUNT\s+NO\.?\s+CREDIT\s+LIMIT\s+CLOSING\s+DATE\s+"
+        rf"PAYMENT\s+DUE\s+DATE[ \t]*$\n[^\n]*?"
+        rf"(?P<date>{_NAMED_DATE_2}|{_DATE_4})[ \t]+"
+        rf"(?:{_NAMED_DATE_2}|{_DATE_4})[ \t]*$",
         text,
     )
     _append_statement_dates(observations, hang_seng_card_dates, allow_two_digit=True)
@@ -243,38 +245,21 @@ def _mox_bank_observations(text: str) -> list[dict[str, str]]:
     ):
         return []
 
-    compact = text.replace("\n", " ")
-    period_header = re.search(r"(?i)\bStatement\s+period\b", text)
-    assert period_header is not None
-    period_text = _period_header_text(text[period_header.end() :])
-    periods = [
-        period
-        for match in re.finditer(_RANGE_4, period_text, flags=re.IGNORECASE)
-        if (period := _period_values(match)) is not None
-    ]
-    if not periods:
-        return []
-
-    direct_date = re.search(
-        rf"(?im)^Statement\s+date\s*:?\s*(?P<date>{_DATE_4})\s*$", text
-    )
-    statement_date = (
-        _parse_printed_date(direct_date.group("date"))
-        if direct_date is not None
-        else None
-    )
-    if statement_date is None:
-        headers_then_values = re.search(
+    observations: list[dict[str, str]] = []
+    for period_header in re.finditer(r"(?i)\bStatement\s+period\b", text):
+        header_text = _period_header_text(text[period_header.start() :])
+        observations.extend(
+            period
+            for match in re.finditer(_RANGE_4, header_text, flags=re.IGNORECASE)
+            if (period := _period_values(match)) is not None
+        )
+        headers_then_values = re.finditer(
             rf"(?is)Statement\s+period\s+Statement\s+date\s+{_RANGE_4}"
             rf"\s+(?P<date>{_DATE_4})",
-            compact,
+            header_text,
         )
-        if headers_then_values is not None:
-            statement_date = _parse_printed_date(headers_then_values.group("date"))
-
-    if statement_date is not None:
-        periods.append({"statement_date": statement_date.isoformat()})
-    return periods
+        _append_statement_dates(observations, headers_then_values)
+    return observations
 
 
 def _mox_credit_observations(text: str) -> list[dict[str, str]]:
