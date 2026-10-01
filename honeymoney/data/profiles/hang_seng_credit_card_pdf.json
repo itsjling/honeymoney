@@ -1,0 +1,26 @@
+{
+  "id": "hang_seng_credit_card_pdf",
+  "account_id": "hang_seng_credit_card",
+  "account": "Hang Seng enJoy Credit Card",
+  "account_type": "credit_card",
+  "institution": "Hang Seng Bank",
+  "country": "HK",
+  "account_currency": "HKD",
+  "owner": "Household",
+  "payment_method": "Credit Card",
+  "date_formats": [
+    "%Y-%m-%d"
+  ],
+  "pdf": {
+    "parser": "pdfplumber",
+    "word_rows": "hang_seng_credit_card",
+    "columns": {
+      "transaction_date": "Date",
+      "description": "Description",
+      "amount": "Amount",
+      "statement_opening_balance": "Opening",
+      "statement_closing_balance": "Closing",
+      "posting_date": "Posting"
+    }
+  }
+}

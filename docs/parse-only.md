@@ -14,11 +14,16 @@ Choose one bundled profile:
 
 | Profile ID | Input |
 | --- | --- |
+| `hang_seng_bank_pdf` | Hang Seng ATM Savings PDF |
+| `hang_seng_credit_card_pdf` | Hang Seng enJoy credit card PDF |
 | `hsbc_one_pdf` | HSBC One PDF |
 | `hsbc_hk_credit_card_pdf` | HSBC HK credit card PDF |
 | `mox_bank_pdf` | Mox bank PDF |
 | `mox_credit_card_pdf` | Mox credit card PDF |
 | `mox_credit_card` | Mox credit card CSV |
+
+The Hang Seng profiles support the tested layouts described in the
+[golden dataset guide](golden-datasets.md).
 
 The command does not select a profile or load a local profile for you. It
 rejects a profile that does not support the input type. A profile describes a
