@@ -72,7 +72,7 @@ ADAPTER_VERSIONS = {
     1: "csv-v1",
     2: "pdf-table-v1",
     3: "pdf-word-v1",
-    4: "pdf-sectioned-v1",
+    4: "pdf-sectioned-v2",
 }
 
 
