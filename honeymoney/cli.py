@@ -29,6 +29,7 @@ from honeymoney.parser_contracts import Profile
 from honeymoney.periods import PeriodSelection, resolve_period_selection
 from honeymoney.rate_fetch import fetch_hkma_daily_rates, prepare_hkma_fetch
 from honeymoney.rates import parse_hkma_daily_document
+from honeymoney.statement_metadata import statement_metadata_document
 from honeymoney.workspace_commands import (
     CommandResult,
     apply_workspace_config,
@@ -89,6 +90,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _setup_command(tail)
     if command == "parse":
         return _parse_command(tail)
+    if command == "statement-metadata":
+        return _statement_metadata_command(tail)
     if command == "import":
         return _import_command(tail)
     if command == "imports":
@@ -178,6 +181,26 @@ def _parse_command(argv: list[str]) -> int:
         assert isinstance(rows, list)
         print(f"Parsed {len(rows)} statement rows. No records were saved.")
         print("Use --json for source facts, warnings, and statement balance checks.")
+    return 0
+
+
+def _statement_metadata_command(argv: list[str]) -> int:
+    parser = _parser(
+        "honeymoney statement-metadata",
+        "Read explicit dates from one statement without a parser profile.",
+    )
+    parser.add_argument("path")
+    parser.add_argument("--json", action="store_true")
+    try:
+        args = parser.parse_args(argv)
+    except CliUsageError:
+        raise CliUsageError("Invalid statement-metadata command arguments") from None
+    data = statement_metadata_document(Path(_clean_pasted_path(args.path)).expanduser())
+    if args.json:
+        _emit_json("statement-metadata", "success", data=data)
+    else:
+        print("Read statement metadata. No records were saved.")
+        print("Use --json to show the dates and source page.")
     return 0
 
 
@@ -1314,13 +1337,14 @@ def _error_command(argv: Sequence[str]) -> str:
 
 
 def _help_text() -> str:
-    return """Honeymoney 0.2.0
+    return """Honeymoney 0.2.4
 
 Local, clean-start household statement storage and monthly views.
 
 Commands:
   honeymoney setup [--root DIR]
   honeymoney parse PATH --profile PROFILE_ID [--json]
+  honeymoney statement-metadata PATH [--json]
   honeymoney import PATH [--replace | --reset] [--binding ID]
   honeymoney imports list
   honeymoney imports show SOURCE_ID
