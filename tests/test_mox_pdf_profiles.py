@@ -231,6 +231,107 @@ class MoxBankPdfSectionsTest(unittest.TestCase):
             rows[0]["original_description"], "ACTIVITY SETTLEMENT AMOUNT (USD)"
         )
 
+    def test_wrapped_principal_descriptions_complete_the_pending_row(self) -> None:
+        reference = "100000000004"
+        rows, warnings = _import_pdf_case(
+            load_profile("mox_bank_pdf.json"),
+            tables=[],
+            words_pages=[
+                _words(
+                    "Statement Period: 01 Aug 2026 - 31 Aug 2026",
+                    "USD Mox Account transaction details",
+                    "Activity Settlement Description Corresponding amount (USD)",
+                    "01 Aug 01 Aug Opening balance 200.00",
+                    "02 Aug 02 Aug",
+                    "Time Deposit -80.00",
+                    "31 Aug 31 Aug Closing balance 120.00",
+                    f"Time Deposit - {reference}",
+                    "Principal Amount: 80.00 USD",
+                    "Activity Settlement Description Corresponding amount (USD)",
+                    "01 Aug 01 Aug Opening balance 0.00",
+                    "02 Aug 02 Aug",
+                    "USD Mox Account +80.00",
+                    "31 Aug 31 Aug Closing balance 80.00",
+                )
+            ],
+        )
+
+        self.assertEqual(warnings, [])
+        self.assertEqual(
+            [row["original_description"] for row in rows],
+            ["Time Deposit", "USD Mox Account"],
+        )
+        self.assertEqual([row["posted_amount"] for row in rows], ["-80.00", "80.00"])
+        self.assertEqual(
+            [row["account_id"] for row in rows],
+            ["mox_bank_usd", _time_deposit_account_id(reference)],
+        )
+        self.assertEqual([row["posted_currency"] for row in rows], ["USD", "USD"])
+        self.assertEqual([row["source_page"] for row in rows], ["1", "1"])
+        self.assertEqual([row["source_row"] for row in rows], ["5", "12"])
+        self.assertEqual(rows[0]["statement_opening_balance"], "200.00")
+        self.assertEqual(rows[0]["statement_closing_balance"], "120.00")
+        self.assertEqual(rows[1]["statement_opening_balance"], "0.00")
+        self.assertEqual(rows[1]["statement_closing_balance"], "80.00")
+
+    def test_skipped_endpoint_activity_preserves_each_sections_balances(self) -> None:
+        cases = (
+            (["FIRST"], ["MIDDLE", "LAST"]),
+            (["LAST"], ["FIRST", "MIDDLE"]),
+            (["FIRST", "LAST"], ["MIDDLE"]),
+            (["FIRST", "MIDDLE", "LAST"], []),
+        )
+        for skipped, surviving in cases:
+            with self.subTest(skipped=skipped):
+                profile = load_profile("mox_bank_pdf.json")
+                profile["skip_descriptions"] = skipped
+                rows, warnings = _import_pdf_case(
+                    profile,
+                    tables=[],
+                    words_pages=[
+                        _words(
+                            "Statement Period: 01 Aug 2026 - 31 Aug 2026",
+                            "HKD Mox Account transaction details",
+                            "Activity Settlement Description Amount (HKD)",
+                            "01 Aug 01 Aug Opening balance 100.00",
+                            "02 Aug 02 Aug SYNTHETIC FIRST +1.00",
+                            "03 Aug 03 Aug SYNTHETIC MIDDLE +2.00",
+                            "04 Aug 04 Aug SYNTHETIC LAST +3.00",
+                            "31 Aug 31 Aug Closing balance 106.00",
+                            "USD Mox Account transaction details",
+                            "Activity Settlement Description Amount (USD)",
+                            "01 Aug 01 Aug Opening balance 200.00",
+                            "02 Aug 02 Aug SYNTHETIC FIRST +1.00",
+                            "03 Aug 03 Aug SYNTHETIC MIDDLE +2.00",
+                            "04 Aug 04 Aug SYNTHETIC LAST +3.00",
+                            "31 Aug 31 Aug Closing balance 206.00",
+                        )
+                    ],
+                )
+
+                self.assertEqual(warnings, [])
+                self.assertEqual(len(rows), len(surviving) * 2)
+                for account_id, opening, closing in (
+                    ("mox_bank_main", "100.00", "106.00"),
+                    ("mox_bank_usd", "200.00", "206.00"),
+                ):
+                    account_rows = [
+                        row for row in rows if row["account_id"] == account_id
+                    ]
+                    self.assertEqual(
+                        [row["original_description"] for row in account_rows],
+                        [f"SYNTHETIC {name}" for name in surviving],
+                    )
+                    if account_rows:
+                        self.assertEqual(
+                            [row["statement_opening_balance"] for row in account_rows],
+                            [opening] + [""] * (len(account_rows) - 1),
+                        )
+                        self.assertEqual(
+                            [row["statement_closing_balance"] for row in account_rows],
+                            [""] * (len(account_rows) - 1) + [closing],
+                        )
+
     def test_unknown_or_malformed_section_fails_closed(self) -> None:
         cases = (
             "EUR Mox Account transaction details",
@@ -294,6 +395,71 @@ class MoxBankPdfSectionsTest(unittest.TestCase):
 
 
 class MoxCreditCardPdfPeriodTest(unittest.TestCase):
+    def test_conflicting_closing_balances_fail_explicitly(self) -> None:
+        cases = (
+            [
+                _words(
+                    "Statement Period: 01 Jan 2026 - 31 Jan 2026",
+                    "20.00 HKD",
+                    "Statement Balance",
+                    "30.00 HKD",
+                    "Statement Balance",
+                )
+            ],
+            [
+                _words(
+                    "Statement Period: 01 Jan 2026 - 31 Jan 2026",
+                    "20.00 HKD Statement Balance",
+                ),
+                _words("30.00 HKD Statement Balance"),
+            ],
+        )
+        for words_pages in cases:
+            for transaction in (
+                "02 Jan 02 Jan SYNTHETIC PURCHASE -20.00",
+                "Activity date Settlement date Description Amount (HKD)",
+            ):
+                with (
+                    self.subTest(words_pages=words_pages, transaction=transaction),
+                    self.assertRaisesRegex(
+                        ValueError, "Mox statement balances conflict"
+                    ),
+                ):
+                    _import_pdf_case(
+                        load_profile("mox_credit_card_pdf.json"),
+                        tables=[
+                            [[[transaction]]],
+                            [
+                                [
+                                    [
+                                        "Activity date Settlement date Description "
+                                        "Amount (HKD)"
+                                    ]
+                                ]
+                            ],
+                        ][: len(words_pages)],
+                        words_pages=words_pages,
+                    )
+
+    def test_equal_closing_balances_with_distinct_formats_are_not_conflicts(
+        self,
+    ) -> None:
+        rows, warnings = _import_pdf_case(
+            load_profile("mox_credit_card_pdf.json"),
+            tables=[[[["02 Jan 02 Jan SYNTHETIC PURCHASE -20.00"]]]],
+            words_pages=[
+                _words(
+                    "Statement Period: 01 Jan 2026 - 31 Jan 2026",
+                    "1,000.00 HKD Statement Balance",
+                    "1000.00 HKD",
+                    "Statement Balance",
+                ),
+            ],
+        )
+
+        self.assertEqual(warnings, [])
+        self.assertEqual(rows[-1]["statement_closing_balance"], "1000.00")
+
     def test_cross_year_dates_and_balance_before_label_use_printed_facts(self) -> None:
         rows, warnings = _import_pdf_case(
             load_profile("mox_credit_card_pdf.json"),

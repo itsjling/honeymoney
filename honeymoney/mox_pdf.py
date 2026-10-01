@@ -161,18 +161,18 @@ def mox_bank_source_rows(
             )
             pending_header_boundary = activity_header and "amount" in folded_text
             pending_completed = False
-            if (
-                pending_row
-                and not transaction_line
-                and _BANK_ACCOUNT_HEADING.match(text) is None
-                and _ANY_BANK_ACCOUNT_HEADING.match(text) is None
-                and _ANY_TIME_DEPOSIT_HEADING.match(text) is None
-                and not pending_header_boundary
-            ):
-                pending_row = f"{pending_row} {text}"
-                if _TRANSACTION_ROW.match(pending_row) is None:
+            if pending_row and not transaction_line:
+                continued_row = f"{pending_row} {text}"
+                if _TRANSACTION_ROW.match(continued_row) is not None:
+                    pending_row = continued_row
+                    pending_completed = True
+                elif (
+                    _ANY_BANK_ACCOUNT_HEADING.match(text) is None
+                    and _ANY_TIME_DEPOSIT_HEADING.match(text) is None
+                    and not pending_header_boundary
+                ):
+                    pending_row = continued_row
                     continue
-                pending_completed = True
             account_match = (
                 None if pending_completed else _BANK_ACCOUNT_HEADING.match(text)
             )
@@ -314,7 +314,7 @@ def mox_bank_source_rows(
 
 
 def mox_credit_closing_balance(page_lines: PdfPageLines) -> str:
-    candidates: set[str] = set()
+    candidates: set[Decimal] = set()
     for lines in page_lines:
         for index, line in enumerate(lines):
             text = _line_text(line)
@@ -325,14 +325,16 @@ def mox_credit_closing_balance(page_lines: PdfPageLines) -> str:
                 flags=re.IGNORECASE,
             )
             if same_line is not None:
-                candidates.add(same_line.group("balance"))
+                candidates.add(Decimal(same_line.group("balance").replace(",", "")))
                 continue
             if _STATEMENT_BALANCE_LABEL.match(text) is None or index == 0:
                 continue
             prior = _SUMMARY_AMOUNT.match(_line_text(lines[index - 1]))
             if prior is not None:
-                candidates.add(prior.group("balance"))
-    return next(iter(candidates)) if len(candidates) == 1 else ""
+                candidates.add(Decimal(prior.group("balance").replace(",", "")))
+    if len(candidates) > 1:
+        raise ValueError("Mox statement balances conflict")
+    return str(next(iter(candidates))) if candidates else ""
 
 
 def _period_matches(

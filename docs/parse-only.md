@@ -97,6 +97,12 @@ current row-based contract cannot report a separate balance check for a dormant
 Time Deposit that has opening and closing balances but no nonzero activity. The
 parser does not make up a zero-value row for that section.
 
+Custom Mox bank `skip_descriptions` rules remove activity rows but keep printed
+section balances on the first and last surviving rows. If no row survives in a
+section, the parser does not add a row to carry its balances. The Mox credit parser
+rejects distinct printed closing balances, even when no activity survives.
+Repeated summaries with the same numeric balance remain valid.
+
 A custom PDF profile with `mox_statement: "bank"` must use the same complete
 column map as the bundled profile:
 

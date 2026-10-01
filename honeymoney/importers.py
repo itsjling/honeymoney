@@ -1811,6 +1811,7 @@ def _import_pdf(
                 mox_period = mox_statement_period(page_lines)
             if mox_kind == "bank":
                 source_rows = mox_bank_source_rows(page_lines, mox_period)
+                balance_observations = _PdfBalanceObservations()
                 for source_row, page_number, row_number in source_rows:
                     normalized = _normalized_row(
                         source_row=source_row,
@@ -1821,6 +1822,17 @@ def _import_pdf(
                         source_file=_relative_source(pdf_path, input_root),
                         source_page=str(page_number),
                     )
+                    balance_target = (
+                        normalized["account_id"],
+                        normalized["statement_section"],
+                        normalized["posted_currency"].upper(),
+                    )
+                    for kind in ("opening", "closing"):
+                        balance = normalized[f"statement_{kind}_balance"]
+                        if balance:
+                            balance_observations.setdefault(
+                                balance_target, {"opening": [], "closing": []}
+                            )[kind].append(_strict_pdf_balance(balance))
                     if value_rows:
                         value_transaction(normalized, config)
                     if _row_is_skipped(normalized, skip_patterns):
@@ -1834,6 +1846,7 @@ def _import_pdf(
                                 AllocationLocator(5, (page_number, row_number)),
                             )
                         )
+                _attach_pdf_balances(rows, balance_observations)
                 if include_identity_records:
                     return rows, warnings, tuple(identity_records)
                 return rows, warnings
@@ -2008,9 +2021,9 @@ def _import_pdf(
                                     )
                                 )
     _attach_pdf_balances(rows, balance_observations)
-    if pdf_settings.get("mox_statement") == "credit" and rows:
+    if pdf_settings.get("mox_statement") == "credit":
         closing_balance = mox_credit_closing_balance(page_lines)
-        if closing_balance:
+        if closing_balance and rows:
             rows[-1]["statement_closing_balance"] = _format_decimal(
                 _strict_pdf_balance(closing_balance)
             )
