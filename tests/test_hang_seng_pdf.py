@@ -34,12 +34,13 @@ def pages(lines):
     return [[[Word(text, x) for x, text in line] for line in lines]]
 
 
-def pdf_bytes(lines):
+def pdf_bytes(lines, *additional_pages):
     with pymupdf.open() as document:
-        page = document.new_page(width=612, height=792)
-        for index, line in enumerate(lines):
-            for x, text in line:
-                page.insert_text((x, 30 + index * 14), text, fontsize=5)
+        for page_lines in (lines, *additional_pages):
+            page = document.new_page(width=612, height=792)
+            for index, line in enumerate(page_lines):
+                for x, text in line:
+                    page.insert_text((x, 30 + index * 14), text, fontsize=5)
         return document.tobytes()
 
 
@@ -629,6 +630,79 @@ class HangSengPdfTest(unittest.TestCase):
             with self.subTest(reader=reader.__name__):
                 with self.assertRaisesRegex(ValueError, "continuation page"):
                     reader(statement_pages)
+
+    def test_wrapped_description_before_a_continuation_header_fails(self):
+        bank = layout("bank")
+        card = layout("credit_card")
+        cases = (
+            (
+                bank_rows,
+                pages(bank[:4]) + pages([bank[4], bank[1]] + bank[5:]),
+            ),
+            (
+                card_rows,
+                pages(card[:5]) + pages([card[5], card[2]] + card[6:]),
+            ),
+        )
+
+        for reader, statement_pages in cases:
+            with self.subTest(reader=reader.__name__):
+                with self.assertRaisesRegex(ValueError, "continuation page"):
+                    reader(statement_pages)
+
+    def test_cli_parse_rejects_wrapped_text_before_a_continuation_header(self):
+        for kind, split, header in (("bank", 4, 1), ("credit_card", 5, 2)):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                source = root / "synthetic-late-header.pdf"
+                lines = layout(kind)
+                source.write_bytes(
+                    pdf_bytes(
+                        lines[:split],
+                        [lines[split], lines[header]] + lines[split + 1 :],
+                    )
+                )
+
+                parsed = self._run(
+                    "parse",
+                    str(source),
+                    "--profile",
+                    f"hang_seng_{kind}_pdf",
+                    "--json",
+                )
+
+                self.assertEqual(parsed.returncode, 2, parsed.stdout)
+                self.assertEqual(
+                    json.loads(parsed.stdout)["errors"][0]["code"], "parse_failed"
+                )
+                self.assertEqual(list(root.iterdir()), [source])
+
+    def test_continuation_metadata_preserves_pending_wrapped_description(self):
+        bank = layout("bank")
+        card = layout("credit_card")
+        metadata = [[10, "Synthetic page metadata"]]
+        cases = (
+            (
+                bank_rows,
+                pages(bank[:4]) + pages([metadata, bank[0], bank[1]] + bank[4:]),
+                "SYNTHETIC TRANSFER REFERENCE ALPHA",
+                (1, 4),
+            ),
+            (
+                card_rows,
+                pages(card[:5]) + pages([metadata] + card[:3] + card[5:]),
+                "SYNTHETIC SHOP REFERENCE ALPHA",
+                (1, 5),
+            ),
+        )
+
+        for reader, statement_pages, description, locator in cases:
+            with self.subTest(reader=reader.__name__):
+                result = reader(statement_pages)
+                self.assertEqual(len(result), 2)
+                self.assertEqual(result[0][0]["Description"], description)
+                self.assertEqual(result[0][1:], locator)
+                self.assertEqual(result[0][0]["Closing"], "0.00")
 
     def test_continuation_allows_metadata_before_the_repeated_header(self):
         bank = layout("bank")

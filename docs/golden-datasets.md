@@ -121,6 +121,12 @@ with a full-line, star-decorated `FINANCE CHARGE RATES` or
 table. Summary totals and notes may follow the heading, but a new table header,
 dated transaction row, or opening balance row must fail parsing.
 
+Both Hang Seng readers require a repeated table header before transaction or
+wrapped description text on a continuation page. Page metadata outside the
+description columns may precede it. The card reader also accepts its standalone
+`NEW BALANCE` label and value before the repeated header. Wrapped text after
+the header keeps the transaction's original page and row.
+
 Every profile is validated before statement rows are read. Keep stable account
 metadata, define exactly one of `csv` or `pdf`, map a transaction or posting
 date and exactly one amount strategy (`amount` or the `debit`/`credit` pair),
