@@ -429,9 +429,7 @@ class ParseCliTest(unittest.TestCase):
                 "One or more rows have missing or invalid dates.", result["warnings"]
             )
         result = parse_statement(PDF, "mox_credit_card_pdf")
-        self.assertTrue(
-            any("fixed year 2026" in warning for warning in result["warnings"])
-        )
+        self.assertFalse(any("fixed year" in warning for warning in result["warnings"]))
 
     def test_symlink_and_unknown_bundled_profile_are_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

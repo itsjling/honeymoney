@@ -13,11 +13,12 @@
       "amount_hkd": "36400.00",
       "account_id": "mox_bank_main",
       "account": "Mox Main",
+      "statement_section": "HKD Mox Account",
       "institution": "Mox",
       "payment_method": "Bank Account",
       "source_file": "statement.pdf",
       "source_page": "1",
-      "source_row": "2",
+      "source_row": "5",
       "notes": "Imported from PDF"
     },
     {
@@ -29,8 +30,9 @@
       "posted_amount": "2.50",
       "amount_hkd": "2.50",
       "account_id": "mox_bank_main",
+      "statement_section": "HKD Mox Account",
       "source_page": "1",
-      "source_row": "3"
+      "source_row": "6"
     },
     {
       "date": "2026-04-03",
@@ -41,8 +43,9 @@
       "posted_amount": "8.75",
       "amount_hkd": "8.75",
       "account_id": "mox_bank_main",
+      "statement_section": "HKD Mox Account",
       "source_page": "1",
-      "source_row": "4"
+      "source_row": "7"
     },
     {
       "date": "2026-04-04",
@@ -53,8 +56,9 @@
       "posted_amount": "-1234.50",
       "amount_hkd": "-1234.50",
       "account_id": "mox_bank_main",
+      "statement_section": "HKD Mox Account",
       "source_page": "1",
-      "source_row": "5"
+      "source_row": "8"
     },
     {
       "date": "2026-04-05",
@@ -66,8 +70,9 @@
       "statement_closing_balance": "45191.75",
       "amount_hkd": "15.00",
       "account_id": "mox_bank_main",
+      "statement_section": "HKD Mox Account",
       "source_page": "1",
-      "source_row": "6"
+      "source_row": "9"
     }
   ]
 }

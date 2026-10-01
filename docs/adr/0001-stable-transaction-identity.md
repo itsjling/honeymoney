@@ -479,7 +479,8 @@ reuse tokens accidentally. It is:
 ```
 
 `parser_adapter_version` is a non-empty ASCII source-code constant specific to
-the selected live adapter (`csv`, `pdf-table`, `pdf-word`, or `pdf-sectioned`).
+the selected live adapter (`csv`, `pdf-table`, `pdf-word`, `pdf-sectioned`, or
+`pdf-mox-statement`).
 It changes whenever that adapter's record extraction, splitting, or immutable-
 field normalization semantics change without a profile change.
 
@@ -627,15 +628,23 @@ adapter tuples are closed and exact:
 | PDF table | 2 | `(page, table, row, subrow)` |
 | PDF word | 3 | `(page, physical_line)` |
 | PDF sectioned | 4 | `(page, physical_line)` |
+| PDF Mox statement | 5 | `(page, physical_line)` |
+
+Tag 5 extends the closed locator set. It keeps the existing framing and leaves
+tags 1 through 4 unchanged. An older engine that knows only tags 1 through 4
+rejects a manifest containing tag 5; it must not rewrite or migrate that state.
+Tag 5 uses the `pdf-mox-statement-v1` parser adapter version.
 
 CSV `physical_row` is the one-based starting physical line of the CSV record,
 including header and skipped lines in the count. PDF `page` is the physical
 one-based page. PDF-table `table` is the one-based table returned on that page,
 `row` is the original one-based extracted table row including header rows, and
 `subrow` is one for an unsplit row or the one-based segment when one physical
-row is split into several transactions. PDF-word and PDF-sectioned
-`physical_line` are the original one-based reconstructed physical lines before
-filtering, section removal, continuation folding, or transaction selection.
+row is split into several transactions. PDF-word, PDF-sectioned, and PDF Mox
+statement `physical_line` values are the original one-based reconstructed
+physical lines before filtering, section removal, continuation folding, or
+transaction selection. For a Mox transaction folded from more than one line,
+the locator uses the first physical line of the transaction.
 
 Adapters must plumb these immutable extraction locators through normalization:
 the table adapter preserves table index and split subrow; word and sectioned

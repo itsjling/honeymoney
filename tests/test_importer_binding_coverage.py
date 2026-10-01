@@ -953,6 +953,8 @@ class ImporterCoverageTest(unittest.TestCase):
             self.assertEqual(importers._pdf_adapter_tag(word_profile), 3)
             word_profile["pdf"] = {"word_rows": "sectioned"}
             self.assertEqual(importers._pdf_adapter_tag(word_profile), 4)
+            word_profile["pdf"] = {"mox_statement": "bank"}
+            self.assertEqual(importers._pdf_adapter_tag(word_profile), 5)
             self.assertEqual(
                 importers._select_pdf_profile(
                     pdf_path, [], False, {}, None, lambda: None

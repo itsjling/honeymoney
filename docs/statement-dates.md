@@ -20,6 +20,11 @@ empty page list. CSV sources also return `null`.
 Transaction dates, payment due dates, filenames, and the default month
 or day used to resolve transaction years cannot supply this field.
 
+The Mox PDF profiles use the printed statement period to resolve yearless
+transaction and posting dates. They accept a transaction date up to 14 days
+before its posting date for the supported layouts. The statement period end is
+not the statement date and does not fill `statement_date`.
+
 PDF profiles define extraction in `pdf.statement_date`. The `regex` must
 capture a named `date` group, and `date_formats` lists the accepted complete
 date formats, with a day, month, and four-digit year (`%Y`). Match the printed

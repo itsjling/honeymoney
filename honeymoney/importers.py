@@ -23,6 +23,7 @@ from honeymoney.account_bindings import (
     matching_filename_mapping,
     validate_profile_mappings,
 )
+from honeymoney.hang_seng_pdf import Word, bank_rows, card_rows
 from honeymoney.identity import (
     AllocationLocator,
     IncomingRecordIdentity,
@@ -33,6 +34,13 @@ from honeymoney.identity import (
     source_id,
     source_namespace_id,
     source_revision,
+)
+from honeymoney.mox_pdf import (
+    MoxStatementPeriod,
+    mox_bank_source_rows,
+    mox_credit_closing_balance,
+    mox_statement_period,
+    resolve_mox_source_dates,
 )
 from honeymoney.normalization import (
     _append_flag,
@@ -58,12 +66,28 @@ MAX_PDF_INPUT_BYTES = 64 * 1024 * 1024
 MAX_PDF_PAGES = 500
 MAX_PDF_EXTRACTED_TEXT_CHARS = 20_000_000
 MAX_PDF_TRANSACTION_ROWS = 100_000
+_MOX_BANK_COLUMNS = {
+    "account": "account",
+    "account_id": "account_id",
+    "amount": "original_amount",
+    "description": "description",
+    "original_currency": "original_currency",
+    "posted_amount": "amount",
+    "posted_currency": "currency",
+    "posting_date": "posting_date",
+    "statement_closing_balance": "statement_closing_balance",
+    "statement_opening_balance": "statement_opening_balance",
+    "statement_section": "statement_section",
+    "transaction_date": "transaction_date",
+}
 
 
 @dataclass(frozen=True)
 class _PdfBalanceLine:
     text: str
     is_continuation: bool = False
+    x0: float | None = None
+    cell_index: int | None = None
 
 
 @dataclass(frozen=True)
@@ -582,6 +606,13 @@ def _validate_csv_profile(profile_id: str, settings: dict[str, Any]) -> None:
 def _validate_pdf_profile(profile_id: str, settings: dict[str, Any]) -> None:
     if "parser" in settings and settings.get("parser") != "pdfplumber":
         raise ValueError(f"Profile {profile_id} field pdf.parser must be pdfplumber")
+    mox_statement = settings.get("mox_statement")
+    if mox_statement is not None and (
+        not isinstance(mox_statement, str) or mox_statement not in {"bank", "credit"}
+    ):
+        raise ValueError(
+            f"Profile {profile_id} field pdf.mox_statement must be bank or credit"
+        )
     for field in ("has_header", "word_rows_only", "split_multiline_rows"):
         if field in settings and not isinstance(settings[field], bool):
             raise ValueError(
@@ -604,11 +635,17 @@ def _validate_pdf_profile(profile_id: str, settings: dict[str, Any]) -> None:
     if not (
         isinstance(word_rows, bool)
         or isinstance(word_rows, str)
-        and word_rows == "sectioned"
+        and word_rows in {"sectioned", "hang_seng_bank", "hang_seng_credit_card"}
     ):
         raise ValueError(
-            f"Profile {profile_id} field pdf.word_rows must be a boolean or sectioned"
+            f"Profile {profile_id} field pdf.word_rows must be a boolean, sectioned, "
+            "hang_seng_bank, or hang_seng_credit_card"
         )
+    if mox_statement == "bank":
+        if settings["columns"] != _MOX_BANK_COLUMNS:
+            raise ValueError(
+                f"Profile {profile_id} pdf.columns must match the Mox bank adapter contract"
+            )
     if word_rows is True:
         _validate_pdf_bounds_map(
             profile_id, "pdf.word_columns", settings.get("word_columns")
@@ -636,7 +673,21 @@ def _validate_pdf_profile(profile_id: str, settings: dict[str, Any]) -> None:
             )
     elif word_rows == "sectioned":
         _validate_sectioned_pdf_profile(profile_id, settings.get("sectioned_word_rows"))
-    elif compiled_row_regex is not None:
+    elif word_rows in {"hang_seng_bank", "hang_seng_credit_card"}:
+        available_sources = {"Date", "Description", "Amount", "Opening", "Closing"}
+        if word_rows == "hang_seng_credit_card":
+            available_sources.add("Posting")
+        missing_sources = sorted(
+            str(source)
+            for source in settings["columns"].values()
+            if source not in available_sources
+        )
+        if missing_sources:
+            raise ValueError(
+                f"Profile {profile_id} pdf.columns map unknown Hang Seng sources: "
+                + ", ".join(missing_sources)
+            )
+    elif compiled_row_regex is not None and mox_statement != "bank":
         join_fields = settings.get("join_fields", {})
         if not isinstance(join_fields, dict):
             raise ValueError(
@@ -1415,6 +1466,8 @@ def _identity_diagnostic_warning(diagnostic: Any) -> str:
 
 def _pdf_adapter_tag(profile: dict[str, Any]) -> int:
     pdf_settings = profile.get("pdf", {})
+    if pdf_settings.get("mox_statement") == "bank":
+        return 5
     if pdf_settings.get("word_rows") == "sectioned":
         return 4
     if pdf_settings.get("word_rows"):
@@ -1762,14 +1815,88 @@ def _import_pdf(
                 )
                 source_report["statement_date"] = statement_date
                 source_report["statement_date_source_pages"] = source_pages
+            mox_kind = pdf_settings.get("mox_statement")
+            page_lines: list[list[list[dict[str, Any]]]] = []
+            mox_period: MoxStatementPeriod | None = None
+            if mox_kind in {"bank", "credit"}:
+                page_lines = [
+                    _pdf_word_lines(
+                        page.extract_words(x_tolerance=1, y_tolerance=3) or [],
+                        float(pdf_settings.get("word_y_tolerance", 3)),
+                    )
+                    for page in cached_pdf.pages
+                ]
+                mox_period = mox_statement_period(page_lines)
+            if mox_kind == "bank":
+                source_rows = mox_bank_source_rows(page_lines, mox_period)
+                balance_observations = _PdfBalanceObservations()
+                for source_row, page_number, row_number in source_rows:
+                    normalized = _normalized_row(
+                        source_row=source_row,
+                        row_number=row_number,
+                        profile=profile,
+                        config=config,
+                        columns=columns,
+                        source_file=_relative_source(pdf_path, input_root),
+                        source_page=str(page_number),
+                    )
+                    balance_target = (
+                        normalized["account_id"],
+                        normalized["statement_section"],
+                        normalized["posted_currency"].upper(),
+                    )
+                    for kind in ("opening", "closing"):
+                        balance = normalized[f"statement_{kind}_balance"]
+                        if balance:
+                            balance_observations.setdefault(
+                                balance_target, {"opening": [], "closing": []}
+                            )[kind].append(_strict_pdf_balance(balance))
+                    if value_rows:
+                        value_transaction(normalized, config)
+                    if _row_is_skipped(normalized, skip_patterns):
+                        continue
+                    budget.record_transaction()
+                    rows.append(normalized)
+                    if include_identity_records:
+                        identity_records.append(
+                            IncomingRecordIdentity(
+                                normalized,
+                                AllocationLocator(5, (page_number, row_number)),
+                            )
+                        )
+                _attach_pdf_balances(rows, balance_observations)
+                if include_identity_records:
+                    return rows, warnings, tuple(identity_records)
+                return rows, warnings
             balance_observations = _pdf_balance_observations(cached_pdf, pdf_settings)
-            if pdf_settings.get("word_rows") == "sectioned":
+            hang_seng_reader = {
+                "hang_seng_bank": bank_rows,
+                "hang_seng_credit_card": card_rows,
+            }.get(pdf_settings.get("word_rows"))
+            if hang_seng_reader is not None:
+                pages = [
+                    [
+                        [
+                            Word(str(word.get("text", "")), float(word["x0"]))
+                            for word in line
+                        ]
+                        for line in _pdf_word_lines(
+                            page.extract_words(x_tolerance=1, y_tolerance=3) or [], 3
+                        )
+                    ]
+                    for page in cached_pdf.pages
+                ]
+                source_rows = hang_seng_reader(pages)
+            elif pdf_settings.get("word_rows") == "sectioned":
                 source_rows = _pdf_sectioned_word_source_rows(
                     cached_pdf,
                     pdf_path,
                     pdf_settings,
                     balance_observations=balance_observations,
                 )
+            else:
+                source_rows = None
+            if source_rows is not None:
                 for source_row, page_number, row_number in source_rows:
                     normalized = _normalized_row(
                         source_row=source_row,
@@ -1790,7 +1917,10 @@ def _import_pdf(
                         identity_records.append(
                             IncomingRecordIdentity(
                                 normalized,
-                                AllocationLocator(4, (page_number, row_number)),
+                                AllocationLocator(
+                                    _pdf_adapter_tag(profile),
+                                    (page_number, row_number),
+                                ),
                             )
                         )
                 _attach_pdf_balances(rows, balance_observations)
@@ -1898,6 +2028,10 @@ def _import_pdf(
                             source_row = _apply_pdf_row_regex(source_row, pdf_settings)
                             if source_row is None:
                                 continue
+                            if mox_period is not None:
+                                source_row = resolve_mox_source_dates(
+                                    source_row, mox_period
+                                )
                             normalized = _normalized_row(
                                 source_row=source_row,
                                 row_number=row_number,
@@ -1929,6 +2063,12 @@ def _import_pdf(
                                     )
                                 )
     _attach_pdf_balances(rows, balance_observations)
+    if pdf_settings.get("mox_statement") == "credit":
+        closing_balance = mox_credit_closing_balance(page_lines)
+        if closing_balance and rows:
+            rows[-1]["statement_closing_balance"] = _format_decimal(
+                _strict_pdf_balance(closing_balance)
+            )
     if pdf_settings.get("word_rows_only", False) and not rows:
         warnings.append(f"No word transaction table found in {pdf_path.name}")
     if include_identity_records:
@@ -2042,12 +2182,15 @@ def _pdf_balance_observations(
                 if matched_section:
                     current_section = matched_section
                     in_transaction_table = False
-                elif _pdf_balance_line_can_change_section(
-                    line,
-                    section_settings,
-                    in_transaction_table=in_transaction_table,
-                ) and _pdf_line_has_marker(
-                    folded, section_settings.get("section_end_markers", [])
+                elif _pdf_exact_section_end_heading(line, section_settings) or (
+                    _pdf_balance_line_can_change_section(
+                        line,
+                        section_settings,
+                        in_transaction_table=in_transaction_table,
+                    )
+                    and _pdf_line_has_marker(
+                        folded, section_settings.get("section_end_markers", [])
+                    )
                 ):
                     current_section = ""
                     in_transaction_table = False
@@ -2144,7 +2287,8 @@ def _pdf_balance_line_sources(
         words = page.extract_words(x_tolerance=1, y_tolerance=3) or []
         word_lines.extend(
             _PdfBalanceLine(
-                " ".join(str(word.get("text", "")) for word in line).strip()
+                " ".join(str(word.get("text", "")) for word in line).strip(),
+                x0=min(float(word.get("x0", 0)) for word in line),
             )
             for line in _pdf_word_lines(
                 words, float(pdf_settings.get("word_y_tolerance", 3))
@@ -2156,15 +2300,19 @@ def _pdf_balance_line_sources(
             cell_lines = [str(cell or "").splitlines() or [""] for cell in row]
             line_count = max((len(value) for value in cell_lines), default=0)
             for line_index in range(line_count):
-                line = " ".join(
-                    value[line_index].strip()
-                    for value in cell_lines
+                occupied_cells = [
+                    (index, value[line_index].strip())
+                    for index, value in enumerate(cell_lines)
                     if line_index < len(value) and value[line_index].strip()
-                )
-                if not line:
+                ]
+                if not occupied_cells:
                     continue
                 table_lines.append(
-                    _PdfBalanceLine(line, is_continuation=line_index > 0)
+                    _PdfBalanceLine(
+                        " ".join(value for _, value in occupied_cells),
+                        is_continuation=line_index > 0,
+                        cell_index=occupied_cells[0][0],
+                    )
                 )
     return {
         "words": [line for line in word_lines if line.text],
@@ -2342,6 +2490,25 @@ def _pdf_exact_section_heading(
             if normalized_text == " ".join(str(section).casefold().split())
         ),
         "",
+    )
+
+
+def _pdf_exact_section_end_heading(
+    line: _PdfBalanceLine, settings: dict[str, Any]
+) -> bool:
+    description_bounds = settings.get("columns", {}).get("description")
+    return bool(
+        (
+            line.cell_index == 0
+            or (
+                line.x0 is not None
+                and description_bounds
+                and line.x0 < float(description_bounds[0])
+            )
+        )
+        and _pdf_exact_section_heading(
+            line, dict.fromkeys(settings.get("section_end_markers", [])), settings
+        )
     )
 
 
@@ -2553,8 +2720,16 @@ def _pdf_sectioned_word_source_rows(
                 description_parts = []
                 continue
 
-            if not has_transaction_shape and _pdf_line_has_marker(
-                folded, settings.get("section_end_markers", [])
+            if _pdf_exact_section_end_heading(
+                _PdfBalanceLine(
+                    text, x0=min(float(word.get("x0", 0)) for word in line)
+                ),
+                settings,
+            ) or (
+                not has_transaction_shape
+                and _pdf_line_has_marker(
+                    folded, settings.get("section_end_markers", [])
+                )
             ):
                 current_account = None
                 current_currency = ""

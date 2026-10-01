@@ -55,6 +55,7 @@ class ParserSettings(TypedDict, total=False):
     balance_mappings: list[dict[str, str]]
     sectioned_word_rows: dict[str, object]
     statement_date: StatementDateSettings
+    mox_statement: str
 
 
 class Profile(TypedDict, total=False):

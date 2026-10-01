@@ -14,18 +14,29 @@ Choose one bundled profile:
 
 | Profile ID | Input |
 | --- | --- |
+| `hang_seng_bank_pdf` | Hang Seng ATM Savings PDF |
+| `hang_seng_credit_card_pdf` | Hang Seng enJoy credit card PDF |
 | `hsbc_one_pdf` | HSBC One PDF |
 | `hsbc_hk_credit_card_pdf` | HSBC HK credit card PDF |
 | `mox_bank_pdf` | Mox bank PDF |
 | `mox_credit_card_pdf` | Mox credit card PDF |
 | `mox_credit_card` | Mox credit card CSV |
 
+The Hang Seng profiles support the tested layouts described in the
+[golden dataset guide](golden-datasets.md).
+
 The command does not select a profile or load a local profile for you. It
 rejects a profile that does not support the input type. A profile describes a
 known statement layout. Selecting it does not prove that the file matches.
 Some bundled profiles use a fixed statement year when dates omit their year.
-The result warns when a profile has this fixed-year assumption. Check all dates
-against the original statement.
+The result warns when a profile has this fixed-year assumption. The Mox PDF
+profiles resolve yearless transaction dates from the printed statement period,
+including periods that cross a year boundary. Check all dates against the
+original statement.
+
+The HSBC One profile stops transaction and balance scanning at Deposit Plus,
+Total Relationship Balance, and Important Notice headings. Amounts in those
+sections do not become savings transactions or replace the final running balance.
 
 The HSBC One profile reads the statement date from the PDF text when present.
 If that date is absent, it can read an `eStatementFile_YYYYMMDD` date from the
@@ -85,6 +96,37 @@ Balance results distinguish `matched`, `mismatched`, and missing or conflicting
 evidence. An unavailable check does not count as a match. The calculation uses
 complete parsed rows and the parser's account and currency sections. It does
 not run whole-workspace transfer reconciliation.
+
+The Mox bank profile reports each active currency account and Time Deposit as
+a separate account section. It replaces each printed Time Deposit reference
+with a stable digest, so the raw reference does not appear in the output. This
+digest is a pseudonym, not a secret: a low-entropy reference can be found by
+enumeration. Protect these account IDs and the JSON as financial data. The
+current row-based contract cannot report a separate balance check for a dormant
+Time Deposit that has opening and closing balances but no nonzero activity. The
+parser does not make up a zero-value row for that section.
+
+Custom Mox bank `skip_descriptions` rules remove activity rows but keep printed
+section balances on the first and last surviving rows. If no row survives in a
+section, the parser does not add a row to carry its balances. The Mox credit parser
+rejects distinct printed closing balances, even when no activity survives.
+Repeated summaries with the same numeric balance remain valid.
+
+A custom PDF profile with `mox_statement: "bank"` must use the same complete
+column map as the bundled profile:
+
+```text
+transaction_date=transaction_date  posting_date=posting_date
+description=description             amount=original_amount
+posted_amount=amount                account_id=account_id
+account=account                     statement_section=statement_section
+original_currency=original_currency posted_currency=currency
+statement_opening_balance=statement_opening_balance
+statement_closing_balance=statement_closing_balance
+```
+
+The parser rejects missing, changed, or extra mappings because this adapter
+owns the source-row shape.
 
 A successful parse proposes rows but does not claim that each row is complete
 or correct. A matched balance alone cannot prove completeness. Keep page and
